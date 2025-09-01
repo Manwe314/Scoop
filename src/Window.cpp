@@ -1,0 +1,29 @@
+#include "Window.hpp"
+
+Window::Window(int w, int h, std::string name) : width(w), height(h), name(name)
+{
+    initWindow();
+}
+
+Window::~Window()
+{
+    glfwDestroyWindow(display);
+    glfwTerminate();
+}
+
+
+void Window::initWindow()
+{
+    glfwInit();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    display = glfwCreateWindow(width, height, name.c_str(), nullptr, nullptr);
+}
+
+void  Window::createWindowSurface(VkInstance instance, VkSurfaceKHR *surface)
+{
+    if(glfwCreateWindowSurface(instance, display, nullptr, surface) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create window surface");
+
+}
