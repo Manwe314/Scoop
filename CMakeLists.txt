@@ -20,6 +20,15 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
+# --- GLM (header-only, no sudo) ---
+FetchContent_Declare(
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG 1.0.1
+)
+set(GLM_TEST_ENABLE OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glm)
+
 # Shader compile using SDK's glslc
 if(NOT DEFINED ENV{VULKAN_SDK})
   message(FATAL_ERROR "VULKAN_SDK environment not set. Source the SDK first.")
@@ -81,7 +90,7 @@ target_include_directories(scoop
 )
 
 # Link as before
-target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw)
+target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm)
 
 
 # On some distros you may need to link X11 stuff explicitly; GLFW usually handles this.

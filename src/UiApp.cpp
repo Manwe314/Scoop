@@ -24,6 +24,7 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"),\
                  device(window),
                  swapChain(device, window.getExtent())
 {
+    loadModels();
     createPipelineLayout();
     createPipeline();
     createCommandBuffers();
@@ -96,7 +97,8 @@ void UiApp::createCommandBuffers()
         vkCmdBeginRenderPass(commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         pipeline->bind(commandBuffers[i]);
-        vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+        model->bind(commandBuffers[i]);
+        model->draw(commandBuffers[i]);
 
         vkCmdEndRenderPass(commandBuffers[i]);
         if (vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS)
@@ -115,6 +117,16 @@ void UiApp::drawFrame()
     result = swapChain.submitCommandBuffers(&commandBuffers[imageIndex], &imageIndex);
     if (result != VK_SUCCESS)
         throw std::runtime_error("Failed to present swap chain image");
+}
+
+void UiApp::loadModels()
+{
+    std::vector<Model::Vertex> vertices {
+        {{0.0f, -0.5f}},
+        {{0.5f, 0.5f}},
+        {{-0.5f, 0.5f}}
+    };
+    model = std::make_unique<Model>(device, vertices);
 }
 
 UiApp::~UiApp()
