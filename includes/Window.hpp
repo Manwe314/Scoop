@@ -9,19 +9,24 @@
 class Window
 {
 private:
-    const int width;
-    const int height;
+    int width;
+    int height;
     const std::string name;
+    bool frameBufferResized = false;
 
     void initWindow();
     GLFWwindow *display;
+    static void  frameBufferResizeCallback(GLFWwindow *window, int width, int height);
 public:
     Window(int w, int h, std::string name);
     ~Window();
     Window(const Window&) = delete;
-    void operator=(const Window&) = delete;
-    bool shouldClose() {return glfwWindowShouldClose(display); };
+    Window& operator=(const Window&) = delete;
+    bool shouldClose() {return glfwWindowShouldClose(display); }
     void createWindowSurface(VkInstance instance, VkSurfaceKHR *surface);
-    VkExtent2D getExtent() { return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};};
+    VkExtent2D getExtent() { return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};}
+    bool wasWindowResized() {return frameBufferResized;}
+    void resetWindowResizedFlag() {frameBufferResized = false;}
+
 };
 

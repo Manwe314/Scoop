@@ -15,6 +15,7 @@ class Model
     struct Vertex
     {
         glm::vec2 position;
+        glm::vec3 color;
         static std::vector<VkVertexInputBindingDescription> getBindDescriptions();
         static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions();
     };
@@ -25,7 +26,7 @@ class Model
     
     
     Model(const Model&) = delete;
-    void operator=(const Model&) = delete;
+    Model& operator=(const Model&) = delete;
     
     
     void bind(VkCommandBuffer commandBuffer);

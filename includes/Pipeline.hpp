@@ -6,16 +6,22 @@
 
 typedef struct s_Pipeline
 {
-    VkRect2D scissor;
-    VkViewport viewport;
+    s_Pipeline& operator=(const s_Pipeline&) = delete;
+
+    
     VkRenderPass renderPass = nullptr;
     VkPipelineLayout pipelineLayout = nullptr;
+
+    VkPipelineViewportStateCreateInfo viewportInfo;
     VkPipelineColorBlendStateCreateInfo colorBlendInfo;
     VkPipelineMultisampleStateCreateInfo multisampleInfo;
     VkPipelineDepthStencilStateCreateInfo depthStencilInfo;
     VkPipelineRasterizationStateCreateInfo rasterizationInfo;
-    VkPipelineColorBlendAttachmentState colorBlendAttachment;
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo;
+    VkPipelineColorBlendAttachmentState colorBlendAttachment;
+    VkPipelineDynamicStateCreateInfo dynamicStateInfo;
+
+    std::vector<VkDynamicState> dynamicStateEnables;
     uint32_t subpass = 0;
     
 } PipelineConfigInfo ;
@@ -36,10 +42,10 @@ public:
     ~Pipeline();
 
     Pipeline(const Pipeline&) = delete;
-    void operator=(const Pipeline&) = delete;
+    Pipeline& operator=(const Pipeline&) = delete;
 
     void bind(VkCommandBuffer commandBuffer);
 
-    static PipelineConfigInfo defaultPipelineConfigIngo(uint32_t width, uint32_t height);
+    static void defaultPipelineConfigIngo(PipelineConfigInfo& configInfo);
 };
 

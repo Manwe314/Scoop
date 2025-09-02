@@ -26,11 +26,14 @@ class UiApp
         void createPipelineLayout();
         void createPipeline();
         void createCommandBuffers();
+        void freeCommandBuffers();
         void drawFrame();
+        void recreateSwapchain();
+        void recordCommandBuffer(int imageIndex);
 
         Window window;
         Device device;
-        SwapChain swapChain;
+        std::unique_ptr<SwapChain> swapChain;
         std::unique_ptr<Pipeline> pipeline;
         VkPipelineLayout pipelineLayout;
         std::vector<VkCommandBuffer> commandBuffers;
