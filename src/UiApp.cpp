@@ -26,6 +26,7 @@
 
 
 struct SimplePushConstantData {
+    glm::mat2 transform{1.f};
     glm::vec2 offset;
     alignas(16) glm::vec3 color;
 };
@@ -127,11 +128,12 @@ void UiApp::recordCommandBuffer(int imageIndex)
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
+    vkResetCommandBuffer(commandBuffers[imageIndex], 0);
     if (vkBeginCommandBuffer(commandBuffers[imageIndex], &beginInfo) != VK_SUCCESS)
         throw std::runtime_error("Failed to begin recording command buffer!");
 
     VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = swapChain->getRenderPass();
     renderPassInfo.framebuffer = swapChain->getFrameBuffer(imageIndex);
     renderPassInfo.renderArea.offset = {0, 0};
@@ -139,7 +141,7 @@ void UiApp::recordCommandBuffer(int imageIndex)
 
     std::array<VkClearValue, 2> clearValues{};
 
-    clearValues[0].color = {0.12f, 0.12f, 0.12f, 1.0f};
+    clearValues[0].color = {0.05f, 0.05f, 0.05f, 1.0f};
     clearValues[1].depthStencil = {1.0f, 0};
 
     renderPassInfo.clearValueCount =  static_cast<uint32_t>(clearValues.size());
@@ -153,7 +155,7 @@ void UiApp::recordCommandBuffer(int imageIndex)
     viewport.width = static_cast<float>(swapChain->getSwapChainExtent().width);
     viewport.height = static_cast<float>(swapChain->getSwapChainExtent().height);
     viewport.minDepth = 0.0f;
-    viewport.maxDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
     VkRect2D scissor {{0 , 0}, swapChain->getSwapChainExtent()};
     vkCmdSetViewport(commandBuffers[imageIndex], 0, 1, &viewport);
     vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &scissor);
