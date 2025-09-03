@@ -28,5 +28,8 @@ public:
     bool wasWindowResized() {return frameBufferResized;}
     void resetWindowResizedFlag() {frameBufferResized = false;}
 
+    int getWidth() { return width; }
+    int getHeight() { return height; }
+
 };
 

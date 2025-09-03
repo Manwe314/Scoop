@@ -39,11 +39,11 @@ class UiApp
         std::vector<VkCommandBuffer> commandBuffers;
         std::unique_ptr<Model> model;
 
-        // uint64_t clayMemSize = 0;
-        // void*    clayMem     = nullptr;
-        // Clay_Arena clayArena{};
+        uint64_t clayMemSize = 0;
+        void*    clayMem     = nullptr;
+        Clay_Arena clayArena{};
 
-        // void buildUi(float dt, int screenW, int screenH);
+        void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);
 };
 

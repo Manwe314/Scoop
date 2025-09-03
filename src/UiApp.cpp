@@ -13,16 +13,17 @@
 
 #define CLAY_IMPLEMENTATION
 #include "clay.h"
+#include "clay_printer.h"
 
 # include "UiApp.hpp"
 
-// static inline void ClayHandleErrors(Clay_ErrorData e) {
-//     fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
-// }
+static inline void ClayHandleErrors(Clay_ErrorData e) {
+    fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
+}
 
-// static inline Clay_Dimensions MeasureTextMono(Clay_StringSlice text, Clay_TextElementConfig* cfg, void* user) {
-//     return { (float)text.length * cfg->fontSize, (float)cfg->fontSize };
-// }
+static inline Clay_Dimensions MeasureTextMono(Clay_StringSlice text, Clay_TextElementConfig* cfg, void* user) {
+    return { (float)text.length * cfg->fontSize, (float)cfg->fontSize };
+}
 
 
 struct SimplePushConstantData {
@@ -37,14 +38,14 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
     createPipelineLayout();
     recreateSwapchain();
     createCommandBuffers();
-    // clayMemSize = Clay_MinMemorySize();
-    // clayMem = std::malloc(clayMemSize);
-    // if (!clayMem) throw std::runtime_error("Failed to alloc Clay memory");
-    // clayArena   = Clay_CreateArenaWithCapacityAndMemory(clayMemSize, clayMem);
+    clayMemSize = Clay_MinMemorySize();
+    clayMem = std::malloc(clayMemSize);
+    if (!clayMem) throw std::runtime_error("Failed to alloc Clay memory");
+    clayArena   = Clay_CreateArenaWithCapacityAndMemory(clayMemSize, clayMem);
 
-    // int w = WIDTH, h = HEIGHT;
-    // Clay_Initialize(clayArena, { (float)w, (float)h }, { ClayHandleErrors });
-    // Clay_SetMeasureTextFunction(MeasureTextMono, 0);
+    int w = WIDTH, h = HEIGHT;
+    Clay_Initialize(clayArena, { (float)w, (float)h }, { ClayHandleErrors });
+    Clay_SetMeasureTextFunction(MeasureTextMono, 0);
 }
 
 void UiApp::createPipelineLayout()
@@ -75,6 +76,7 @@ void UiApp::createPipeline()
     Pipeline::defaultPipelineConfigIngo(pipelineConfig);
     pipelineConfig.renderPass = swapChain->getRenderPass();
     pipelineConfig.pipelineLayout = pipelineLayout;
+    pipelineConfig.inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
     pipeline = std::make_unique<Pipeline>(device,  pipelineConfig, "build/shaders/rect.vert.spv", "build/shaders/rect.frag.spv");
 
 }
@@ -218,15 +220,25 @@ void UiApp::loadModels()
 UiApp::~UiApp()
 {
     vkDestroyPipelineLayout(device.device(), pipelineLayout, nullptr);
-    // std::free(clayMem);
+    std::free(clayMem);
 }
 
-// void UiApp::buildUi(float dt, int screenW, int screenH) 
-// {
+void UiApp::buildUi() 
+{
+    
+    Clay_SetLayoutDimensions((Clay_Dimensions) {static_cast<float>(window.getWidth()), static_cast<float>(window.getHeight())});
 
-// }
+    Clay_BeginLayout();
+
+    CLAY({ .id = CLAY_ID("background"), .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}, .backgroundColor = {200, 30, 200, 255} }) {}
+
+    Clay_RenderCommandArray renderCommands = Clay_EndLayout();
+
+    PrintRenderCommandArray(renderCommands);
+}
 
 void UiApp::run() {
+    buildUi();
     while (!window.shouldClose()) 
     {
         glfwPollEvents();
