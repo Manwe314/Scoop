@@ -1,9 +1,11 @@
 #include "Pipeline.hpp"
 #include "Device.hpp"
-#include "Model.hpp"
+#include "UiRenderer.hpp"
 #include<fstream>
 #include<stdexcept>
 #include <cassert>
+#include <array>
+#include <iostream>
 
 Pipeline::Pipeline(Device& device, const PipelineConfigInfo& config, const std::string& vertFilepath, const std::string& fragFilepath) : device(device)
 {
@@ -59,8 +61,19 @@ void Pipeline::createGraphicsPipeline(const PipelineConfigInfo& config, const st
     shaderStages[1].pNext = nullptr;
     shaderStages[1].pSpecializationInfo = nullptr;
 
-    auto bindingDescriptions = Model::Vertex::getBindDescriptions();
-    auto attributeDescriptions = Model::Vertex::getAttributeDescriptions();
+    auto bindingDescriptionQuad = UiRenderer::QuadVertex::getBindDescriptions();
+    auto bindingDescriptionRect = UiRenderer::RectangleInstance::getBindDescriptions();
+    auto attributeDescriptionQuad = UiRenderer::QuadVertex::getAttributeDescriptions();
+    auto attributeDescriptionRect = UiRenderer::RectangleInstance::getAttributeDescriptions();
+
+    std::array<VkVertexInputBindingDescription, 2> bindingDescriptions{bindingDescriptionQuad[0], bindingDescriptionRect[0]};
+
+    std::vector<VkVertexInputAttributeDescription> attributeDescriptions;
+    attributeDescriptions.reserve(attributeDescriptionQuad.size() + attributeDescriptionRect.size());
+    attributeDescriptions.insert(attributeDescriptions.end(), attributeDescriptionQuad.begin(), attributeDescriptionQuad.end());
+    attributeDescriptions.insert(attributeDescriptions.end(), attributeDescriptionRect.begin(), attributeDescriptionRect.end());
+
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());

@@ -5,7 +5,7 @@
 #include "clay.h"
 #include "Device.hpp"
 #include "SwapChain.hpp"
-#include "Model.hpp"
+#include "UiRenderer.hpp"
 
 #include <memory>
 #include <vector>
@@ -22,7 +22,7 @@ class UiApp
         UiApp(const UiApp&) = delete;
         void operator=(const UiApp&) = delete;
     private:
-        void loadModels();
+        void loadUi();
         void createPipelineLayout();
         void createPipeline();
         void createCommandBuffers();
@@ -37,7 +37,8 @@ class UiApp
         std::unique_ptr<Pipeline> pipeline;
         VkPipelineLayout pipelineLayout;
         std::vector<VkCommandBuffer> commandBuffers;
-        std::unique_ptr<Model> model;
+        std::unique_ptr<UiRenderer> ui;
+        std::vector<UiRenderer::RectangleInstance> rects;
 
         uint64_t clayMemSize = 0;
         void*    clayMem     = nullptr;

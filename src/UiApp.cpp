@@ -4,6 +4,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 
 #include <cstdlib>
@@ -15,7 +16,7 @@
 #include "clay.h"
 #include "clay_printer.h"
 
-# include "UiApp.hpp"
+#include "UiApp.hpp"
 
 static inline void ClayHandleErrors(Clay_ErrorData e) {
     fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
@@ -27,14 +28,18 @@ static inline Clay_Dimensions MeasureTextMono(Clay_StringSlice text, Clay_TextEl
 
 
 struct SimplePushConstantData {
-    glm::mat2 transform{1.f};
-    glm::vec2 offset;
-    alignas(16) glm::vec3 color;
+    glm::mat4 uProj;
+};
+
+struct RectangleItem {
+    UiRenderer::RectangleInstance instance;
+    int zIndex;
+    uint32_t seq;
 };
 
 UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
 {
-    loadModels();
+    loadUi();
     createPipelineLayout();
     recreateSwapchain();
     createCommandBuffers();
@@ -52,7 +57,7 @@ void UiApp::createPipelineLayout()
 {
 
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(SimplePushConstantData);
 
@@ -76,7 +81,17 @@ void UiApp::createPipeline()
     Pipeline::defaultPipelineConfigIngo(pipelineConfig);
     pipelineConfig.renderPass = swapChain->getRenderPass();
     pipelineConfig.pipelineLayout = pipelineLayout;
+    //change default settings to accomidate clay rendering
     pipelineConfig.inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    pipelineConfig.depthStencilInfo.depthTestEnable = VK_FALSE;
+    pipelineConfig.depthStencilInfo.depthWriteEnable = VK_FALSE;
+    pipelineConfig.colorBlendAttachment.blendEnable = VK_TRUE;
+    pipelineConfig.colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    pipelineConfig.colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    pipelineConfig.colorBlendAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+    pipelineConfig.colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    pipelineConfig.colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    pipelineConfig.colorBlendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
     pipeline = std::make_unique<Pipeline>(device,  pipelineConfig, "build/shaders/rect.vert.spv", "build/shaders/rect.frag.spv");
 
 }
@@ -125,8 +140,7 @@ void UiApp::freeCommandBuffers()
 
 void UiApp::recordCommandBuffer(int imageIndex)
 {
-    static int frame = 0;
-    frame = (frame + 1) % 1000;
+    buildUi();
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -163,18 +177,19 @@ void UiApp::recordCommandBuffer(int imageIndex)
     vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &scissor);
 
     pipeline->bind(commandBuffers[imageIndex]);
-    model->bind(commandBuffers[imageIndex]);
+    // std::printf("rects this frame: %zu\n", rects.size());
+    ui->updateInstances(rects);
+    ui->bind(commandBuffers[imageIndex]);
 
-    for (int j = 0; j < 4; j++)
-    {
-        SimplePushConstantData push{};
-        push.offset = {-0.5f + frame * 0.002f , -0.4f + j * 0.25f};
-        push.color = {0.0f, 0.0f, 0.2f + 0.2f *j};
+    SimplePushConstantData push_constant{};
+    push_constant.uProj = glm::ortho(
+        0.0f, (float)swapChain->getSwapChainExtent().width,
+        (float)swapChain->getSwapChainExtent().height, 0.0f
+    );
 
-        vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SimplePushConstantData), &push);
-        model->draw(commandBuffers[imageIndex]);
-    }
+    vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
     
+    ui->draw(commandBuffers[imageIndex]);
 
     vkCmdEndRenderPass(commandBuffers[imageIndex]);
     if (vkEndCommandBuffer(commandBuffers[imageIndex]) != VK_SUCCESS)
@@ -207,14 +222,9 @@ void UiApp::drawFrame()
         throw std::runtime_error("Failed to present swap chain image");
 }
 
-void UiApp::loadModels()
+void UiApp::loadUi()
 {
-    std::vector<Model::Vertex> vertices {
-        {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-        {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-        {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
-    };
-    model = std::make_unique<Model>(device, vertices);
+    ui = std::make_unique<UiRenderer>(device, 1000);
 }
 
 UiApp::~UiApp()
@@ -230,15 +240,56 @@ void UiApp::buildUi()
 
     Clay_BeginLayout();
 
-    CLAY({ .id = CLAY_ID("background"), .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}, .backgroundColor = {200, 30, 200, 255} }) {}
+    CLAY({ .id = CLAY_ID("background"), .layout = { .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .padding = {.left = 30, .right = 30, .top = 30, .bottom = 30}, .childGap = 16, .layoutDirection = CLAY_TOP_TO_BOTTOM }, .backgroundColor = {200, 30, 200, 255} }) {
+        CLAY({})
+        for (int i = 0; i < 8; i++)
+        {
+            CLAY({.id = CLAY_IDI("Item", i), .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_PERCENT(0.15)}}, .backgroundColor = {(float)(10 + 20 * i), (float)(10 + 40 * i), (float)(100 + 30 * i),255} , .cornerRadius = { 30, 30, 30, 30 }}) {}
+        }
+    }
 
     Clay_RenderCommandArray renderCommands = Clay_EndLayout();
 
-    PrintRenderCommandArray(renderCommands);
+    // PrintRenderCommandArray(renderCommands);
+
+    std::vector<RectangleItem> items;
+    items.reserve(renderCommands.length);
+    for (uint32_t i = 0; i < renderCommands.length; ++i) {
+        const Clay_RenderCommand& rc = renderCommands.internalArray[i];
+        if (rc.commandType != CLAY_RENDER_COMMAND_TYPE_RECTANGLE) continue;
+
+        RectangleItem it{};
+        const auto& bb = rc.boundingBox;
+        const auto& rd = rc.renderData.rectangle;
+
+        it.instance.position = { (float)bb.x, (float)bb.y };
+        it.instance.size     = { (float)bb.width, (float)bb.height };
+
+        auto N = [](float u8){ return u8 / 255.0f; };
+        it.instance.color  = { N(rd.backgroundColor.r), N(rd.backgroundColor.g),
+                           N(rd.backgroundColor.b), N(rd.backgroundColor.a) };
+
+        it.instance.radius = { rd.cornerRadius.topLeft,  rd.cornerRadius.topRight,
+                           rd.cornerRadius.bottomRight, rd.cornerRadius.bottomLeft };
+
+        it.zIndex = rc.zIndex;
+        it.seq = i;
+        items.push_back(it);
+    }
+
+    // Painter’s algorithm: lowest z first (drawn first), tie breaks by command order
+    std::stable_sort(items.begin(), items.end(),
+        [](const RectangleItem& a, const RectangleItem& b){
+            if (a.zIndex != b.zIndex) return a.zIndex < b.zIndex;
+            return a.seq < b.seq;
+        });
+
+    rects.resize(items.size());
+    for (size_t i = 0; i < items.size(); ++i) rects[i] = items[i].instance;
 }
 
 void UiApp::run() {
-    buildUi();
+    
     while (!window.shouldClose()) 
     {
         glfwPollEvents();
