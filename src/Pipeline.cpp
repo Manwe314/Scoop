@@ -12,6 +12,53 @@ Pipeline::Pipeline(Device& device, const PipelineConfigInfo& config, const std::
     createGraphicsPipeline(config, vertFilepath, fragFilepath);
 }
 
+Pipeline::Pipeline(Device& device,
+           const PipelineConfigInfo& config,
+           const std::vector<VkVertexInputBindingDescription>& bindings,
+           const std::vector<VkVertexInputAttributeDescription>& attributes,
+           const std::string& vertFilepath,
+           const std::string& fragFilepath) : device(device)
+{
+    auto vertCode = readFile(vertFilepath);
+    auto fragCode = readFile(fragFilepath);
+    createShaderModule(vertCode, &vertShaderModule);
+    createShaderModule(fragCode, &fragShaderModule);
+
+    VkPipelineShaderStageCreateInfo shaderStages[2]{};
+    shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shaderStages[0].module = vertShaderModule;
+    shaderStages[0].pName = "main";
+    shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shaderStages[1].module = fragShaderModule;
+    shaderStages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount   = (uint32_t)bindings.size();
+    vi.pVertexBindingDescriptions      = bindings.data();
+    vi.vertexAttributeDescriptionCount = (uint32_t)attributes.size();
+    vi.pVertexAttributeDescriptions    = attributes.data();
+
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = 2;
+    info.pStages = shaderStages;
+    info.pVertexInputState   = &vi;
+    info.pInputAssemblyState = &config.inputAssemblyInfo;
+    info.pViewportState      = &config.viewportInfo;
+    info.pRasterizationState = &config.rasterizationInfo;
+    info.pMultisampleState   = &config.multisampleInfo;
+    info.pColorBlendState    = &config.colorBlendInfo;
+    info.pDepthStencilState  = &config.depthStencilInfo;
+    info.pDynamicState       = &config.dynamicStateInfo;
+    info.layout              = config.pipelineLayout;
+    info.renderPass          = config.renderPass;
+    info.subpass             = config.subpass;
+
+    if (vkCreateGraphicsPipelines(device.device(), VK_NULL_HANDLE, 1, &info, nullptr, &graphicsPipeline) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create Graphics pipeline");
+}
+
 Pipeline::~Pipeline()
 {
     vkDestroyShaderModule(device.device(), vertShaderModule, nullptr);

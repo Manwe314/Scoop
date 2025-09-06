@@ -26,6 +26,22 @@ static inline Clay_Dimensions MeasureTextMono(Clay_StringSlice text, Clay_TextEl
     return { (float)text.length * cfg->fontSize, (float)cfg->fontSize };
 }
 
+// helper (accurate sRGB -> linear)
+static inline float srgbToLinear(float c) {
+    if (c <= 0.04045f) return c / 12.92f;
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+static inline glm::vec4 srgbToLinear(glm::vec4 c) {
+    return { srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b), c.a };
+}
+
+inline Clay_String ClayFrom(const std::string& s) {
+    Clay_String out;
+    out.length = static_cast<int32_t>(s.size());
+    out.chars  = const_cast<char*>(s.data());   // Clay never mutates; safe
+    return out;
+}
 
 struct SimplePushConstantData {
     glm::mat4 uProj;
@@ -41,6 +57,7 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
 {
     loadUi();
     createPipelineLayout();
+    createTextPipelineLayout();
     recreateSwapchain();
     createCommandBuffers();
     clayMemSize = Clay_MinMemorySize();
@@ -72,6 +89,24 @@ void UiApp::createPipelineLayout()
         throw std::runtime_error("failed to create pipeline layout");
 }
 
+void UiApp::createTextPipelineLayout() {
+    VkDescriptorSetLayout set0 = text->getDescriptorSetLayout();
+
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    range.offset = 0;
+    range.size   = sizeof(SimplePushConstantData); // mat4 uProj
+
+    VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    info.setLayoutCount = 1;
+    info.pSetLayouts    = &set0;
+    info.pushConstantRangeCount = 1;
+    info.pPushConstantRanges    = &range;
+
+    if (vkCreatePipelineLayout(device.device(), &info, nullptr, &textPipelineLayout) != VK_SUCCESS)
+        throw std::runtime_error("failed to create text pipeline layout");
+}
+
 void UiApp::createPipeline()
 {
     assert(swapChain != nullptr && "Cannot create pipeline before the swap chain");
@@ -96,6 +131,50 @@ void UiApp::createPipeline()
 
 }
 
+void UiApp::createTextPipeline() {
+    assert(swapChain && textPipelineLayout);
+
+    PipelineConfigInfo cfg{};
+    Pipeline::defaultPipelineConfigIngo(cfg);
+    cfg.renderPass     = swapChain->getRenderPass();
+    cfg.pipelineLayout = textPipelineLayout;
+
+    // Same tweaks as rects
+    cfg.inputAssemblyInfo.topology       = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    cfg.depthStencilInfo.depthTestEnable = VK_FALSE;
+    cfg.depthStencilInfo.depthWriteEnable= VK_FALSE;
+
+    // Premultiplied blending
+    cfg.colorBlendAttachment.blendEnable           = VK_TRUE;
+    cfg.colorBlendAttachment.srcColorBlendFactor   = VK_BLEND_FACTOR_ONE;
+    cfg.colorBlendAttachment.dstColorBlendFactor   = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cfg.colorBlendAttachment.colorBlendOp          = VK_BLEND_OP_ADD;
+    cfg.colorBlendAttachment.srcAlphaBlendFactor   = VK_BLEND_FACTOR_ONE;
+    cfg.colorBlendAttachment.dstAlphaBlendFactor   = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cfg.colorBlendAttachment.alphaBlendOp          = VK_BLEND_OP_ADD;
+
+    // Vertex input: binding 0 (quad), binding 1 (glyphs)
+    auto b0 = UiRenderer::QuadVertex::getBindDescriptions();
+    auto a0 = UiRenderer::QuadVertex::getAttributeDescriptions();
+    auto b1 = TextRenderer::GlyphInstance::getBindDescriptions();
+    auto a1 = TextRenderer::GlyphInstance::getAttributeDescriptions();
+
+    std::vector<VkVertexInputBindingDescription> bindings;
+    bindings.push_back(b0[0]);
+    bindings.push_back(b1[0]);
+
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    attrs.insert(attrs.end(), a0.begin(), a0.end());
+    attrs.insert(attrs.end(), a1.begin(), a1.end());
+
+
+    textPipeline = std::make_unique<Pipeline>(
+        device, cfg, bindings, attrs,
+        "build/shaders/text.vert.spv",
+        "build/shaders/text.frag.spv"
+    );
+}
+
 void UiApp::recreateSwapchain()
 {
     auto extent = window.getExtent();
@@ -116,6 +195,7 @@ void UiApp::recreateSwapchain()
         }
     }
     createPipeline();
+    createTextPipeline();
 }
 
 void UiApp::createCommandBuffers()
@@ -177,19 +257,32 @@ void UiApp::recordCommandBuffer(int imageIndex)
     vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &scissor);
 
     pipeline->bind(commandBuffers[imageIndex]);
-    // std::printf("rects this frame: %zu\n", rects.size());
     ui->updateInstances(rects);
     ui->bind(commandBuffers[imageIndex]);
 
     SimplePushConstantData push_constant{};
     push_constant.uProj = glm::ortho(
         0.0f, (float)swapChain->getSwapChainExtent().width,
-        (float)swapChain->getSwapChainExtent().height, 0.0f
+        0.0f, (float)swapChain->getSwapChainExtent().height
     );
 
     vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
     
     ui->draw(commandBuffers[imageIndex]);
+
+    if (!textBatches.empty()) {
+        textPipeline->bind(commandBuffers[imageIndex]);
+
+        vkCmdPushConstants(commandBuffers[imageIndex], textPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
+
+        for (auto& [px, batch] : textBatches) {
+            if (batch.empty()) continue;
+
+            text->updateInstances(batch);
+            text->bind(commandBuffers[imageIndex], textPipelineLayout, px);
+            text->draw(commandBuffers[imageIndex]);
+        }
+    }
 
     vkCmdEndRenderPass(commandBuffers[imageIndex]);
     if (vkEndCommandBuffer(commandBuffers[imageIndex]) != VK_SUCCESS)
@@ -224,12 +317,15 @@ void UiApp::drawFrame()
 
 void UiApp::loadUi()
 {
+    text = std::make_unique<TextRenderer>(device, device.getCommandPool(), device.graphicsQueue(), "assets/fonts/FacultyGlyphic-Regular.ttf");
+    text->initGeometry(8000);
     ui = std::make_unique<UiRenderer>(device, 1000);
 }
 
 UiApp::~UiApp()
 {
     vkDestroyPipelineLayout(device.device(), pipelineLayout, nullptr);
+    vkDestroyPipelineLayout(device.device(), textPipelineLayout, nullptr);
     std::free(clayMem);
 }
 
@@ -240,17 +336,67 @@ void UiApp::buildUi()
 
     Clay_BeginLayout();
 
-    CLAY({ .id = CLAY_ID("background"), .layout = { .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .padding = {.left = 30, .right = 30, .top = 30, .bottom = 30}, .childGap = 16, .layoutDirection = CLAY_TOP_TO_BOTTOM }, .backgroundColor = {200, 30, 200, 255} }) {
-        CLAY({})
-        for (int i = 0; i < 8; i++)
-        {
-            CLAY({.id = CLAY_IDI("Item", i), .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_PERCENT(0.15)}}, .backgroundColor = {(float)(10 + 20 * i), (float)(10 + 40 * i), (float)(100 + 30 * i),255} , .cornerRadius = { 30, 30, 30, 30 }}) {}
+    CLAY({ .id = CLAY_ID("background"), 
+            .layout = { 
+                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, 
+                .padding = {.left = 30, .right = 30, .top = 30, .bottom = 30}, 
+                .childGap = 16, 
+                .layoutDirection = CLAY_TOP_TO_BOTTOM 
+            },
+            .backgroundColor = {71, 50, 128, 255}
+        }) {
+        CLAY({ .id = CLAY_ID("head sign"),
+                .layout = { 
+                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT()}, 
+                    .padding = CLAY_PADDING_ALL(16),
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM
+                }, 
+                .backgroundColor = {51, 30, 108, 170}, 
+                .cornerRadius = CLAY_CORNER_RADIUS(20)
+                }){
+            CLAY_TEXT(CLAY_STRING("Welcome To Scoop"), 
+                CLAY_TEXT_CONFIG({ 
+                    .textColor = {255, 243, 232, 255}, 
+                    .fontSize = 100, 
+                    .letterSpacing = 1, 
+                    .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                    .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                }));
+        }
+        CLAY({ .id = CLAY_ID("selected device"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(16),
+                    .childGap = 16,
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT
+                },
+                .backgroundColor = {51, 30, 108, 170}, 
+                .cornerRadius = CLAY_CORNER_RADIUS(20)
+        }){
+            // CLAY_TEXT(CLAY_STRING("Selected Device: "), 
+            // CLAY_TEXT_CONFIG({
+            //     .textColor = {255, 243, 232, 255}, 
+            //     .fontSize = 64, 
+            //     .letterSpacing = 1, 
+            //     .wrapMode = CLAY_TEXT_WRAP_NONE, 
+            //     .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            // }));
+            // CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
+            // CLAY_TEXT(ClayFrom(device.getName()), 
+            // CLAY_TEXT_CONFIG({
+            //     .textColor = {255, 243, 232, 255}, 
+            //     .fontSize = 64, 
+            //     .letterSpacing = 1, 
+            //     .wrapMode = CLAY_TEXT_WRAP_NONE, 
+            //     .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            // }));
         }
     }
 
     Clay_RenderCommandArray renderCommands = Clay_EndLayout();
 
-    // PrintRenderCommandArray(renderCommands);
+    PrintRenderCommandArray(renderCommands);
 
     std::vector<RectangleItem> items;
     items.reserve(renderCommands.length);
@@ -265,9 +411,10 @@ void UiApp::buildUi()
         it.instance.position = { (float)bb.x, (float)bb.y };
         it.instance.size     = { (float)bb.width, (float)bb.height };
 
-        auto N = [](float u8){ return u8 / 255.0f; };
-        it.instance.color  = { N(rd.backgroundColor.r), N(rd.backgroundColor.g),
-                           N(rd.backgroundColor.b), N(rd.backgroundColor.a) };
+        auto C = [](uint8_t u8){ return u8 / 255.0f; };            // raw sRGB
+        glm::vec4 srgb = { C(rd.backgroundColor.r), C(rd.backgroundColor.g),
+                           C(rd.backgroundColor.b), C(rd.backgroundColor.a) };
+        it.instance.color = srgbToLinear(srgb); 
 
         it.instance.radius = { rd.cornerRadius.topLeft,  rd.cornerRadius.topRight,
                            rd.cornerRadius.bottomRight, rd.cornerRadius.bottomLeft };
@@ -286,6 +433,46 @@ void UiApp::buildUi()
 
     rects.resize(items.size());
     for (size_t i = 0; i < items.size(); ++i) rects[i] = items[i].instance;
+
+    textBatches.clear();
+
+    for (uint32_t i = 0; i < renderCommands.length; ++i) {
+        const Clay_RenderCommand& rc = renderCommands.internalArray[i];
+        if (rc.commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+
+        const auto& bb = rc.boundingBox;
+        const auto& td = rc.renderData.text;
+
+        // Pick the nearest baked size (16,24,32,64,128)
+        int requestedPx = (int)td.fontSize;         // Clay's size is in pixels
+        int bucketPx    = text->getBucketPx(requestedPx);
+
+        // Convert Clay string -> std::string_view
+        // Clay exposes length + chars; the exact field is 'td.text' with .chars/.length
+        std::string_view txt{
+            td.stringContents.chars,
+            static_cast<std::size_t>(td.stringContents.length)
+        };
+
+        auto C = [](uint8_t u8){ return u8 / 255.0f; };
+        glm::vec4 srgb = { C(td.textColor.r), C(td.textColor.g), C(td.textColor.b), C(td.textColor.a) };
+        if (srgb.a == 0.0f) srgb.a = 1.0f;
+        glm::vec4 linear = srgbToLinear(srgb);
+        
+        // Letter spacing & line height (Clay gives pixel values; 0 -> use font default)
+        float ls  = (float)td.letterSpacing;
+        float lh  = (float)td.lineHeight;  // if 0, TextRenderer uses ascent/descent/lineGap
+        
+        // Starting position is the top-left of the command's bbox
+        glm::vec2 start = { (float)bb.x, (float)bb.y };
+        
+        // Layout glyphs for this text run using the atlas bucket
+        auto& batch = textBatches[bucketPx];
+        auto glyphs = text->layoutASCII(bucketPx, txt, start, linear, ls, lh);
+
+        // Append to this bucket's vector
+        batch.insert(batch.end(), glyphs.begin(), glyphs.end());
+    }
 }
 
 void UiApp::run() {

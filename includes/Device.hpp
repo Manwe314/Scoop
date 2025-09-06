@@ -73,6 +73,10 @@ class Device {
 
   VkPhysicalDeviceProperties properties;
 
+  VkPhysicalDevice getPhysicalDevice() { return physicalDevice; }
+  std::string getName() { return name; }
+  
+
  private:
   void createInstance();
   void setupDebugMessenger();
@@ -96,6 +100,7 @@ class Device {
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   Window &window;
   VkCommandPool commandPool;
+  std::string name;
 
   VkDevice device_;
   VkSurfaceKHR surface_;

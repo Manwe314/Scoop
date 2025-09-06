@@ -39,6 +39,12 @@ private:
     VkShaderModule fragShaderModule;
 public:
     Pipeline(Device& device, const PipelineConfigInfo& config, const std::string& vertFilepath, const std::string& fragFilepath);
+    Pipeline(Device& device,
+           const PipelineConfigInfo& config,
+           const std::vector<VkVertexInputBindingDescription>& bindings,
+           const std::vector<VkVertexInputAttributeDescription>& attributes,
+           const std::string& vertFilepath,
+           const std::string& fragFilepath);
     ~Pipeline();
 
     Pipeline(const Pipeline&) = delete;
