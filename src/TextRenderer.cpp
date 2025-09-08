@@ -4,6 +4,7 @@
 #include "TextRenderer.hpp"
 #include "Device.hpp"
 #include <stdexcept>
+#include <iostream>
 #include <fstream>
 #include <cstring>
 #include <cmath>
@@ -250,6 +251,28 @@ void TextRenderer::buildAtlasesCPU(const std::string& ttfPath) {
 }
 
 // ---- Vulkan upload & helpers ------------------------------------------------
+
+void TextRenderer::drawRange(VkCommandBuffer cmd, uint32_t count, uint32_t firstInstance) const {
+    if (count == 0) return;
+    vkCmdDraw(cmd, /*vertexCount*/4, /*instanceCount*/count, /*firstVertex*/0, /*firstInstance*/firstInstance);
+}
+
+void TextRenderer::ensureInstanceCapacity(uint32_t needed) {
+    if (instVB == VK_NULL_HANDLE) {                // first time
+        if (quadVB == VK_NULL_HANDLE) createQuadBuffer();
+        createInstanceBuffer(needed);
+        return;
+    }
+    if (needed <= instCapacity) return;            // enough already
+
+    // re-create bigger buffer (grow to exactly needed; you can round up if you like)
+    VkDevice dev = device.device();
+    if (instMapped) { vkUnmapMemory(dev, instMem); instMapped = nullptr; }
+    if (instVB)     { vkDestroyBuffer(dev, instVB, nullptr); instVB = VK_NULL_HANDLE; }
+    if (instMem)    { vkFreeMemory(dev, instMem, nullptr);   instMem = VK_NULL_HANDLE; }
+
+    createInstanceBuffer(needed);
+}
 
 void TextRenderer::createDescriptorPoolAndLayout() {
     VkDevice dev = device.device();
@@ -625,4 +648,41 @@ void TextRenderer::generateMipmaps(VkImage image, int32_t texW, int32_t texH, ui
         0, 0, nullptr, 0, nullptr, 1, &last);
 
     endSingleTimeCommands(cmd);
+}
+
+std::vector<VkVertexInputBindingDescription> TextRenderer::GlyphInstance::getBindDescriptions() {
+    std::vector<VkVertexInputBindingDescription> b(1);
+    b[0].binding   = 1;
+    b[0].stride    = sizeof(GlyphInstance);
+    b[0].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    return b;
+}
+
+std::vector<VkVertexInputAttributeDescription> TextRenderer::GlyphInstance::getAttributeDescriptions() {
+    std::vector<VkVertexInputAttributeDescription> a(5);
+    a[0].binding = 1; 
+    a[0].location = 1; 
+    a[0].format = VK_FORMAT_R32G32_SFLOAT; 
+    a[0].offset = offsetof(GlyphInstance, pos);
+    // loc2: size
+    a[1].binding = 1; 
+    a[1].location = 2; 
+    a[1].format = VK_FORMAT_R32G32_SFLOAT; 
+    a[1].offset = offsetof(GlyphInstance, size);
+    // loc3: uvMin
+    a[2].binding = 1; 
+    a[2].location = 3; 
+    a[2].format = VK_FORMAT_R32G32_SFLOAT; 
+    a[2].offset = offsetof(GlyphInstance, uvMin);
+    // loc4: uvMax
+    a[3].binding = 1; 
+    a[3].location = 4; 
+    a[3].format = VK_FORMAT_R32G32_SFLOAT; 
+    a[3].offset = offsetof(GlyphInstance, uvMax);
+    // loc5: color
+    a[4].binding = 1; 
+    a[4].location = 5; 
+    a[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; 
+    a[4].offset = offsetof(GlyphInstance, color);
+    return a;
 }

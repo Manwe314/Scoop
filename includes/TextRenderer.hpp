@@ -22,27 +22,8 @@ public:
       glm::vec2 uvMax;
       glm::vec4 color;
 
-      static std::vector<VkVertexInputBindingDescription> getBindDescriptions() {
-          std::vector<VkVertexInputBindingDescription> b(1);
-          b[0].binding   = 1;
-          b[0].stride    = sizeof(GlyphInstance);
-          b[0].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-          return b;
-      }
-      static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
-          std::vector<VkVertexInputAttributeDescription> a(5);
-          // loc1: pos
-          a[0].binding = 1; a[0].location = 1; a[0].format = VK_FORMAT_R32G32_SFLOAT; a[0].offset = offsetof(GlyphInstance, pos);
-          // loc2: size
-          a[1].binding = 1; a[1].location = 2; a[1].format = VK_FORMAT_R32G32_SFLOAT; a[1].offset = offsetof(GlyphInstance, size);
-          // loc3: uvMin
-          a[2].binding = 1; a[2].location = 3; a[2].format = VK_FORMAT_R32G32_SFLOAT; a[2].offset = offsetof(GlyphInstance, uvMin);
-          // loc4: uvMax
-          a[3].binding = 1; a[3].location = 4; a[3].format = VK_FORMAT_R32G32_SFLOAT; a[3].offset = offsetof(GlyphInstance, uvMax);
-          // loc5: color
-          a[4].binding = 1; a[4].location = 5; a[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; a[4].offset = offsetof(GlyphInstance, color);
-          return a;
-      }
+      static std::vector<VkVertexInputBindingDescription> getBindDescriptions();
+      static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions();
     };
 
 
@@ -106,6 +87,10 @@ public:
     void bind(VkCommandBuffer cmd, VkPipelineLayout pipelineLayout, int pixelSizeBucket);
     void draw(VkCommandBuffer cmd) const;
 
+    void drawRange(VkCommandBuffer cmd, uint32_t count, uint32_t firstInstance) const;
+    void ensureInstanceCapacity(uint32_t needed);
+    
+    uint32_t getInstanceCapacity() const { return instCapacity; }
     uint32_t instanceCount() const { return currentInstanceCount; }
 
 private:

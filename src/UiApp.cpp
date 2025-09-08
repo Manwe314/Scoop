@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <array>
+#include <printf.h>
 
 #define CLAY_IMPLEMENTATION
 #include "clay.h"
@@ -22,8 +23,33 @@ static inline void ClayHandleErrors(Clay_ErrorData e) {
     fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
 }
 
-static inline Clay_Dimensions MeasureTextMono(Clay_StringSlice text, Clay_TextElementConfig* cfg, void* user) {
-    return { (float)text.length * cfg->fontSize, (float)cfg->fontSize };
+static Clay_Dimensions MeasureTextFromAtlas(Clay_StringSlice s, Clay_TextElementConfig* cfg, void* user)
+{
+    auto* tr = static_cast<TextRenderer*>(user);
+    const int px = tr->getBucketPx((int)cfg->fontSize);      // match renderer bucket
+    const auto* A = tr->getAtlasForPx(px);
+    if (!A) return {0, 0};
+
+    float ls = (float)cfg->letterSpacing;
+    float lineH = (cfg->lineHeight > 0.0f) ? (float)cfg->lineHeight : (A->ascent - A->descent + A->lineGap);
+
+    float w = 0.0f, maxW = 0.0f;
+    // simple newline-aware width (Clay’s CLAY_TEXT doesn’t soft-wrap on width)
+    for (int i = 0; i < s.length; ++i) {
+        unsigned char c = (unsigned char)s.chars[i];
+        if (c == '\n') { maxW = std::max(maxW, w); w = 0.0f; continue; }
+        if (c < 32 || c >= 127) continue;
+        const auto& g = A->glyphs[c];
+        w += g.advance + ls;
+    }
+    maxW = std::max(maxW, w);
+
+    // height = lines * lineHeight
+    int lines = 1;
+    for (int i = 0; i < s.length; ++i) if (s.chars[i] == '\n') ++lines;
+    float h = lines * lineH;
+
+    return { maxW, h };
 }
 
 // helper (accurate sRGB -> linear)
@@ -67,7 +93,7 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
 
     int w = WIDTH, h = HEIGHT;
     Clay_Initialize(clayArena, { (float)w, (float)h }, { ClayHandleErrors });
-    Clay_SetMeasureTextFunction(MeasureTextMono, 0);
+    
 }
 
 void UiApp::createPipelineLayout()
@@ -166,6 +192,11 @@ void UiApp::createTextPipeline() {
     std::vector<VkVertexInputAttributeDescription> attrs;
     attrs.insert(attrs.end(), a0.begin(), a0.end());
     attrs.insert(attrs.end(), a1.begin(), a1.end());
+
+    // for (auto& a : attrs)
+    //   printf("attr loc=%u bind=%u fmt=%u offset=%u\n", a.location, a.binding, a.format, a.offset);
+    // for (auto& b : bindings)
+    //   printf("bind=%u stride=%u rate=%u\n", b.binding, b.stride, b.inputRate);
 
 
     textPipeline = std::make_unique<Pipeline>(
@@ -272,15 +303,51 @@ void UiApp::recordCommandBuffer(int imageIndex)
 
     if (!textBatches.empty()) {
         textPipeline->bind(commandBuffers[imageIndex]);
-
         vkCmdPushConstants(commandBuffers[imageIndex], textPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
 
-        for (auto& [px, batch] : textBatches) {
-            if (batch.empty()) continue;
+        // ---- Build one big vector and remember ranges per px ----
+        // collect keys (pixel buckets) in a stable order
+        std::vector<int> keys;
+        keys.reserve(textBatches.size());
+        for (auto& kv : textBatches) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end()); 
 
-            text->updateInstances(batch);
-            text->bind(commandBuffers[imageIndex], textPipelineLayout, px);
-            text->draw(commandBuffers[imageIndex]);
+        // compute total glyphs + concatenation
+        size_t total = 0;
+        for (int px : keys) total += textBatches[px].size();
+
+        // (optional) make sure the instance buffer is big enough
+        text->ensureInstanceCapacity(static_cast<uint32_t>(total));
+
+        std::vector<TextRenderer::GlyphInstance> all;
+        all.reserve(total);
+
+        // px -> (firstInstance offset, count)
+        std::unordered_map<int, std::pair<uint32_t,uint32_t>> ranges;
+        ranges.reserve(keys.size());
+
+        uint32_t cursor = 0;
+        for (int px : keys) {
+            auto& batch = textBatches[px];
+            uint32_t cnt = static_cast<uint32_t>(batch.size());
+            if (cnt == 0) { ranges[px] = {cursor, 0}; continue; }
+
+            ranges[px] = {cursor, cnt};
+            all.insert(all.end(), batch.begin(), batch.end());
+            cursor += cnt;
+        }
+
+        // ---- ONE upload for all glyph instances ----
+        text->updateInstances(all);
+
+        // ---- Bind VBs + draw each bucket with firstInstance selecting the slice ----
+        // We’ll reuse text->bind to bind VBs and the right atlas descriptor for each px.
+        for (int px : keys) {
+            auto [first, count] = ranges[px];
+            if (count == 0) continue;
+
+            text->bind(commandBuffers[imageIndex], textPipelineLayout, px); // binds quadVB+instVB and atlas for this px
+            text->drawRange(commandBuffers[imageIndex], count, first);
         }
     }
 
@@ -333,6 +400,8 @@ void UiApp::buildUi()
 {
     
     Clay_SetLayoutDimensions((Clay_Dimensions) {static_cast<float>(window.getWidth()), static_cast<float>(window.getHeight())});
+    Clay_SetMeasureTextFunction(MeasureTextFromAtlas, text.get());
+    std::string name = device.getName();
 
     Clay_BeginLayout();
 
@@ -358,7 +427,7 @@ void UiApp::buildUi()
             CLAY_TEXT(CLAY_STRING("Welcome To Scoop"), 
                 CLAY_TEXT_CONFIG({ 
                     .textColor = {255, 243, 232, 255}, 
-                    .fontSize = 100, 
+                    .fontSize = 128, 
                     .letterSpacing = 1, 
                     .wrapMode = CLAY_TEXT_WRAP_NONE, 
                     .textAlignment = CLAY_TEXT_ALIGN_CENTER
@@ -374,29 +443,29 @@ void UiApp::buildUi()
                 .backgroundColor = {51, 30, 108, 170}, 
                 .cornerRadius = CLAY_CORNER_RADIUS(20)
         }){
-            // CLAY_TEXT(CLAY_STRING("Selected Device: "), 
-            // CLAY_TEXT_CONFIG({
-            //     .textColor = {255, 243, 232, 255}, 
-            //     .fontSize = 64, 
-            //     .letterSpacing = 1, 
-            //     .wrapMode = CLAY_TEXT_WRAP_NONE, 
-            //     .textAlignment = CLAY_TEXT_ALIGN_CENTER
-            // }));
-            // CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
-            // CLAY_TEXT(ClayFrom(device.getName()), 
-            // CLAY_TEXT_CONFIG({
-            //     .textColor = {255, 243, 232, 255}, 
-            //     .fontSize = 64, 
-            //     .letterSpacing = 1, 
-            //     .wrapMode = CLAY_TEXT_WRAP_NONE, 
-            //     .textAlignment = CLAY_TEXT_ALIGN_CENTER
-            // }));
+            CLAY_TEXT(CLAY_STRING("Selected Device: "), 
+            CLAY_TEXT_CONFIG({
+                .textColor = {255, 243, 232, 255}, 
+                .fontSize = 64, 
+                .letterSpacing = 1, 
+                .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            }));
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
+            CLAY_TEXT(ClayFrom(name), 
+            CLAY_TEXT_CONFIG({
+                .textColor = {255, 243, 232, 255}, 
+                .fontSize = 64, 
+                .letterSpacing = 1, 
+                .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            }));
         }
     }
 
     Clay_RenderCommandArray renderCommands = Clay_EndLayout();
 
-    PrintRenderCommandArray(renderCommands);
+    // PrintRenderCommandArray(renderCommands);
 
     std::vector<RectangleItem> items;
     items.reserve(renderCommands.length);

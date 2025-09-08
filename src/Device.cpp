@@ -126,7 +126,7 @@ void Device::pickPhysicalDevice() {
   }
 
   vkGetPhysicalDeviceProperties(physicalDevice, &properties);
-  name = properties.deviceName;
+  name = std::string(properties.deviceName);
   std::cout << "physical device: " << properties.deviceName << std::endl;
 }
 
