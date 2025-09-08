@@ -65,7 +65,7 @@ static inline glm::vec4 srgbToLinear(glm::vec4 c) {
 inline Clay_String ClayFrom(const std::string& s) {
     Clay_String out;
     out.length = static_cast<int32_t>(s.size());
-    out.chars  = const_cast<char*>(s.data());   // Clay never mutates; safe
+    out.chars  = const_cast<char*>(s.c_str());
     return out;
 }
 
@@ -94,6 +94,11 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
     int w = WIDTH, h = HEIGHT;
     Clay_Initialize(clayArena, { (float)w, (float)h }, { ClayHandleErrors });
     
+    s_active = this;
+    glfwSetCharCallback(window.handle(), &UiApp::CharCallback);
+    glfwSetKeyCallback (window.handle(), &UiApp::KeyCallback);
+
+    
 }
 
 void UiApp::createPipelineLayout()
@@ -113,6 +118,50 @@ void UiApp::createPipelineLayout()
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
     if (vkCreatePipelineLayout(device.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create pipeline layout");
+}
+
+UiApp* UiApp::s_active = nullptr;
+
+void UiApp::CharCallback(GLFWwindow*, unsigned int cp) {
+    if (s_active) s_active->onChar(cp);
+}
+
+void UiApp::KeyCallback(GLFWwindow*, int key, int, int action, int mods) {
+    if (s_active) s_active->onKey(key, action, mods);
+}
+
+void UiApp::onChar(uint32_t cp) {
+    if (!input.focused) return;
+
+    // Basic printable ASCII range (expand later to UTF-8 if you like)
+    if (cp >= 32 && cp < 127) {
+        input.text.push_back(static_cast<char>(cp));
+        std::cout << "[Input] text=\"" << input.text << "\"\n";
+    }
+}
+
+void UiApp::onKey(int key, int action, int /*mods*/) {
+    if (!input.focused) return;
+    if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+
+    switch (key) {
+        case GLFW_KEY_BACKSPACE:
+            if (!input.text.empty()) {
+                input.text.pop_back();
+                std::cout << "[Input] text=\"" << input.text << "\"\n";
+            }
+            break;
+        case GLFW_KEY_ENTER:
+        case GLFW_KEY_KP_ENTER:
+            std::cout << "[Input] submit=\"" << input.text << "\"\n";
+            break;
+        case GLFW_KEY_ESCAPE:
+            input.focused = false;
+            std::cout << "[Input] unfocused (Esc)\n";
+            break;
+        default:
+            break;
+    }
 }
 
 void UiApp::createTextPipelineLayout() {
@@ -305,24 +354,19 @@ void UiApp::recordCommandBuffer(int imageIndex)
         textPipeline->bind(commandBuffers[imageIndex]);
         vkCmdPushConstants(commandBuffers[imageIndex], textPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
 
-        // ---- Build one big vector and remember ranges per px ----
-        // collect keys (pixel buckets) in a stable order
         std::vector<int> keys;
         keys.reserve(textBatches.size());
         for (auto& kv : textBatches) keys.push_back(kv.first);
         std::sort(keys.begin(), keys.end()); 
 
-        // compute total glyphs + concatenation
         size_t total = 0;
         for (int px : keys) total += textBatches[px].size();
 
-        // (optional) make sure the instance buffer is big enough
         text->ensureInstanceCapacity(static_cast<uint32_t>(total));
 
         std::vector<TextRenderer::GlyphInstance> all;
         all.reserve(total);
 
-        // px -> (firstInstance offset, count)
         std::unordered_map<int, std::pair<uint32_t,uint32_t>> ranges;
         ranges.reserve(keys.size());
 
@@ -337,16 +381,13 @@ void UiApp::recordCommandBuffer(int imageIndex)
             cursor += cnt;
         }
 
-        // ---- ONE upload for all glyph instances ----
         text->updateInstances(all);
 
-        // ---- Bind VBs + draw each bucket with firstInstance selecting the slice ----
-        // We’ll reuse text->bind to bind VBs and the right atlas descriptor for each px.
         for (int px : keys) {
             auto [first, count] = ranges[px];
             if (count == 0) continue;
 
-            text->bind(commandBuffers[imageIndex], textPipelineLayout, px); // binds quadVB+instVB and atlas for this px
+            text->bind(commandBuffers[imageIndex], textPipelineLayout, px);
             text->drawRange(commandBuffers[imageIndex], count, first);
         }
     }
@@ -396,15 +437,39 @@ UiApp::~UiApp()
     std::free(clayMem);
 }
 
+void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData) 
+{
+    static GLFWcursor* hand = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+    static GLFWcursor* ibeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+
+    if (elementId.id == Clay_GetElementId(CLAY_STRING("input form")).id)
+        wanted = ibeam;
+    else if (elementId.id != Clay_GetElementId(CLAY_STRING("background")).id)
+        wanted = hand;
+
+    
+    if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("input form")).id)) {
+        input.focused = true;
+    }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("background")).id)) {
+        input.focused = false;
+    }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        std::cout << "BUTTON CLICKED!" << std::endl;
+        input.focused = false;
+    }
+}
+
 void UiApp::buildUi() 
 {
     
     Clay_SetLayoutDimensions((Clay_Dimensions) {static_cast<float>(window.getWidth()), static_cast<float>(window.getHeight())});
     Clay_SetMeasureTextFunction(MeasureTextFromAtlas, text.get());
     std::string name = device.getName();
-
+    wanted = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+    
     Clay_BeginLayout();
-
+    
     CLAY({ .id = CLAY_ID("background"), 
             .layout = { 
                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, 
@@ -414,6 +479,7 @@ void UiApp::buildUi()
             },
             .backgroundColor = {71, 50, 128, 255}
         }) {
+        Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
         CLAY({ .id = CLAY_ID("head sign"),
                 .layout = { 
                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT()}, 
@@ -461,11 +527,111 @@ void UiApp::buildUi()
                 .textAlignment = CLAY_TEXT_ALIGN_CENTER
             }));
         }
+        CLAY({ .id = CLAY_ID("button"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(10),
+                },
+                .backgroundColor = {65, 9, 114, 200},
+                .cornerRadius = CLAY_CORNER_RADIUS(35)
+        }){
+            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+            CLAY_TEXT(CLAY_STRING("Button"), 
+            CLAY_TEXT_CONFIG({
+                .textColor = {255, 243, 232, 255}, 
+                .fontSize = 32, 
+                .letterSpacing = 1, 
+                .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            }));
+        }
+        CLAY({ .id = CLAY_ID("form"),
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(16),
+                    .childGap = 16,
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM
+                },
+                .backgroundColor = {51, 30, 108, 170}, 
+                .cornerRadius = CLAY_CORNER_RADIUS(20)
+        }){
+            CLAY_TEXT(CLAY_STRING("Relative Path to Model"), 
+            CLAY_TEXT_CONFIG({
+                .textColor = {255, 243, 232, 255}, 
+                .fontSize = 32, 
+                .letterSpacing = 1, 
+                .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            }));
+            CLAY({ .id = CLAY_ID("text form"),
+                    .layout = {
+                        .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                        .childGap = 16,
+                        .layoutDirection = CLAY_LEFT_TO_RIGHT
+                    }
+            }){
+                CLAY({ .id = CLAY_ID("input form"),
+                        .layout = {
+                            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                            .padding = CLAY_PADDING_ALL(10)
+                        },
+                        .backgroundColor = {179, 170, 162, 170}, 
+                        .cornerRadius = CLAY_CORNER_RADIUS(20)
+                }){
+                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                    const char* show = input.text.empty() ?  "" : input.text.c_str(); 
+                    CLAY_TEXT(ClayFrom(show),
+                    CLAY_TEXT_CONFIG({
+                        .textColor = {255, 243, 232, 255},
+                        .fontSize  = 32,
+                        .letterSpacing = 1,
+                        .wrapMode  = CLAY_TEXT_WRAP_NONE,
+                        .textAlignment = CLAY_TEXT_ALIGN_LEFT
+                    }));
+                }
+                CLAY({ .id = CLAY_ID("model loader"),
+                        .layout = {
+                            .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                            .padding = CLAY_PADDING_ALL(10),
+                        },
+                        .backgroundColor = {65, 9, 114, 200},
+                        .cornerRadius = CLAY_CORNER_RADIUS(35)
+                }){
+                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                    CLAY_TEXT(CLAY_STRING("Load Model"), 
+                    CLAY_TEXT_CONFIG({
+                        .textColor = {255, 243, 232, 255}, 
+                        .fontSize = 32, 
+                        .letterSpacing = 1, 
+                        .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                        .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                    }));
+                }
+            }
+        }
     }
 
     Clay_RenderCommandArray renderCommands = Clay_EndLayout();
 
+    {
+        // Get cursor in window coords (origin top-left, y down)
+        double mx, my;
+        window.getCursorPos(mx, my);
+
+        // Convert to framebuffer pixel coords if you’re using framebuffer sizes for layout
+        int winW, winH, fbW, fbH;
+        window.getSizes(winW, winH, fbW, fbH);
+        float sx = (winW > 0) ? (float)fbW / (float)winW : 1.0f;
+        float sy = (winH > 0) ? (float)fbH / (float)winH : 1.0f;
+
+        Clay_Vector2 p = { (float)mx * sx, (float)my * sy };
+
+        bool leftDown = window.isMouseDown(GLFW_MOUSE_BUTTON_LEFT);
+        Clay_SetPointerState(p, leftDown);
+    }
+
     // PrintRenderCommandArray(renderCommands);
+    glfwSetCursor(window.handle(), wanted);
 
     std::vector<RectangleItem> items;
     items.reserve(renderCommands.length);

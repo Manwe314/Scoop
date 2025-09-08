@@ -65,7 +65,7 @@ foreach(SRC ${SHADERS})
   set(outspv ${SPIRV_OUT_DIR}/${fname}.spv)
   add_custom_command(
     OUTPUT ${outspv}
-    COMMAND ${GLSLC} -O ${SRC} -o ${outspv}
+    COMMAND ${GLSLC} -g -O ${SRC} -o ${outspv}
     DEPENDS ${SRC}
     BYPRODUCTS ${outspv}          # helps multi-config generators
     COMMENT "Compiling ${fname}"

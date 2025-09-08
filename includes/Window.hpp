@@ -20,13 +20,21 @@ private:
 public:
     Window(int w, int h, std::string name);
     ~Window();
+
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
-    bool shouldClose() {return glfwWindowShouldClose(display); }
-    void createWindowSurface(VkInstance instance, VkSurfaceKHR *surface);
+
     VkExtent2D getExtent() { return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};}
+    GLFWwindow* handle() const { return display; }
+    
+    bool shouldClose() {return glfwWindowShouldClose(display); }
     bool wasWindowResized() {return frameBufferResized;}
+    bool isMouseDown(int button) const { return glfwGetMouseButton(display, button) == GLFW_PRESS; }
+    
+    void createWindowSurface(VkInstance instance, VkSurfaceKHR *surface);
     void resetWindowResizedFlag() {frameBufferResized = false;}
+    void getCursorPos(double& x, double& y) const { glfwGetCursorPos(display, &x, &y); }
+    void getSizes(int& winW, int& winH, int& fbW, int& fbH) const { glfwGetWindowSize(display, &winW, &winH); glfwGetFramebufferSize(display, &fbW, &fbH); }
 
     int getWidth() { return width; }
     int getHeight() { return height; }
