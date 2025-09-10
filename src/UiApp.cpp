@@ -69,6 +69,67 @@ inline Clay_String ClayFrom(const std::string& s) {
     return out;
 }
 
+inline Clay_String ClayFromStable(std::vector<std::string>& store, const std::string& s) {
+    store.emplace_back(s);
+    Clay_String out{};
+    out.isStaticallyAllocated = false;
+    out.length = static_cast<int32_t>(store.back().size());
+    out.chars  = store.back().c_str();
+    return out;
+}
+
+static std::vector<float> penStops(const TextRenderer& tr, int px, std::string_view txt, float startX, float letterSpacing)
+{
+    const auto* A = tr.getAtlasForPx(px);
+    std::vector<float> stops;
+    stops.reserve(txt.size()+1);
+    float x = startX;
+    stops.push_back(x);
+    for (unsigned char c : txt) {
+        if (c < 32 || c >= 127) { stops.push_back(x); continue; }
+        x += A->glyphs[c].advance + letterSpacing;
+        stops.push_back(x);
+    }
+    return stops;
+}
+
+static inline VkRect2D fullScissor(VkExtent2D fb) {
+    return VkRect2D{ {0,0}, {fb.width, fb.height} };
+}
+
+static inline VkRect2D bboxToScissor(const Clay_BoundingBox& bb, VkExtent2D fb, int padY = 1) {
+    int32_t x = (int32_t)bb.x;
+    int32_t y = (int32_t)bb.y - padY;
+    int32_t w = (int32_t)bb.width;
+    int32_t h = (int32_t)bb.height + padY*2;
+    // clamp
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    uint32_t W = (uint32_t)std::max(0, std::min((int)fb.width  - x, w));
+    uint32_t H = (uint32_t)std::max(0, std::min((int)fb.height - y, h));
+    return VkRect2D{ {x, y}, {W, H} };
+}
+
+static inline VkRect2D intersectScissor(VkRect2D a, VkRect2D b) {
+    int ax0 = a.offset.x, ay0 = a.offset.y;
+    int ax1 = ax0 + (int)a.extent.width;
+    int ay1 = ay0 + (int)a.extent.height;
+
+    int bx0 = b.offset.x, by0 = b.offset.y;
+    int bx1 = bx0 + (int)b.extent.width;
+    int by1 = by0 + (int)b.extent.height;
+
+    int x0 = std::max(ax0, bx0);
+    int y0 = std::max(ay0, by0);
+    int x1 = std::min(ax1, bx1);
+    int y1 = std::min(ay1, by1);
+
+    if (x1 <= x0 || y1 <= y0) return VkRect2D{ {0,0}, {0,0} };
+    return VkRect2D{ {x0, y0}, { (uint32_t)(x1-x0), (uint32_t)(y1-y0) } };
+}
+
+
+
 struct SimplePushConstantData {
     glm::mat4 uProj;
 };
@@ -79,7 +140,7 @@ struct RectangleItem {
     uint32_t seq;
 };
 
-UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
+UiApp::UiApp(std::string def) : window(WIDTH, HEIGHT, "UI"), device(window), clayFrameStrings()
 {
     loadUi();
     createPipelineLayout();
@@ -97,6 +158,12 @@ UiApp::UiApp() : window(WIDTH, HEIGHT, "UI"), device(window)
     s_active = this;
     glfwSetCharCallback(window.handle(), &UiApp::CharCallback);
     glfwSetKeyCallback (window.handle(), &UiApp::KeyCallback);
+    cursorArrow = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+    cursorHand  = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+    cursorIBeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+    wanted = cursorArrow;
+    std::cout << def << std::endl;
+    input.text = def;
 
     
 }
@@ -136,6 +203,8 @@ void UiApp::onChar(uint32_t cp) {
     // Basic printable ASCII range (expand later to UTF-8 if you like)
     if (cp >= 32 && cp < 127) {
         input.text.push_back(static_cast<char>(cp));
+        input.caret = input.text.size();
+        input.blinkStart = glfwGetTime();
         std::cout << "[Input] text=\"" << input.text << "\"\n";
     }
 }
@@ -148,6 +217,8 @@ void UiApp::onKey(int key, int action, int /*mods*/) {
         case GLFW_KEY_BACKSPACE:
             if (!input.text.empty()) {
                 input.text.pop_back();
+                input.caret = input.text.size();
+                input.blinkStart = glfwGetTime();
                 std::cout << "[Input] text=\"" << input.text << "\"\n";
             }
             break;
@@ -350,47 +421,101 @@ void UiApp::recordCommandBuffer(int imageIndex)
     
     ui->draw(commandBuffers[imageIndex]);
 
-    if (!textBatches.empty()) {
+
+    if (!tempRuns.empty()) {
         textPipeline->bind(commandBuffers[imageIndex]);
         vkCmdPushConstants(commandBuffers[imageIndex], textPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push_constant), &push_constant);
 
-        std::vector<int> keys;
-        keys.reserve(textBatches.size());
-        for (auto& kv : textBatches) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end()); 
-
         size_t total = 0;
-        for (int px : keys) total += textBatches[px].size();
+        for (auto& r : tempRuns) total += r.glyphs.size();
 
-        text->ensureInstanceCapacity(static_cast<uint32_t>(total));
+        text->ensureInstanceCapacity((uint32_t)total);
 
         std::vector<TextRenderer::GlyphInstance> all;
         all.reserve(total);
 
-        std::unordered_map<int, std::pair<uint32_t,uint32_t>> ranges;
-        ranges.reserve(keys.size());
+        struct TextRun { int px; VkRect2D sc; uint32_t first, count; int z; uint32_t seq; };
+        std::vector<TextRun> runs; runs.reserve(tempRuns.size());
 
         uint32_t cursor = 0;
-        for (int px : keys) {
-            auto& batch = textBatches[px];
-            uint32_t cnt = static_cast<uint32_t>(batch.size());
-            if (cnt == 0) { ranges[px] = {cursor, 0}; continue; }
-
-            ranges[px] = {cursor, cnt};
-            all.insert(all.end(), batch.begin(), batch.end());
-            cursor += cnt;
+        for (auto& r : tempRuns) {
+            TextRun out{ r.px, r.scissor, cursor, (uint32_t)r.glyphs.size(), r.z, r.seq };
+            all.insert(all.end(), r.glyphs.begin(), r.glyphs.end());
+            cursor += out.count;
+            runs.push_back(out);
         }
+
+        // painter order
+        std::stable_sort(runs.begin(), runs.end(),
+            [](const TextRun& a, const TextRun& b){
+                if (a.z != b.z) return a.z < b.z;
+                return a.seq < b.seq;
+            });
 
         text->updateInstances(all);
 
-        for (int px : keys) {
-            auto [first, count] = ranges[px];
-            if (count == 0) continue;
+        for (const auto& run : runs) {
+            if (run.count == 0) continue;
+            vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &run.sc);
+            text->bind(commandBuffers[imageIndex], textPipelineLayout, run.px);
+            text->drawRange(commandBuffers[imageIndex], run.count, run.first);
+        }
 
-            text->bind(commandBuffers[imageIndex], textPipelineLayout, px);
-            text->drawRange(commandBuffers[imageIndex], count, first);
+        // restore full scissor for subsequent draws (caret, etc.)
+        VkRect2D full{{0,0}, swapChain->getSwapChainExtent()};
+        vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &full);
+        if (input.focused) {
+            // Blink: 0.5s on, 0.5s off
+            const double now = glfwGetTime();
+            const bool show = fmod(now - input.blinkStart, 1.0) < 0.5;
+            if (show && focusedInputRect.width > 0) {
+                const float pad = 10.0f; // must match input box padding
+                const float startX = (float)focusedInputRect.x + pad;
+                const float startY = (float)focusedInputRect.y + pad;
+            
+                // caret index = end (for now)
+                const size_t caretIdx = std::min(input.caret, input.text.size());
+                auto stops = penStops(*text, input.fontPx, input.text, startX, input.letterSpacing);
+                const float caretX = (caretIdx < stops.size()) ? stops[caretIdx] : stops.back();
+            
+                // Clip to the input rect
+                VkRect2D inputScissor{
+                    { (int32_t)focusedInputRect.x, (int32_t)focusedInputRect.y },
+                    { (uint32_t)focusedInputRect.width, (uint32_t)focusedInputRect.height }
+                };
+                vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &inputScissor);
+            
+                // Build a single rectangle instance as the caret
+                UiRenderer::RectangleInstance caret{};
+                caret.position = { caretX, (float)focusedInputRect.y + 8.0f };
+                caret.size     = { 2.0f, (float)focusedInputRect.height - 20.0f }; // thin bar
+                caret.color    = srgbToLinear({0.1f,0.1f,0.1f,1});
+                caret.radius   = {0,0,0,0};
+            
+                // Bind rect pipeline again (we just used text pipeline)
+                pipeline->bind(commandBuffers[imageIndex]);
+            
+                // Push constants for this pipeline layout again
+                SimplePushConstantData pc{};
+                pc.uProj = glm::ortho(0.0f, (float)swapChain->getSwapChainExtent().width,
+                                      0.0f, (float)swapChain->getSwapChainExtent().height);
+                vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                
+                // Upload only the caret and draw it
+                UiRenderer::RectangleInstance one = caret;
+                uiOverlay->updateInstances(std::vector<UiRenderer::RectangleInstance>{ one });
+                uiOverlay->bind(commandBuffers[imageIndex]);
+                uiOverlay->draw(commandBuffers[imageIndex]);
+                
+                // Restore full scissor
+                VkRect2D full{{0,0}, swapChain->getSwapChainExtent()};
+                vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &full);
+            }
         }
     }
+    
+    
 
     vkCmdEndRenderPass(commandBuffers[imageIndex]);
     if (vkEndCommandBuffer(commandBuffers[imageIndex]) != VK_SUCCESS)
@@ -428,6 +553,7 @@ void UiApp::loadUi()
     text = std::make_unique<TextRenderer>(device, device.getCommandPool(), device.graphicsQueue(), "assets/fonts/FacultyGlyphic-Regular.ttf");
     text->initGeometry(8000);
     ui = std::make_unique<UiRenderer>(device, 1000);
+    uiOverlay = std::make_unique<UiRenderer>(device, 12);
 }
 
 UiApp::~UiApp()
@@ -435,28 +561,34 @@ UiApp::~UiApp()
     vkDestroyPipelineLayout(device.device(), pipelineLayout, nullptr);
     vkDestroyPipelineLayout(device.device(), textPipelineLayout, nullptr);
     std::free(clayMem);
+    glfwDestroyCursor(cursorArrow);
+    glfwDestroyCursor(cursorHand);
+    glfwDestroyCursor(cursorIBeam);
 }
 
 void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData) 
 {
-    static GLFWcursor* hand = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
-    static GLFWcursor* ibeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
 
     if (elementId.id == Clay_GetElementId(CLAY_STRING("input form")).id)
-        wanted = ibeam;
+        wanted = cursorIBeam;
     else if (elementId.id != Clay_GetElementId(CLAY_STRING("background")).id)
-        wanted = hand;
+        wanted = cursorHand;
 
     
     if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("input form")).id)) {
         input.focused = true;
+        input.caret = input.text.size();
+        focusedInputId = elementId;
+        input.blinkStart = glfwGetTime();
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("background")).id)) {
         input.focused = false;
+        focusedInputId = Clay_ElementId{0};
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
         std::cout << "BUTTON CLICKED!" << std::endl;
         input.focused = false;
+        focusedInputId = Clay_ElementId{0};
     }
 }
 
@@ -466,7 +598,8 @@ void UiApp::buildUi()
     Clay_SetLayoutDimensions((Clay_Dimensions) {static_cast<float>(window.getWidth()), static_cast<float>(window.getHeight())});
     Clay_SetMeasureTextFunction(MeasureTextFromAtlas, text.get());
     std::string name = device.getName();
-    wanted = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+    clayFrameStrings.clear();
+    wanted = cursorArrow;
     
     Clay_BeginLayout();
     
@@ -488,7 +621,8 @@ void UiApp::buildUi()
                     .layoutDirection = CLAY_TOP_TO_BOTTOM
                 }, 
                 .backgroundColor = {51, 30, 108, 170}, 
-                .cornerRadius = CLAY_CORNER_RADIUS(20)
+                .cornerRadius = CLAY_CORNER_RADIUS(20),
+                .clip = {.horizontal = true, .vertical = true}
                 }){
             CLAY_TEXT(CLAY_STRING("Welcome To Scoop"), 
                 CLAY_TEXT_CONFIG({ 
@@ -507,7 +641,8 @@ void UiApp::buildUi()
                     .layoutDirection = CLAY_LEFT_TO_RIGHT
                 },
                 .backgroundColor = {51, 30, 108, 170}, 
-                .cornerRadius = CLAY_CORNER_RADIUS(20)
+                .cornerRadius = CLAY_CORNER_RADIUS(20),
+                .clip = {.horizontal = true, .vertical = true}
         }){
             CLAY_TEXT(CLAY_STRING("Selected Device: "), 
             CLAY_TEXT_CONFIG({
@@ -518,7 +653,7 @@ void UiApp::buildUi()
                 .textAlignment = CLAY_TEXT_ALIGN_CENTER
             }));
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
-            CLAY_TEXT(ClayFrom(name), 
+            CLAY_TEXT(ClayFromStable(clayFrameStrings ,name), 
             CLAY_TEXT_CONFIG({
                 .textColor = {255, 243, 232, 255}, 
                 .fontSize = 64, 
@@ -533,7 +668,8 @@ void UiApp::buildUi()
                     .padding = CLAY_PADDING_ALL(10),
                 },
                 .backgroundColor = {65, 9, 114, 200},
-                .cornerRadius = CLAY_CORNER_RADIUS(35)
+                .cornerRadius = CLAY_CORNER_RADIUS(35),
+                .clip = {.horizontal = true, .vertical = true}
         }){
             Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
             CLAY_TEXT(CLAY_STRING("Button"), 
@@ -553,7 +689,8 @@ void UiApp::buildUi()
                     .layoutDirection = CLAY_TOP_TO_BOTTOM
                 },
                 .backgroundColor = {51, 30, 108, 170}, 
-                .cornerRadius = CLAY_CORNER_RADIUS(20)
+                .cornerRadius = CLAY_CORNER_RADIUS(20),
+                .clip = {.horizontal = true, .vertical = true}
         }){
             CLAY_TEXT(CLAY_STRING("Relative Path to Model"), 
             CLAY_TEXT_CONFIG({
@@ -576,11 +713,11 @@ void UiApp::buildUi()
                             .padding = CLAY_PADDING_ALL(10)
                         },
                         .backgroundColor = {179, 170, 162, 170}, 
-                        .cornerRadius = CLAY_CORNER_RADIUS(20)
+                        .cornerRadius = CLAY_CORNER_RADIUS(20),
+                        .clip = {.horizontal = true, .vertical = true}
                 }){
                     Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-                    const char* show = input.text.empty() ?  "" : input.text.c_str(); 
-                    CLAY_TEXT(ClayFrom(show),
+                    CLAY_TEXT(ClayFromStable(clayFrameStrings, input.text),
                     CLAY_TEXT_CONFIG({
                         .textColor = {255, 243, 232, 255},
                         .fontSize  = 32,
@@ -595,7 +732,8 @@ void UiApp::buildUi()
                             .padding = CLAY_PADDING_ALL(10),
                         },
                         .backgroundColor = {65, 9, 114, 200},
-                        .cornerRadius = CLAY_CORNER_RADIUS(35)
+                        .cornerRadius = CLAY_CORNER_RADIUS(35),
+                        .clip = {.horizontal = true, .vertical = true}
                 }){
                     Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
                     CLAY_TEXT(CLAY_STRING("Load Model"), 
@@ -633,11 +771,22 @@ void UiApp::buildUi()
     // PrintRenderCommandArray(renderCommands);
     glfwSetCursor(window.handle(), wanted);
 
+    textRuns.clear();
+    textRuns.reserve(renderCommands.length);
+
+   
+    std::vector<RunTemp> runTemps;
+    runTemps.reserve(renderCommands.length);
+
     std::vector<RectangleItem> items;
     items.reserve(renderCommands.length);
     for (uint32_t i = 0; i < renderCommands.length; ++i) {
         const Clay_RenderCommand& rc = renderCommands.internalArray[i];
         if (rc.commandType != CLAY_RENDER_COMMAND_TYPE_RECTANGLE) continue;
+
+        if (rc.id == focusedInputId.id) {
+            focusedInputRect = rc.boundingBox;
+        }
 
         RectangleItem it{};
         const auto& bb = rc.boundingBox;
@@ -669,45 +818,70 @@ void UiApp::buildUi()
     rects.resize(items.size());
     for (size_t i = 0; i < items.size(); ++i) rects[i] = items[i].instance;
 
-    textBatches.clear();
+    VkExtent2D fb = swapChain->getSwapChainExtent();
+    std::vector<VkRect2D> scissorStack;
+    scissorStack.push_back(VkRect2D{{0,0},{fb.width, fb.height}}); // full
 
     for (uint32_t i = 0; i < renderCommands.length; ++i) {
         const Clay_RenderCommand& rc = renderCommands.internalArray[i];
+
+        if (rc.commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) {
+            // Build a scissor from this bbox, pad Y to avoid cutting descenders
+            VkRect2D clipHere = bboxToScissor(rc.boundingBox, fb, /*padY*/1);
+
+            // If Clay exposes rc.clip.{horizontal,vertical}, widen per axis when disabled
+            // (so a vertical-only clip doesn't restrict X, etc.)
+            const Clay_ClipRenderData& clipCfg = rc.renderData.clip;
+            if (!clipCfg.horizontal) { clipHere.offset.x = 0; clipHere.extent.width  = fb.width;  }
+            if (!clipCfg.vertical)   { clipHere.offset.y = 0; clipHere.extent.height = fb.height; }
+
+            VkRect2D combined = intersectScissor(scissorStack.back(), clipHere);
+            scissorStack.push_back(combined);
+            continue;
+        }
+
+        if (rc.commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END) {
+            if (scissorStack.size() > 1) scissorStack.pop_back();
+            continue;
+        }
+
         if (rc.commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
 
         const auto& bb = rc.boundingBox;
         const auto& td = rc.renderData.text;
 
-        // Pick the nearest baked size (16,24,32,64,128)
-        int requestedPx = (int)td.fontSize;         // Clay's size is in pixels
-        int bucketPx    = text->getBucketPx(requestedPx);
+        const int requestedPx = (int)td.fontSize;
+        const int bucketPx    = text->getBucketPx(requestedPx);
 
-        // Convert Clay string -> std::string_view
-        // Clay exposes length + chars; the exact field is 'td.text' with .chars/.length
-        std::string_view txt{
-            td.stringContents.chars,
-            static_cast<std::size_t>(td.stringContents.length)
-        };
+        std::string_view txt{ td.stringContents.chars, (size_t)td.stringContents.length };
 
-        auto C = [](uint8_t u8){ return u8 / 255.0f; };
-        glm::vec4 srgb = { C(td.textColor.r), C(td.textColor.g), C(td.textColor.b), C(td.textColor.a) };
+        auto Csrgb = [](uint8_t u8){ return u8 / 255.0f; };
+        glm::vec4 srgb = { Csrgb(td.textColor.r), Csrgb(td.textColor.g),
+                           Csrgb(td.textColor.b), Csrgb(td.textColor.a) };
         if (srgb.a == 0.0f) srgb.a = 1.0f;
         glm::vec4 linear = srgbToLinear(srgb);
-        
-        // Letter spacing & line height (Clay gives pixel values; 0 -> use font default)
-        float ls  = (float)td.letterSpacing;
-        float lh  = (float)td.lineHeight;  // if 0, TextRenderer uses ascent/descent/lineGap
-        
-        // Starting position is the top-left of the command's bbox
-        glm::vec2 start = { (float)bb.x, (float)bb.y };
-        
-        // Layout glyphs for this text run using the atlas bucket
-        auto& batch = textBatches[bucketPx];
-        auto glyphs = text->layoutASCII(bucketPx, txt, start, linear, ls, lh);
 
-        // Append to this bucket's vector
-        batch.insert(batch.end(), glyphs.begin(), glyphs.end());
+        float ls  = (float)td.letterSpacing;
+        float lh  = (float)td.lineHeight;
+
+        glm::vec2 start = { (float)bb.x, (float)bb.y };
+
+        RunTemp r{};
+        r.px      = bucketPx;
+        r.scissor = scissorStack.back(); // <-- ACTIVE CLIP FROM CLAY
+        r.glyphs  = text->layoutASCII(bucketPx, txt, start, linear, ls, lh);
+        r.z       = rc.zIndex;
+        r.seq     = i;
+
+        runTemps.push_back(std::move(r));
     }
+
+    std::stable_sort(runTemps.begin(), runTemps.end(),
+        [](const RunTemp& a, const RunTemp& b){
+            if (a.z != b.z) return a.z < b.z;
+            return a.seq < b.seq;
+        });
+    this->tempRuns = std::move(runTemps);
 }
 
 void UiApp::run() {

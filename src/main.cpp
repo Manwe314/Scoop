@@ -11,8 +11,11 @@
 #include <cstdint>
 #include "UiApp.hpp"
 
-int main() {
-  UiApp app;
+int main(int argc, char *argv[]) {
+  std::string def;
+  if (argc > 1)
+    def = argv[1];
+  UiApp app(def);
 
   try
   {

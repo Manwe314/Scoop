@@ -87,7 +87,7 @@ std::vector<TextRenderer::GlyphInstance> TextRenderer::layoutASCII(int pixelSize
         GlyphInstance inst{};
         // packed offsets place TOP-LEFT of the glyph bitmap relative to the baseline
         float gx = std::round(x + g.offX);
-        float gy = std::round(baseline + g.offY);
+        float gy = std::floor(baseline + g.offY + 0.5f);
 
         inst.pos   = { gx, gy };         // top-left in px
         inst.size  = { g.w, g.h };       // px size
