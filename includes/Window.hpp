@@ -35,7 +35,8 @@ public:
     void resetWindowResizedFlag() {frameBufferResized = false;}
     void getCursorPos(double& x, double& y) const { glfwGetCursorPos(display, &x, &y); }
     void getSizes(int& winW, int& winH, int& fbW, int& fbH) const { glfwGetWindowSize(display, &winW, &winH); glfwGetFramebufferSize(display, &fbW, &fbH); }
-
+    void close() { glfwSetWindowShouldClose(display, GLFW_TRUE); }
+    
     int getWidth() { return width; }
     int getHeight() { return height; }
 

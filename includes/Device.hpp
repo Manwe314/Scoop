@@ -18,9 +18,12 @@ struct SwapChainSupportDetails {
 struct QueueFamilyIndices {
   uint32_t graphicsFamily;
   uint32_t presentFamily;
+  uint32_t computeFamily;
   bool graphicsFamilyHasValue = false;
   bool presentFamilyHasValue = false;
+  bool computeFamilyHasValue = false;
   bool isComplete() { return graphicsFamilyHasValue && presentFamilyHasValue; }
+  bool isCompleteRay() { return graphicsFamilyHasValue && presentFamilyHasValue && computeFamilyHasValue; }
 };
 
 class Device {
@@ -31,7 +34,7 @@ class Device {
   const bool enableValidationLayers = true;
 #endif
 
-  Device(Window &window);
+  Device(Window &window, VkInstance inst);
   ~Device();
 
   // Not copyable or movable
@@ -75,6 +78,7 @@ class Device {
 
   VkPhysicalDevice getPhysicalDevice() { return physicalDevice; }
   std::string getName() { return name; }
+  std::vector<VkPhysicalDevice> getOptionalDevices();
   
 
  private:
@@ -87,9 +91,11 @@ class Device {
 
   // helper functions
   bool isDeviceSuitable(VkPhysicalDevice device);
+  bool isDeviceSuitableRay(VkPhysicalDevice device);
   std::vector<const char *> getRequiredExtensions();
   bool checkValidationLayerSupport();
   QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device);
+  QueueFamilyIndices findQueueFamiliesRay(VkPhysicalDevice device);
   void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
   void hasGflwRequiredInstanceExtensions();
   bool checkDeviceExtensionSupport(VkPhysicalDevice device);
@@ -110,3 +116,6 @@ class Device {
   const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
   const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 };
+
+VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT *pDebugMessenger);
+void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks *pAllocator);

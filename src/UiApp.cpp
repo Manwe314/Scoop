@@ -140,7 +140,7 @@ struct RectangleItem {
     uint32_t seq;
 };
 
-UiApp::UiApp(std::string def) : window(WIDTH, HEIGHT, "UI"), device(window), clayFrameStrings()
+UiApp::UiApp(std::string def, VulkanContext& context) : window(WIDTH, HEIGHT, "UI"), device(window, context.getInstance()), clayFrameStrings()
 {
     loadUi();
     createPipelineLayout();
@@ -163,9 +163,7 @@ UiApp::UiApp(std::string def) : window(WIDTH, HEIGHT, "UI"), device(window), cla
     cursorIBeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
     wanted = cursorArrow;
     std::cout << def << std::endl;
-    input.text = def;
-
-    
+    input.text = def; 
 }
 
 void UiApp::createPipelineLayout()
@@ -587,6 +585,9 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
         std::cout << "BUTTON CLICKED!" << std::endl;
+        state.shouldClose = false;
+        state.device = device.getPhysicalDevice();
+        exitRun = true;
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
     }
@@ -884,14 +885,25 @@ void UiApp::buildUi()
     this->tempRuns = std::move(runTemps);
 }
 
-void UiApp::run() {
-    
+AppState UiApp::run()
+{
+    state.shouldClose = true;
+    state.device = VK_NULL_HANDLE;
+    glfwShowWindow(window.handle());
+    if (exitRun == true)
+    {
+        recreateSwapchain();
+        exitRun = false;
+    }
     while (!window.shouldClose()) 
     {
         glfwPollEvents();
         drawFrame();
+        if (exitRun == true)
+            break;
     }
 
     vkDeviceWaitIdle(device.device());
-    
+    glfwHideWindow(window.handle());
+    return state;
 }

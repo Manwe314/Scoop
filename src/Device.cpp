@@ -13,7 +13,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
     void *pUserData) {
-  std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
+  std::cerr << "Ui validation layer: " << pCallbackData->pMessage << std::endl;
 
   return VK_FALSE;
 }
@@ -43,8 +43,8 @@ void DestroyDebugUtilsMessengerEXT(
 }
 
 // class member functions
-Device::Device(Window &window) : window{window} {
-  createInstance();
+Device::Device(Window &window, VkInstance inst) : window{window} {
+  instance = inst;
   setupDebugMessenger();
   createSurface();
   pickPhysicalDevice();
@@ -61,7 +61,23 @@ Device::~Device() {
   }
 
   vkDestroySurfaceKHR(instance, surface_, nullptr);
-  vkDestroyInstance(instance, nullptr);
+}
+
+std::vector<VkPhysicalDevice> Device::getOptionalDevices()
+{
+  std::vector<VkPhysicalDevice> optionalDevices;
+  
+  uint32_t deviceCount = 0;
+  vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+
+  std::vector<VkPhysicalDevice> devices(deviceCount);
+  vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+  for (const auto &device : devices)
+    if (isDeviceSuitableRay(device))
+      optionalDevices.push_back(device);
+
+  return optionalDevices;
 }
 
 void Device::createInstance() {
@@ -192,6 +208,24 @@ void Device::createCommandPool() {
 
 void Device::createSurface() { window.createWindowSurface(instance, &surface_); }
 
+bool Device::isDeviceSuitableRay(VkPhysicalDevice device) {
+  QueueFamilyIndices indices = findQueueFamiliesRay(device);
+
+  bool extensionsSupported = checkDeviceExtensionSupport(device);
+
+  bool swapChainAdequate = false;
+  if (extensionsSupported) {
+    SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
+    swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
+  }
+
+  VkPhysicalDeviceFeatures supportedFeatures;
+  vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
+
+  return indices.isCompleteRay() && extensionsSupported && swapChainAdequate &&
+         supportedFeatures.samplerAnisotropy;
+}
+
 bool Device::isDeviceSuitable(VkPhysicalDevice device) {
   QueueFamilyIndices indices = findQueueFamilies(device);
 
@@ -312,6 +346,40 @@ bool Device::checkDeviceExtensionSupport(VkPhysicalDevice device) {
   }
 
   return requiredExtensions.empty();
+}
+
+QueueFamilyIndices Device::findQueueFamiliesRay(VkPhysicalDevice device) {
+  QueueFamilyIndices indices;
+
+  uint32_t queueFamilyCount = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+  std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+  vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+  int i = 0;
+  for (const auto &queueFamily : queueFamilies) {
+    if (queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+      indices.graphicsFamily = i;
+      indices.graphicsFamilyHasValue = true;
+    }
+    if (queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+      indices.computeFamily = i;
+      indices.computeFamilyHasValue = true;
+    }
+    VkBool32 presentSupport = false;
+    vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface_, &presentSupport);
+    if (queueFamily.queueCount > 0 && presentSupport) {
+      indices.presentFamily = i;
+      indices.presentFamilyHasValue = true;
+    }
+    if (indices.isCompleteRay()) {
+      break;
+    }
+
+    i++;
+  }
+  return indices;
 }
 
 QueueFamilyIndices Device::findQueueFamilies(VkPhysicalDevice device) {

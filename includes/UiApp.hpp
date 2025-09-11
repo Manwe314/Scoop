@@ -7,11 +7,17 @@
 #include "SwapChain.hpp"
 #include "UiRenderer.hpp"
 #include "TextRenderer.hpp"
+#include "VulkanContext.hpp"
 
 #include <memory>
 #include <vector>
 #include <stdexcept>
 #include <unordered_map>
+
+struct AppState {
+    bool shouldClose;
+    VkPhysicalDevice device;
+};
 
 struct TextInputState {
     std::string text;
@@ -45,9 +51,9 @@ class UiApp
     public:
         static const int WIDTH = 1200;
         static const int HEIGHT = 800;
-        UiApp(std::string def);
+        UiApp(std::string def, VulkanContext& context);
         ~UiApp();
-        void run();
+        AppState run();
         UiApp(const UiApp&) = delete;
         void operator=(const UiApp&) = delete;
         
@@ -83,6 +89,9 @@ class UiApp
         
         Window window;
         Device device;
+
+        AppState state;
+        bool exitRun = false;
 
         GLFWcursor* cursorArrow = nullptr;
         GLFWcursor* cursorHand  = nullptr;

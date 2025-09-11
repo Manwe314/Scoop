@@ -1,3 +1,2 @@
-input strings are size limited
-somethig is leaking memory
-carat and input field handling
+coming back to UI segfaults 
+add memory debugging for leaks
