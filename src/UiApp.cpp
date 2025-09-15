@@ -554,6 +554,16 @@ void UiApp::loadUi()
     uiOverlay = std::make_unique<UiRenderer>(device, 12);
 }
 
+void UiApp::reconstruct()
+{
+    swapChain.reset();
+    window.recreate();
+    device.createSurface();
+    recreateSwapchain();
+    glfwSetCharCallback(window.handle(), &UiApp::CharCallback);
+    glfwSetKeyCallback (window.handle(), &UiApp::KeyCallback);
+}
+
 UiApp::~UiApp()
 {
     vkDestroyPipelineLayout(device.device(), pipelineLayout, nullptr);
@@ -889,10 +899,12 @@ AppState UiApp::run()
 {
     state.shouldClose = true;
     state.device = VK_NULL_HANDLE;
-    glfwShowWindow(window.handle());
+    if (window.handle() == nullptr)
+        std::cout << "WHOOOPS its Null" << std::endl;
+
     if (exitRun == true)
     {
-        recreateSwapchain();
+        reconstruct();
         exitRun = false;
     }
     while (!window.shouldClose()) 

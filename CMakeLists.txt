@@ -59,6 +59,10 @@ file(GLOB SHADERS
 set(SPIRV_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
 
+add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+add_link_options(-fsanitize=address)
+
+
 set(SPV_BINARIES "")
 foreach(SRC ${SHADERS})
   get_filename_component(fname ${SRC} NAME)

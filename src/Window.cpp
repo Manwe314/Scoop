@@ -1,4 +1,5 @@
 #include "Window.hpp"
+#include <iostream>
 
 Window::Window(int w, int h, std::string name) : width(w), height(h), name(name)
 {
@@ -8,7 +9,6 @@ Window::Window(int w, int h, std::string name) : width(w), height(h), name(name)
 Window::~Window()
 {
     glfwDestroyWindow(display);
-    glfwTerminate();
 }
 
 
@@ -35,4 +35,13 @@ void  Window::frameBufferResizeCallback(GLFWwindow *window, int width, int heigh
     nwindow->frameBufferResized = true;
     nwindow->width = width;
     nwindow->height = height;
+}
+
+void Window::recreate() 
+{
+    if (display) {
+        glfwDestroyWindow(display);
+        display = nullptr;
+    }
+    initWindow(); 
 }

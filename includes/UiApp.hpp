@@ -75,6 +75,7 @@ class UiApp
         void drawFrame();
         void recreateSwapchain();
         void recordCommandBuffer(int imageIndex);
+        void reconstruct();
         
         static UiApp* s_active;
         static void CharCallback(GLFWwindow* win, unsigned int codepoint);

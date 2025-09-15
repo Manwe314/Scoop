@@ -376,8 +376,11 @@ void SwapChain::createSyncObjects() {
   }
 }
 
-VkSurfaceFormatKHR SwapChain::chooseSwapSurfaceFormat(
-    const std::vector<VkSurfaceFormatKHR> &availableFormats) {
+VkSurfaceFormatKHR SwapChain::chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats)
+{
+  if (availableFormats.empty())
+    throw std::runtime_error("No available swapchain surface formats.");
+    
   for (const auto &availableFormat : availableFormats) {
     if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB &&
         availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {

@@ -22,6 +22,7 @@ VulkanContext::VulkanContext()
 VulkanContext::~VulkanContext()
 {
     vkDestroyInstance(instance, nullptr);
+    glfwTerminate();
 }
 
 

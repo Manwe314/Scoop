@@ -79,12 +79,12 @@ class Device {
   VkPhysicalDevice getPhysicalDevice() { return physicalDevice; }
   std::string getName() { return name; }
   std::vector<VkPhysicalDevice> getOptionalDevices();
+  void createSurface();
   
 
  private:
   void createInstance();
   void setupDebugMessenger();
-  void createSurface();
   void pickPhysicalDevice();
   void createLogicalDevice();
   void createCommandPool();
@@ -109,7 +109,7 @@ class Device {
   std::string name;
 
   VkDevice device_;
-  VkSurfaceKHR surface_;
+  VkSurfaceKHR surface_ = VK_NULL_HANDLE;
   VkQueue graphicsQueue_;
   VkQueue presentQueue_;
 

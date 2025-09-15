@@ -206,7 +206,12 @@ void Device::createCommandPool() {
   }
 }
 
-void Device::createSurface() { window.createWindowSurface(instance, &surface_); }
+void Device::createSurface()
+{
+  if (surface_ != VK_NULL_HANDLE)
+    vkDestroySurfaceKHR(instance, surface_, nullptr); 
+  window.createWindowSurface(instance, &surface_); 
+}
 
 bool Device::isDeviceSuitableRay(VkPhysicalDevice device) {
   QueueFamilyIndices indices = findQueueFamiliesRay(device);
