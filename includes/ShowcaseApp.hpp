@@ -7,6 +7,14 @@
 #include "SwapChain.hpp"
 #include <optional>
 #include <set>
+#include <array>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <unordered_set>
+#include <initializer_list>
 
 
 #define VALIDATE true
@@ -28,6 +36,13 @@ private:
     Window window;
     VkDevice device;
 
+    VkSwapchainKHR swapChain;
+    std::vector<VkImage> swapChainImages;
+    VkFormat swapChainImageFormat;
+    VkExtent2D swapChainExtent;
+
+    std::vector<VkImageView> swapChainImageViews;
+
     VkQueue graphicsQueue;
     VkQueue presentQueue;
     VkQueue computeQueue;
@@ -44,6 +59,12 @@ private:
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
     void createLogicalDevice();
+    void createSwapchain();
+    void createImageViews();
+    SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
+    VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &capabilities);
 
 public:
     ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst);

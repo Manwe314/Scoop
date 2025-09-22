@@ -1,2 +1,1 @@
-coming back to UI segfaults 
-add memory debugging for leaks
+swwapchain for new app
