@@ -30,7 +30,6 @@ typedef struct s_Pipeline
 class Pipeline
 {
 private:
-    static std::vector<char> readFile(const std::string& filepath);
     void createGraphicsPipeline(const PipelineConfigInfo& config, const std::string& vertFilepath, const std::string& fragFilepath);
     void createShaderModule(const std::vector<char>& code, VkShaderModule * shaderModule);
     Device& device;
@@ -38,6 +37,7 @@ private:
     VkShaderModule vertShaderModule;
     VkShaderModule fragShaderModule;
 public:
+    static std::vector<char> readFile(const std::string& filepath);
     Pipeline(Device& device, const PipelineConfigInfo& config, const std::string& vertFilepath, const std::string& fragFilepath);
     Pipeline(Device& device,
            const PipelineConfigInfo& config,

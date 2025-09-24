@@ -1,6 +1,8 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
 
+// ~~~~~ helpers ~~~~~~
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -28,6 +30,21 @@ static std::vector<uint32_t> uniqueIndices(std::initializer_list<std::optional<u
     return out;
 }
 
+VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
+{
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = code.size();
+    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create shader module!");
+    return module;
+}
+
+// ~~~~ constructor / destructor ~~~~
+
 ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst) : window(1200, 900, "Scoop")
 {
     instance = inst;
@@ -39,18 +56,59 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst) : window(1200, 9
     createLogicalDevice();
     createSwapchain();
     createImageViews();
+    createSyncObjects();
+    createOffscreenTarget(); // on resizing will need to call this again
+    createComputeDescriptors();
+    createComputePipeline();
+    createRenderPass();
+    createFramebuffers();
+    createGraphicsDescriptors();
+    createFullscreenGraphicsPipeline();
 }
 
 ShowcaseApp::~ShowcaseApp()
 {
+    if (graphicsPipeline)
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    if (graphicsPipelineLayout)
+        vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
+
+    destroyGraphicsDescriptors();
+    destroyFramebuffers();
+    
+    if (renderPass)
+        vkDestroyRenderPass(device, renderPass, nullptr);
+
+    if (computePipeline)
+        vkDestroyPipeline(device, computePipeline, nullptr);
+    if (computePipelineLayout)
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+    
+    destroyComputeDescriptors();
+    destroyOffscreenTarget();
+
+    for (auto s : imageRenderFinished)
+        vkDestroySemaphore(device, s, nullptr);
+    imageRenderFinished.clear();
+    
+    for (size_t i = 0; i < imageAvailableSemaphores.size(); ++i)
+        vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+    for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i)
+        vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+    for (size_t i = 0; i < inFlightFences.size(); ++i)
+        vkDestroyFence(device, inFlightFences[i], nullptr);
+    
     for (auto imageView : swapChainImageViews)
         vkDestroyImageView(device, imageView, nullptr);
+    
     vkDestroySwapchainKHR(device, swapChain, nullptr);
     vkDestroyDevice(device, nullptr);
     if (VALIDATE)
         DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
 }
+
+// ~~~~~ Creation ~~~~~
 
 void ShowcaseApp::createLogicalDevice()
 {
@@ -222,7 +280,9 @@ void ShowcaseApp::createSwapchain()
 
     uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
     if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount)
-       imageCount = swapChainSupport.capabilities.maxImageCount;
+        imageCount = swapChainSupport.capabilities.maxImageCount;
+
+    VkSwapchainKHR oldSwap = validOldSwapchain();
 
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -235,14 +295,16 @@ void ShowcaseApp::createSwapchain()
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     QueueFamiliyIndies indices = findQueueFamilies(physicalDevice);
-
     std::vector<uint32_t> q = uniqueIndices({indices.graphicsFamily, indices.presentFamily, indices.computeFamily});
-    
-    if (q.size() > 1) {
+
+    if (q.size() > 1)
+    {
         createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         createInfo.queueFamilyIndexCount = uint32_t(q.size());
         createInfo.pQueueFamilyIndices = q.data();
-    } else {
+    }
+    else
+    {
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         createInfo.queueFamilyIndexCount = 0;
         createInfo.pQueueFamilyIndices = nullptr;
@@ -252,17 +314,99 @@ void ShowcaseApp::createSwapchain()
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     createInfo.presentMode = presentMode;
     createInfo.clipped = VK_TRUE;
-    createInfo.oldSwapchain = VK_NULL_HANDLE;
+    createInfo.oldSwapchain = oldSwap;
 
-    if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS)
+    VkSwapchainKHR newSwapchain = VK_NULL_HANDLE;
+    if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &newSwapchain) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create swap chain!");
+
+    if (oldSwap != VK_NULL_HANDLE)
+        vkDestroySwapchainKHR(device, oldSwap, nullptr);
+
+    swapChain = newSwapchain;
 
     vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
     swapChainImages.resize(imageCount);
     vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
-    
+
     swapChainImageFormat = surfaceFormat.format;
     swapChainExtent = extent;
+}
+
+void ShowcaseApp::recreateSwapchain()
+{
+    VkExtent2D extent = window.getExtent();
+    while (extent.width == 0 || extent.height == 0) {
+        glfwWaitEvents();
+        extent = window.getExtent();
+    }
+    vkDeviceWaitIdle(device);
+    destroyFramebuffers();
+
+    for (auto iv : swapChainImageViews)
+        vkDestroyImageView(device, iv, nullptr);
+    swapChainImageViews.clear();
+
+    for (auto s : imageRenderFinished)
+        vkDestroySemaphore(device, s, nullptr);
+    imageRenderFinished.clear();
+
+    if (graphicsPipeline)
+    {
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        graphicsPipeline = VK_NULL_HANDLE;
+    }
+    if (graphicsPipelineLayout)
+    {
+        vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
+        graphicsPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (renderPass)
+    {
+        vkDestroyRenderPass(device, renderPass, nullptr);
+        renderPass = VK_NULL_HANDLE;
+    }
+    destroyOffscreenTarget();
+
+    createSwapchain();
+    createImageViews();
+    createRenderPass();
+    createFramebuffers();
+    createOffscreenTarget();
+
+    updateComputeDescriptor();
+
+    if (graphicsSet)
+    {
+        VkDescriptorImageInfo img{};
+        img.sampler     = offscreenSampler;
+        img.imageView   = offscreenView;
+        img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = graphicsSet;
+        w.dstBinding = 0;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.descriptorCount = 1;
+        w.pImageInfo = &img;
+
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+    }
+
+    createFullscreenGraphicsPipeline();
+
+    imageRenderFinished.resize(swapChainImages.size());
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (size_t i = 0; i < imageRenderFinished.size(); ++i)
+        if (vkCreateSemaphore(device, &semInfo, nullptr, &imageRenderFinished[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create per-image present semaphore!");
+
+    imagesInFlight.assign(swapChainImages.size(), VK_NULL_HANDLE);
+    offscreenInitialized = false;
+
+    window.resetWindowResizedFlag();
 }
 
 void ShowcaseApp::createImageViews()
@@ -294,11 +438,498 @@ void ShowcaseApp::createImageViews()
 
 }
 
-void ShowcaseApp::run()
+void ShowcaseApp::createSyncObjects()
 {
-    while (!window.shouldClose()) 
+    imageAvailableSemaphores.resize(SwapChain::MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemaphores.resize(SwapChain::MAX_FRAMES_IN_FLIGHT);
+    inFlightFences.resize(SwapChain::MAX_FRAMES_IN_FLIGHT);
+
+    imagesInFlight.resize(swapChainImages.size(), VK_NULL_HANDLE);
+    
+    imageRenderFinished.resize(swapChainImages.size());
+
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    
+    for (size_t i = 0; i < imageRenderFinished.size(); ++i)
     {
-        glfwPollEvents();
+        if (vkCreateSemaphore(device, &semInfo, nullptr, &imageRenderFinished[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create per-image present semaphore!");
+    }
+
+    for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (vkCreateSemaphore(device, &semInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create imageAvailable semaphore!");
+
+        if (vkCreateSemaphore(device, &semInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create renderFinished semaphore!");
+
+        if (vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create inFlight fence!");
     }
 }
 
+void ShowcaseApp::createOffscreenTarget()
+{
+    VkExtent3D extent3D{};
+    extent3D.width  = swapChainExtent.width;
+    extent3D.height = swapChainExtent.height;
+    extent3D.depth  = 1;
+
+    VkImageCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    createInfo.imageType = VK_IMAGE_TYPE_2D;
+    createInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    createInfo.extent = extent3D;
+    createInfo.mipLevels = 1;
+    createInfo.arrayLayers = 1;
+    createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    createInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(device, &createInfo, nullptr, &offscreenImage) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create offscreen image!");
+
+    VkMemoryRequirements memReq{};
+    vkGetImageMemoryRequirements(device, offscreenImage, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+    uint32_t memoryTypeIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+    {
+        bool typeOk = (memReq.memoryTypeBits & (1u << i)) != 0;
+        bool flagsOk = (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        if (typeOk && flagsOk)
+        {
+            memoryTypeIndex = i;
+            break;
+        }
+    }
+    if (memoryTypeIndex == UINT32_MAX)
+        throw std::runtime_error("Showcase: no suitable memory type for offscreen image!");
+
+    VkMemoryAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.allocationSize = memReq.size;
+    allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+    if (vkAllocateMemory(device, &allocateInfo, nullptr, &offscreenMemory) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate offscreen image memory!");
+
+    vkBindImageMemory(device, offscreenImage, offscreenMemory, 0);
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = offscreenImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = createInfo.format;
+    viewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewCreateInfo, nullptr, &offscreenView) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create offscreen image view!");
+}
+
+void ShowcaseApp::createComputeDescriptors()
+{
+    VkDescriptorSetLayoutBinding b0{};
+    b0.binding = 0;
+    b0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    b0.descriptorCount = 1;
+    b0.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.bindingCount = 1;
+    layoutCreateInfo.pBindings = &b0;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutCreateInfo, nullptr, &computeSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute descriptor set layout!");
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSize.descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.maxSets = 1;
+    poolCreateInfo.poolSizeCount = 1;
+    poolCreateInfo.pPoolSizes = &poolSize;
+
+    if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &computeDescPool) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute descriptor pool!");
+
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = computeDescPool;
+    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.pSetLayouts = &computeSetLayout;
+
+    if (vkAllocateDescriptorSets(device, &allocateInfo, &computeSet) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate compute descriptor set!");
+
+    updateComputeDescriptor();
+}
+
+void ShowcaseApp::updateComputeDescriptor()
+{
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageInfo.imageView   = offscreenView;
+    imageInfo.sampler     = VK_NULL_HANDLE;
+
+    VkWriteDescriptorSet w0{};
+    w0.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w0.dstSet = computeSet;
+    w0.dstBinding = 0;
+    w0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w0.descriptorCount = 1;
+    w0.pImageInfo = &imageInfo;
+
+    vkUpdateDescriptorSets(device, 1, &w0, 0, nullptr);
+}
+
+void ShowcaseApp::createComputePipeline()
+{
+    VkPipelineLayoutCreateInfo layoutCreateInfo{};
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.setLayoutCount = 1;
+    layoutCreateInfo.pSetLayouts = &computeSetLayout;
+    layoutCreateInfo.pushConstantRangeCount = 0;
+    layoutCreateInfo.pPushConstantRanges = nullptr;
+
+    if (vkCreatePipelineLayout(device, &layoutCreateInfo, nullptr, &computePipelineLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute pipeline layout!");
+
+    auto code = Pipeline::readFile("build/shaders/rayTrace.comp.spv");
+    VkShaderModule shader = createShaderModule(code);
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = shader;
+    stage.pName  = "main";
+
+    VkComputePipelineCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    createInfo.stage = stage;
+    createInfo.layout = computePipelineLayout;
+    createInfo.basePipelineHandle = VK_NULL_HANDLE;
+    createInfo.basePipelineIndex = -1;
+
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &computePipeline) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute pipeline!");
+
+    vkDestroyShaderModule(device, shader, nullptr);
+}
+
+void ShowcaseApp::createRenderPass()
+{
+    VkAttachmentDescription color{};
+    color.format = swapChainImageFormat;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color.finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorRef{};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = 0;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    createInfo.attachmentCount = 1;
+    createInfo.pAttachments = &color;
+    createInfo.subpassCount = 1;
+    createInfo.pSubpasses = &subpass;
+    createInfo.dependencyCount = 1;
+    createInfo.pDependencies = &dep;
+
+    if (vkCreateRenderPass(device, &createInfo, nullptr, &renderPass) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create render pass!");
+}
+
+void ShowcaseApp::createFramebuffers()
+{
+    swapChainFramebuffers.resize(swapChainImageViews.size());
+
+    for (size_t i = 0; i < swapChainImageViews.size(); ++i)
+    {
+        VkImageView attachments[1] = { swapChainImageViews[i] };
+
+        VkFramebufferCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        createInfo.renderPass = renderPass;
+        createInfo.attachmentCount = 1;
+        createInfo.pAttachments = attachments;
+        createInfo.width  = swapChainExtent.width;
+        createInfo.height = swapChainExtent.height;
+        createInfo.layers = 1;
+
+        if (vkCreateFramebuffer(device, &createInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create framebuffer!");
+    }
+}
+
+void ShowcaseApp::createGraphicsDescriptors()
+{
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    if (vkCreateSampler(device, &samplerCreateInfo, nullptr, &offscreenSampler) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create sampler!");
+
+    VkDescriptorSetLayoutBinding b0{};
+    b0.binding = 0;
+    b0.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    b0.descriptorCount = 1;
+    b0.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.bindingCount = 1;
+    layoutCreateInfo.pBindings = &b0;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutCreateInfo, nullptr, &graphicsSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create graphics descriptor set layout!");
+
+    VkDescriptorPoolSize p{};
+    p.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    p.descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.maxSets = 1;
+    poolCreateInfo.poolSizeCount = 1;
+    poolCreateInfo.pPoolSizes = &p;
+
+    if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &graphicsDescPool) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create graphics descriptor pool!");
+
+    
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = graphicsDescPool;
+    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.pSetLayouts = &graphicsSetLayout;
+
+    if (vkAllocateDescriptorSets(device, &allocateInfo, &graphicsSet) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate graphics descriptor set!");
+
+    VkDescriptorImageInfo img{};
+    img.sampler = offscreenSampler;
+    img.imageView = offscreenView;
+    img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = graphicsSet;
+    w.dstBinding = 0;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.descriptorCount = 1;
+    w.pImageInfo = &img;
+
+    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+}
+
+void ShowcaseApp::createFullscreenGraphicsPipeline()
+{
+    VkPipelineLayoutCreateInfo layoutCreateInfo{};
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.setLayoutCount = 1;
+    layoutCreateInfo.pSetLayouts = &graphicsSetLayout;
+
+    if (vkCreatePipelineLayout(device, &layoutCreateInfo, nullptr, &graphicsPipelineLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create graphics pipeline layout!");
+
+    auto vertCode = Pipeline::readFile("build/shaders/fullScreen.vert.spv");
+    auto fragCode = Pipeline::readFile("build/shaders/fullScreen.frag.spv");
+
+    VkShaderModule vert = createShaderModule(vertCode);
+    VkShaderModule frag = createShaderModule(fragCode);
+
+    VkPipelineShaderStageCreateInfo vertShaderStageCreateInfo{};
+    vertShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageCreateInfo.module = vert;
+    vertShaderStageCreateInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageCreateInfo{};
+    fragShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageCreateInfo.module = frag;
+    fragShaderStageCreateInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo stages[2] = { vertShaderStageCreateInfo, fragShaderStageCreateInfo };
+
+    VkPipelineVertexInputStateCreateInfo vertexInputCreateInfo{};
+    vertexInputCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyCreateInfo{};
+    inputAssemblyCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssemblyCreateInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width  = (float)swapChainExtent.width;
+    viewport.height = (float)swapChainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = swapChainExtent;
+
+    VkPipelineViewportStateCreateInfo viewportCreateInfo{};
+    viewportCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportCreateInfo.viewportCount = 1;
+    viewportCreateInfo.pViewports = &viewport;
+    viewportCreateInfo.scissorCount = 1;
+    viewportCreateInfo.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizationCreateInfo{};
+    rasterizationCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizationCreateInfo.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizationCreateInfo.cullMode = VK_CULL_MODE_NONE;
+    rasterizationCreateInfo.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizationCreateInfo.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisampleCreateInfo{};
+    multisampleCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampleCreateInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlendCreateInfo{};
+    colorBlendCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlendCreateInfo.attachmentCount = 1;
+    colorBlendCreateInfo.pAttachments = &colorBlendAttachment;
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.stageCount = 2;
+    pipelineCreateInfo.pStages = stages;
+    pipelineCreateInfo.pVertexInputState   = &vertexInputCreateInfo;
+    pipelineCreateInfo.pInputAssemblyState = &inputAssemblyCreateInfo;
+    pipelineCreateInfo.pViewportState      = &viewportCreateInfo;
+    pipelineCreateInfo.pRasterizationState = &rasterizationCreateInfo;
+    pipelineCreateInfo.pMultisampleState   = &multisampleCreateInfo;
+    pipelineCreateInfo.pDepthStencilState  = nullptr;
+    pipelineCreateInfo.pColorBlendState    = &colorBlendCreateInfo;
+    pipelineCreateInfo.layout = graphicsPipelineLayout;
+    pipelineCreateInfo.renderPass = renderPass;
+    pipelineCreateInfo.subpass = 0;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &graphicsPipeline) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create graphics pipeline!");
+
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+}
+
+
+// ~~~~~ Destruction ~~~~~~
+
+void ShowcaseApp::destroyGraphicsDescriptors()
+{
+    if (graphicsDescPool)
+    {
+        vkDestroyDescriptorPool(device, graphicsDescPool, nullptr);
+        graphicsDescPool = VK_NULL_HANDLE;
+    }
+    if (graphicsSetLayout)
+    {
+        vkDestroyDescriptorSetLayout(device, graphicsSetLayout, nullptr);
+        graphicsSetLayout = VK_NULL_HANDLE;
+    }
+    if (offscreenSampler)
+    {
+        vkDestroySampler(device, offscreenSampler, nullptr);
+        offscreenSampler = VK_NULL_HANDLE;
+    }
+}
+
+void ShowcaseApp::destroyFramebuffers()
+{
+    for (auto fb : swapChainFramebuffers)
+        vkDestroyFramebuffer(device, fb, nullptr);
+    swapChainFramebuffers.clear();
+}
+
+void ShowcaseApp::destroyComputeDescriptors()
+{
+    if (computeDescPool)
+    {
+        vkDestroyDescriptorPool(device, computeDescPool, nullptr);
+        computeDescPool = VK_NULL_HANDLE;
+    }
+    if (computeSetLayout)
+    {
+        vkDestroyDescriptorSetLayout(device, computeSetLayout, nullptr);
+        computeSetLayout = VK_NULL_HANDLE;
+    }
+}
+
+
+void ShowcaseApp::destroyOffscreenTarget()
+{
+    if (offscreenView)
+    {
+        vkDestroyImageView(device, offscreenView, nullptr);
+        offscreenView = VK_NULL_HANDLE;
+    }
+    if (offscreenImage)
+    {
+        vkDestroyImage(device, offscreenImage, nullptr);
+        offscreenImage = VK_NULL_HANDLE;
+    }
+    if (offscreenMemory)
+    {
+        vkFreeMemory(device, offscreenMemory, nullptr);
+        offscreenMemory = VK_NULL_HANDLE;
+    }
+}

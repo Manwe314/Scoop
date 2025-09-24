@@ -54,7 +54,8 @@ endif()
 file(GLOB SHADERS
      CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/shaders/*.vert"
-     "${CMAKE_SOURCE_DIR}/shaders/*.frag")
+     "${CMAKE_SOURCE_DIR}/shaders/*.frag"
+     "${CMAKE_SOURCE_DIR}/shaders/*.comp")
 
 set(SPIRV_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
