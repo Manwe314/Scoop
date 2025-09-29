@@ -21,13 +21,27 @@ std::optional<float> Object::to_float(const std::string& s)
     return std::nullopt;
 }
 
+static std::string trimAfterLastSlashOrBackslash(const std::string& input)
+{
+    size_t posSlash = input.find_last_of('/');
+    size_t posBackslash = input.find_last_of('\\');
 
-Object::Object(std::string &filePath) : vertices(), textureCoords(), normals()
+    size_t pos = std::max(posSlash, posBackslash);
+
+    if (pos == std::string::npos)
+        return "";
+
+    return input.substr(0, pos + 1);
+}
+
+
+Object::Object(std::string &filePath) : vertices(), textureCoords(), normals(), mtlFilePaths(), objects()
 {
     std::ifstream file(filePath);
     if (!file.is_open())
         throw std::runtime_error("Could not open the .obj file");
 
+    objFilePath = filePath;
     std::string line;
     while (std::getline(file, line))
     {
@@ -73,6 +87,8 @@ Object::~Object()
 
 void Object::parseLine(std::vector<std::string> tokens, int type)
 {
+    std::string mtl_file;
+    std::string temp;
     switch (type)
     {
     case VERTEX:
@@ -120,22 +136,43 @@ void Object::parseLine(std::vector<std::string> tokens, int type)
         normals.push_back(normal);
         break;
     case MTL_FILE:
-        
+        if (tokens.size() < 2)
+            throw std::runtime_error("OBJ file corrupted: MTL file declaration missing the file");
+        mtl_file = trimAfterLastSlashOrBackslash(objFilePath);
+        mtl_file.append(tokens[1]);
+        mtlFilePaths.push_back(mtl_file);
         break;
     case OBJ_NAME:
-        
+        if (tokens.size() < 2)
+            throw std::runtime_error("OBJ file corrupted: Object declaration missing name");   
+        currantObject = tokens[1];
         break;
     case GROUP_NAME:
-        
+        if (tokens.size() < 2)
+                throw std::runtime_error("OBJ file corrupted: Group declaration missing name");   
+            currantGroup = tokens[1];
         break;
     case MATERIAL:
-        
+        if (tokens.size() < 2)
+            throw std::runtime_error("OBJ file corrupted: Material declaration missing name");   
+        currantMeterial = tokens[1];
         break;
     case FACE:
         
         break;
     case SMOOTH_SHADING:
-        
+        if (tokens.size() < 2)
+            throw std::runtime_error("OBJ file corrupted: Object declaration missing name");   
+        std::transform(tokens[1].begin(), tokens[1].end(), tokens[1].begin(), [](unsigned char c){return std::tolower(c); });
+        if (tokens[1] == "off")
+            currantSmoothing = 0;
+        else
+        {
+            auto f = to_float(tokens[1]);
+            if (!f)
+                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Smoothing ID");
+            currantSmoothing = static_cast<uint32_t>(*f);
+        }
         break;
     default:
         throw std::runtime_error("Unknown line definition found in the OBJ file");
