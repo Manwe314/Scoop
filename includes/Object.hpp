@@ -12,6 +12,7 @@
 #include <system_error>
 #include <optional>
 #include <algorithm>
+#include <numeric>
 
 struct Face {
     std::array<int, 3> vertices;
@@ -27,8 +28,8 @@ struct Group {
 };
 
 struct SubObject {
-    std::vector<Group> groups;
     std::string name;
+    std::vector<Group> groups;
 };
 
 struct Material {
@@ -47,12 +48,35 @@ private:
     std::vector<SubObject> objects;
 
     void parseLine(std::vector<std::string> tokens, int type);
+    void parseFace(std::vector<std::string> tokens);
     std::optional<float> to_float(const std::string& s);
 
     std::string currantGroup = "";
     std::string currantObject = "";
     std::string currantMeterial = "";
     uint32_t currantSmoothing = 0;
+
+    int reading_line = 1;
+
+    inline int findObject(std::string& name)
+    {
+        if (objects.empty())
+            return -1;
+        for (int i = 0; i < objects.size(); i++)
+            if (objects[i].name == name)
+                return i;
+        return -1;
+    }
+
+    inline int findGroup(std::string& name, SubObject& obj)
+    {
+        if (obj.groups.empty())
+            return -1;
+        for (int i = 0; i < obj.groups.size(); i++)
+            if (obj.groups[i].name == name)
+                return i;
+        return -1;
+    }
 
 
 public:
