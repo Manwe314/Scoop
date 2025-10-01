@@ -13,6 +13,7 @@
 #include <optional>
 #include <algorithm>
 #include <numeric>
+#include <map>
 
 struct Face {
     std::array<int, 3> vertices;
@@ -34,6 +35,18 @@ struct SubObject {
 
 struct Material {
     std::string name;
+
+    glm::vec3 albedo;
+    glm::vec3 reflectance;
+    glm::vec3 emission;
+    
+    float shininess;
+    float opacity;
+    float refractive_index;
+
+    std::optional<std::string> texture;
+    std::optional<glm::vec3> texture_offset;
+    std::optional<glm::vec3> texture_scale;
 };
 
 class Object
@@ -46,15 +59,20 @@ private:
     std::string objFilePath;
 
     std::vector<SubObject> objects;
+    std::map<std::string, Material> materials;
 
     void parseLine(std::vector<std::string> tokens, int type);
+    void parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath);
     void parseFace(std::vector<std::string> tokens);
+    void loadMaterials();
     std::optional<float> to_float(const std::string& s);
 
     std::string currantGroup = "";
     std::string currantObject = "";
     std::string currantMeterial = "";
     uint32_t currantSmoothing = 0;
+
+    std::string currantMTLmat = "";
 
     int reading_line = 1;
 
@@ -82,6 +100,7 @@ private:
 public:
     Object(std::string &filePath);
     ~Object();
+    Material getDefaultMaterial();
 };
 
 

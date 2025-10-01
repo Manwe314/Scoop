@@ -13,6 +13,17 @@ enum {
     SMOOTH_SHADING,
 };
 
+enum {
+    ALBEDO,
+    REFLECTANCE,
+    EMISSION,
+    SHININESS,
+    OPACITY,
+    REFRACTIVEID,
+    TEXTUREFILE,
+    NAME,
+};
+
 std::optional<float> Object::to_float(const std::string& s)
 {
     float value{};
@@ -83,7 +94,7 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
 
 
 
-Object::Object(std::string &filePath) : vertices(), textureCoords(), normals(), mtlFilePaths(), objects()
+Object::Object(std::string &filePath) : vertices(), textureCoords(), normals(), mtlFilePaths(), objects(), materials()
 {
     std::ifstream file(filePath);
     if (!file.is_open())
@@ -125,7 +136,7 @@ Object::Object(std::string &filePath) : vertices(), textureCoords(), normals(), 
         parseLine(tokens, type);
         reading_line++;
     }
-
+    loadMaterials();
 }
 
 Object::~Object()
@@ -140,22 +151,23 @@ void Object::parseLine(std::vector<std::string> tokens, int type)
     std::string temp;
     switch (type)
     {
-    case VERTEX:
+    case VERTEX: {
         if (tokens.size() < 4)
-            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Vertex. at Line - " + reading_line);
+            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Vertex. at Line - " + std::to_string(reading_line));
         glm::vec3 vertex{};
         for (int i = 0; i < 3; ++i)
         {
             auto f = to_float(tokens[i + 1]);
             if (!f)
-                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Vertex Float. at Line - " + reading_line);
+                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Vertex Float. at Line - " + std::to_string(reading_line));
             vertex[i] = *f;
         }
         vertices.push_back(vertex);
+    }
         break;
-    case TEXTURE:
+    case TEXTURE: {
         if (tokens.size() < 2)
-            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Texture Coordinate. at Line - " + reading_line);
+            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Texture Coordinate. at Line - " + std::to_string(reading_line));
         glm::vec3 textureCoord{};
         for (int i = 0; i < 3; ++i)
         {
@@ -165,57 +177,59 @@ void Object::parseLine(std::vector<std::string> tokens, int type)
             {
                 auto f  = to_float(tokens[i + 1]);
                 if (!f)
-                    throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Texture Coordinate Float. at Line - " + reading_line);
+                    throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Texture Coordinate Float. at Line - " + std::to_string(reading_line));
                 textureCoord[i] = *f;
             }
         }
         textureCoords.push_back(textureCoord);
         break;
-    case NORMAL:
+    }
+    case NORMAL: {
         if (tokens.size() < 4)
-            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Normal. at Line - " + reading_line);
+            throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Normal. at Line - " + std::to_string(reading_line));
         glm::vec3 normal{};
         for (int i = 0; i < 3; ++i)
         {
             auto f = to_float(tokens[i + 1]);
             if (!f)
-                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Normal Float. at Line - " + reading_line);
+                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Normal Float. at Line - " + std::to_string(reading_line));
             normal[i] = *f;
         }
         normals.push_back(normal);
         break;
+    }
     case MTL_FILE:
         if (tokens.size() < 2)
-            throw std::runtime_error("OBJ file corrupted: MTL file declaration missing the file. at Line - " + reading_line);
+            throw std::runtime_error("OBJ file corrupted: MTL file declaration missing the file. at Line - " + std::to_string(reading_line));
         mtl_file = trimAfterLastSlashOrBackslash(objFilePath);
         mtl_file.append(tokens[1]);
         mtlFilePaths.push_back(mtl_file);
         break;
     case OBJ_NAME:
         if (tokens.size() < 2)
-            throw std::runtime_error("OBJ file corrupted: Object declaration missing name. at Line - " + reading_line);   
+            throw std::runtime_error("OBJ file corrupted: Object declaration missing name. at Line - " + std::to_string(reading_line));   
         currantObject = tokens[1];
         break;
     case GROUP_NAME:
         if (tokens.size() < 2)
-                throw std::runtime_error("OBJ file corrupted: Group declaration missing name. at Line - " + reading_line);   
+                throw std::runtime_error("OBJ file corrupted: Group declaration missing name. at Line - " + std::to_string(reading_line));   
             currantGroup = tokens[1];
         break;
     case MATERIAL:
         if (tokens.size() < 2)
-            throw std::runtime_error("OBJ file corrupted: Material declaration missing name. at Line - " + reading_line);   
+            throw std::runtime_error("OBJ file corrupted: Material declaration missing name. at Line - " + std::to_string(reading_line));   
         currantMeterial = tokens[1];
         break;
     case FACE:
         if (tokens.size() < 4)
-            throw std::runtime_error("OBJ file corrupted: Face declaration missing vertex(s). at Line - " + reading_line);
+            throw std::runtime_error("OBJ file corrupted: Face declaration missing vertex(s). at Line - " + std::to_string(reading_line));
         if (!tokens.empty())
             tokens.erase(tokens.begin());
         parseFace(tokens);
         break;
     case SMOOTH_SHADING:
         if (tokens.size() < 2)
-            throw std::runtime_error("OBJ file corrupted: Object declaration missing name. at Line - " + reading_line);   
+            throw std::runtime_error("OBJ file corrupted: Object declaration missing name. at Line - " + std::to_string(reading_line));   
         std::transform(tokens[1].begin(), tokens[1].end(), tokens[1].begin(), [](unsigned char c){return std::tolower(c); });
         if (tokens[1] == "off")
             currantSmoothing = 0;
@@ -223,12 +237,12 @@ void Object::parseLine(std::vector<std::string> tokens, int type)
         {
             auto f = to_float(tokens[1]);
             if (!f)
-                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Smoothing ID. at Line - " + reading_line);
+                throw std::runtime_error("OBJ file corrupted: an invalid declaration of a Smoothing ID. at Line - " + std::to_string(reading_line));
             currantSmoothing = static_cast<uint32_t>(*f);
         }
         break;
     default:
-        throw std::runtime_error("Unknown line definition found in the OBJ file. at Line - " + reading_line);
+        throw std::runtime_error("Unknown line definition found in the OBJ file. at Line - " + std::to_string(reading_line));
         break;
     }
 }
@@ -285,16 +299,17 @@ void Object::parseFace(std::vector<std::string> tokens)
                 (*face.normals)[i] = std::stoi(point[2]);
             }
             else
-                throw std::runtime_error("OBJ file Corrupted: Face declaration does not follow standarts. at line - " + reading_line);            
+                throw std::runtime_error("OBJ file Corrupted: Face declaration does not follow standarts. at line - " + std::to_string(reading_line));            
         }
         if (!correctFace(face, vertices))
-            throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + reading_line);
+            throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + std::to_string(reading_line));
         facesRef.push_back(std::move(face));
     }
     else
     {
         const int m = static_cast<int>(tokens.size());
-        if (m < 3) throw std::runtime_error("OBJ face with <3 vertices");
+        if (m < 3)
+            throw std::runtime_error("OBJ face with < 3 vertices" + std::to_string(reading_line));
 
         std::vector<int> vIdx;                 vIdx.reserve(m);
         std::vector<std::optional<int>> tIdx;  tIdx.reserve(m);
@@ -369,7 +384,7 @@ void Object::parseFace(std::vector<std::string> tokens)
             }
 
             if (!correctFace(face, vertices))
-                throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + reading_line);
+                throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + std::to_string(reading_line));
             facesRef.push_back(std::move(face));
         };
 
@@ -404,10 +419,10 @@ void Object::parseFace(std::vector<std::string> tokens)
             }
 
             if (!clipped)
-                throw std::runtime_error("Ear clipping failed (no ear found). Check polygon validity at line - " + reading_line);
+                throw std::runtime_error("Ear clipping failed (no ear found). Check polygon validity at line - " + std::to_string(reading_line));
 
             if (++guard > maxIter)
-                throw std::runtime_error("Ear clipping exceeded iteration guard at line - " + reading_line);
+                throw std::runtime_error("Ear clipping exceeded iteration guard at line - " + std::to_string(reading_line));
         }
 
         if (work.size() == 3)
@@ -418,4 +433,195 @@ void Object::parseFace(std::vector<std::string> tokens)
             make_face_from_orig(aOrig, bOrig, cOrig);
         }
     }
+}
+
+void Object::loadMaterials()
+{
+    materials.insert({"", getDefaultMaterial()});
+    if (mtlFilePaths.empty())
+        return;
+    for (const auto& filePath : mtlFilePaths)
+    {
+        std::ifstream file(filePath);
+        if (!file.is_open())
+            continue;
+        std::string line;
+        while (std::getline(file, line))
+        {
+            int type = -1;
+            std::istringstream iss(line);
+            std::string token;
+            std::vector<std::string> tokens;
+
+            while (iss >> token)
+                tokens.push_back(token);
+
+            if (!tokens.empty() && tokens[0][0] == '#')
+                continue;
+            if (tokens[0] == "Kd")
+                type = ALBEDO;
+            else if (tokens[0] == "Ks")
+                type = REFLECTANCE;
+            else if (tokens[0] == "Ke")
+                type = EMISSION;
+            else if (tokens[0] == "Ns")
+                type = SHININESS;
+            else if (tokens[0] == "d")
+                type = OPACITY;
+            else if (tokens[0] == "Ni")
+                type = REFRACTIVEID;
+            else if (tokens[0] == "map_Kd")
+                type = TEXTUREFILE;
+            else if (tokens[0] == "newmtl")
+                type = NAME;
+            
+            parseMaterialLine(tokens, type, filePath);
+        }
+    }
+}
+
+void Object::parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath)
+{
+    switch (type)
+    {
+    case ALBEDO: {
+        if (tokens.size() < 4 || currantMTLmat.empty())
+            break;
+        glm::vec3 albedo{};
+        for (int i = 0; i < 3; ++i)
+        {
+            auto f = to_float(tokens[i + 1]);
+            if (!f)
+                break;
+            albedo[i] = *f;
+        }
+        materials[currantMTLmat].albedo = albedo;
+        break;
+    }
+    case REFLECTANCE: {
+        if (tokens.size() < 4 || currantMTLmat.empty())
+            break;
+        glm::vec3 reflectance{};
+        for (int i = 0; i < 3; ++i)
+        {
+            auto f = to_float(tokens[i + 1]);
+            if (!f)
+                break;
+            reflectance[i] = *f;
+        }
+        materials[currantMTLmat].reflectance = reflectance;
+        break;
+    }
+    case EMISSION: {
+        if (tokens.size() < 4 || currantMTLmat.empty())
+            break;
+        glm::vec3 emission{};
+        for (int i = 0; i < 3; ++i)
+        {
+            auto f = to_float(tokens[i + 1]);
+            if (!f)
+                break;
+            emission[i] = *f;
+        }
+        materials[currantMTLmat].emission = emission;
+        break;
+    }
+    case SHININESS: {
+        if (tokens.size() < 2 || currantMTLmat.empty())
+            break;
+        auto f  = to_float(tokens[1]);
+        if (!f)
+            break;
+        materials[currantMTLmat].shininess = *f;
+        break;
+    }
+    case OPACITY: {
+        if (tokens.size() < 2 || currantMTLmat.empty())
+            break;
+        auto f  = to_float(tokens[1]);
+        if (!f)
+            break;
+        materials[currantMTLmat].opacity = *f;
+        break;
+    }
+    case REFRACTIVEID: {
+        if (tokens.size() < 2 || currantMTLmat.empty())
+            break;
+        auto f  = to_float(tokens[1]);
+        if (!f)
+            break;
+        materials[currantMTLmat].refractive_index = *f;
+        break;
+    }
+    case TEXTUREFILE: {
+        if (tokens.size() < 2 || currantMTLmat.empty())
+            break;
+        bool writing_offset = true;
+        int index = 0;
+        glm::vec3 offset = {0.0f, 0.0f, 0.0f};
+        glm::vec3 scale = {1.0f, 1.0f, 1.0f};
+        for (int i = 1; i < tokens.size(); i++)
+        {
+            if (i + 1 == tokens.size())
+            {
+                filePath = trimAfterLastSlashOrBackslash(filePath);
+                materials[currantMTLmat].texture = filePath + tokens[i];
+            }
+            else if (tokens[i] == "-o")
+            {
+                index = 0;
+                writing_offset = true;
+            }
+            else if (tokens[i] == "-s")
+            {
+                index = 0;
+                writing_offset = false;
+            }
+            else if (writing_offset == true)
+            {
+                auto f = to_float(tokens[i]);
+                if (!f)
+                    continue;
+                offset[index] = *f;
+                index++;
+            }
+            else if (writing_offset == false)
+            {
+                auto f = to_float(tokens[i]);
+                if (!f)
+                    continue;
+                scale[index] = *f;
+                index++;
+            }
+        }
+        materials[currantMTLmat].texture_offset = offset;
+        materials[currantMTLmat].texture_scale = scale;
+        break;
+    }
+    case NAME: {
+        if (tokens.size() < 2)
+        {
+            currantMTLmat = "";
+            break;
+        }
+        currantMTLmat = tokens[1];
+        materials.insert({currantMTLmat, getDefaultMaterial()});
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+Material Object::getDefaultMaterial()
+{
+    Material def{};
+    def.name = "";
+    def.albedo = glm::vec3{0.8f, 0.8f, 0.8f};
+    def.emission = glm::vec3{0.0f, 0.0f, 0.0f};
+    def.reflectance = glm::vec3{0.0f, 0.0f, 0.0f};
+    def.shininess = 32.0f;
+    def.opacity = 1.0f;
+    def.refractive_index = 1.0f;
+    return def;
 }

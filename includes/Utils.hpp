@@ -210,10 +210,6 @@ inline CoplanarityStats evaluateCoplanarity(const std::vector<glm::vec3>& pts3D,
 
 // is ear
 
-inline double cross2(const glm::vec2& a, const glm::vec2& b)
-{
-    return static_cast<double>(a.x)*b.y - static_cast<double>(a.y)*b.x;
-}
 
 inline double orient2d(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c)
 {
