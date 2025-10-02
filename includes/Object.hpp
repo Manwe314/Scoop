@@ -49,6 +49,13 @@ struct Material {
     std::optional<glm::vec3> texture_scale;
 };
 
+struct VertexNormalData
+{
+    int id;
+    std::map<Face*, glm::vec3> adjacentNormal;
+};
+
+
 class Object
 {
 private:
@@ -65,6 +72,7 @@ private:
     void parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath);
     void parseFace(std::vector<std::string> tokens);
     void loadMaterials();
+    void addNormals();
     std::optional<float> to_float(const std::string& s);
 
     std::string currantGroup = "";
@@ -94,6 +102,16 @@ private:
             if (obj.groups[i].name == name)
                 return i;
         return -1;
+    }
+
+    inline VertexNormalData findVertexData(int id, std::vector<VertexNormalData>& vertexData)
+    {
+        for (auto& data : vertexData)
+            if (data.id == id)
+                return data;
+        VertexNormalData vertex{};
+        vertex.id = id;
+        return vertex;
     }
 
 

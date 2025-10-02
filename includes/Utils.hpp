@@ -288,3 +288,9 @@ inline AABB getAABB(std::vector<glm::vec3>& vertices)
     AABB boundingBox{boxMin, boxMax};
     return boundingBox;
 }
+
+inline glm::vec3 calculateFaceNormal(const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2)
+{
+    glm::vec3 normal = glm::cross(v1 - v0, v2 - v0);
+    return normal;
+}

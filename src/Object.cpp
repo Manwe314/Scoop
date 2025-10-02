@@ -91,6 +91,18 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
     return true;
 }
 
+static void insertOrReplace(std::vector<VertexNormalData>& vec, VertexNormalData data) {
+    for (auto& v : vec)
+    {
+        if (v.id == data.id)
+        {
+            v = std::move(data);
+            return;
+        }
+    }
+    vec.push_back(std::move(data));
+}
+
 
 
 
@@ -137,6 +149,7 @@ Object::Object(std::string &filePath) : vertices(), textureCoords(), normals(), 
         reading_line++;
     }
     loadMaterials();
+    addNormals();
 }
 
 Object::~Object()
@@ -474,7 +487,6 @@ void Object::loadMaterials()
                 type = TEXTUREFILE;
             else if (tokens[0] == "newmtl")
                 type = NAME;
-            
             parseMaterialLine(tokens, type, filePath);
         }
     }
@@ -610,6 +622,91 @@ void Object::parseMaterialLine(std::vector<std::string> tokens, int type, std::s
     }
     default:
         break;
+    }
+}
+
+void Object::addNormals()
+{
+    std::vector<VertexNormalData> vertexData;
+    size_t totalFaces = 0;
+
+    for (const auto& object : objects)
+        for (const auto& group : object.groups)
+            totalFaces += group.faces.size();
+
+    vertexData.reserve(totalFaces * 3);
+
+    for (auto& object : objects)
+        for (auto& group : object.groups)
+            for (auto& face : group.faces)
+            {
+                for (int n : face.vertices)
+                {
+                    VertexNormalData vertex = findVertexData(n, vertexData);
+                    glm::vec3 normal = calculateFaceNormal(vertices[face.vertices[0] - 1], vertices[face.vertices[1] - 1], vertices[face.vertices[2] - 1]);
+                    vertex.adjacentNormal.insert({&face, normal});
+                    insertOrReplace(vertexData, vertex);
+                }
+            }
+    for (auto & data : vertexData)
+    {
+        std::map<uint32_t, glm::vec3> shadingGroupNormal;
+        std::map<uint32_t, int> shadedNormalId;
+        for (auto& [face, normal] : data.adjacentNormal)
+            if (face->smoothingGroup != 0 && glm::length(normal) > EPSILON)
+                shadingGroupNormal[face->smoothingGroup] += normal;
+        for (auto& [face, normal] : data.adjacentNormal)
+        {
+            int i = 0;
+            while (i < 3)
+            {
+                if (face->vertices[i] == data.id)
+                    break;
+                i++;
+            }
+            if (i == 3)
+                throw std::runtime_error("Unexpected Exception While generating Normals for a face: " + std::to_string(face->vertices[0]) + " " + std::to_string(face->vertices[1]) + " " + std::to_string(face->vertices[2]));
+            if (face->normals.has_value() && (*face->normals)[i] != 0)
+                continue;
+            if (!face->normals.has_value())
+                face->normals.emplace();
+            if (face->smoothingGroup == 0)
+            {
+                if (glm::length(normal) <= EPSILON)
+                    normal = glm::vec3{0.0f, 0.0f, 1.0f};
+                normals.push_back(glm::normalize(normal));
+                int normalID = normals.size();
+                for (int j = 0; j < 3; j++)
+                    if ((*face->normals)[j] == 0)
+                        (*face->normals)[j] = normalID;
+            }
+            else
+            {
+                const uint32_t smoothingG = face->smoothingGroup;
+                
+                glm::vec3 norm;
+                if (auto itteratorSmoothingG = shadingGroupNormal.find(smoothingG); itteratorSmoothingG != shadingGroupNormal.end())
+                {
+                    norm = itteratorSmoothingG->second;
+                    if (glm::length(norm) <= EPSILON)
+                        norm = glm::vec3(0.0f, 0.0f, 1.0f);
+                } 
+                else
+                    norm = glm::vec3(0.0f, 0.0f, 1.0f);
+            
+                int normalID = 0;
+                if (auto itID = shadedNormalId.find(smoothingG); itID != shadedNormalId.end())
+                    normalID = itID->second;
+                else
+                {
+                    normals.push_back(glm::normalize(norm));
+                    normalID = static_cast<int>(normals.size());
+                    shadedNormalId.emplace(smoothingG, normalID);
+                }
+            
+                (*face->normals)[i] = normalID;
+            }
+        }
     }
 }
 

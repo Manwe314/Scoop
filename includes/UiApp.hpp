@@ -8,6 +8,7 @@
 #include "UiRenderer.hpp"
 #include "TextRenderer.hpp"
 #include "VulkanContext.hpp"
+#include "Object.hpp"
 
 #include <memory>
 #include <vector>
