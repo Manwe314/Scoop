@@ -268,7 +268,7 @@ inline bool isEar(const std::vector<glm::vec2>& poly, int prev, int v, int next)
     return true;
 }
 
-// get AABB
+// AABB stuff
 
 inline AABB getAABB(std::vector<glm::vec3>& vertices)
 {
@@ -287,6 +287,64 @@ inline AABB getAABB(std::vector<glm::vec3>& vertices)
     }
     AABB boundingBox{boxMin, boxMax};
     return boundingBox;
+}
+
+inline AABB makeEmptyAABB()
+{
+    AABB box{};
+    box.min = glm::vec3( std::numeric_limits<float>::max());
+    box.max = glm::vec3(-std::numeric_limits<float>::max());
+    return box;
+}
+
+inline void expand(AABB& a, const glm::vec3& b)
+{
+    a.min = glm::min(a.min, b);
+    a.max = glm::max(a.max, b);
+}
+
+inline AABB merge(const AABB& a, const AABB& b)
+{
+    AABB box{};
+    box.min = glm::min(a.min, b.min);
+    box.max = glm::max(a.max, b.max);
+    return box;
+}
+
+inline float surfaceArea(const AABB& box)
+{
+    glm::vec3 dimensions = glm::max(box.max - box.min, glm::vec3(0));
+    return 2.0f * (dimensions.x*dimensions.y + dimensions.y*dimensions.z + dimensions.z*dimensions.x);
+}
+
+inline void getFacePositions(const Face* f, const std::vector<glm::vec3>& vertices, glm::vec3& v0, glm::vec3& v1, glm::vec3& v2)
+{
+    v0 = vertices[ f->vertices[0] - 1 ];
+    v1 = vertices[ f->vertices[1] - 1 ];
+    v2 = vertices[ f->vertices[2] - 1 ];
+}
+
+inline void computeNodeAndCentroidBounds(const std::vector<TriRef>& refs, uint32_t first, uint32_t count, AABB& nodeBox, AABB& centroidBox)
+{
+    nodeBox = makeEmptyAABB();
+    centroidBox = makeEmptyAABB();
+    for (uint32_t i=0; i<count; ++i) {
+        const auto& r = refs[first + i];
+        nodeBox = merge(nodeBox, r.boundingBox);
+        glm::vec3 c = 0.5f * (r.boundingBox.min + r.boundingBox.max);
+        expand(centroidBox, c);
+    }
+}
+
+inline bool centroidDegenerate(const AABB& cbox)
+{
+    glm::vec3 d = glm::max(cbox.max - cbox.min, glm::vec3(0));
+    return (d.x < EPSILON && d.y < EPSILON && d.z < EPSILON);
+}
+
+inline glm::vec3 centroid(const AABB& box)
+{
+    return 0.5f * (box.min + box.max);
 }
 
 inline glm::vec3 calculateFaceNormal(const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2)

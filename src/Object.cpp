@@ -1,5 +1,5 @@
 #include "Object.hpp"
-#include "Utils.hpp"
+
 
 enum {
     VERTEX,
@@ -103,6 +103,20 @@ static void insertOrReplace(std::vector<VertexNormalData>& vec, VertexNormalData
     vec.push_back(std::move(data));
 }
 
+static inline bool shouldBeLeaf(uint32_t count, int depth, const AABB& centroidBB)
+{
+    const uint32_t LEAF_THRESHOLD = 4; //Gloabl
+    if (count <= LEAF_THRESHOLD)
+        return true;
+    if (depth  > 64) //Global
+        return true;
+    
+    glm::vec3 d = centroidBB.max - centroidBB.min;
+    
+    if (d.x <= EPSILON && d.y <= EPSILON && d.z <= EPSILON)
+        return true;
+    return false;
+}
 
 
 
@@ -633,7 +647,7 @@ void Object::addNormals()
     for (const auto& object : objects)
         for (const auto& group : object.groups)
             totalFaces += group.faces.size();
-
+    total_faces = totalFaces;
     vertexData.reserve(totalFaces * 3);
 
     for (auto& object : objects)
@@ -707,6 +721,129 @@ void Object::addNormals()
                 (*face->normals)[i] = normalID;
             }
         }
+    }
+}
+
+std::vector<TriRef> Object::getRefArray() const
+{
+    std::vector<TriRef> output;
+    if (total_faces == 0)
+        throw std::runtime_error("Normals creation failed, total faces counted 0");
+    output.reserve(total_faces);
+
+    auto getVertex = [&](int index) -> const glm::vec3& {
+        int i = index - 1;
+        if (i < 0 || i >= vertices.size())
+            throw std::runtime_error("Object Parser Failed, Face vertex out of bounds Found");
+        return vertices[(size_t)i];
+    };
+
+    for (const auto& object : objects)
+        for (const auto& group : object.groups)
+            for (const auto& face : group.faces)
+            {
+                const glm::vec3& v0 = getVertex(face.vertices[0]);
+                const glm::vec3& v1 = getVertex(face.vertices[1]);
+                const glm::vec3& v2 = getVertex(face.vertices[2]);
+
+                const float area = glm::length(glm::cross(v1 - v0, v2 - v0));
+                if (area <= EPSILON)
+                    continue;
+                
+                std::vector<glm::vec3> trinagle;
+                trinagle.push_back(v0);
+                trinagle.push_back(v1);
+                trinagle.push_back(v2);
+                TriRef refrance{};
+                refrance.referance = const_cast<Face*>(&face);
+                refrance.boundingBox = getAABB(trinagle);
+                
+                output.push_back(refrance);
+            }
+    return output;
+}
+
+
+SBVH Object::buildSpatialBoundingVolumeHierarchy()
+{
+    std::vector<TriRef> referances = getRefArray();
+    
+    BuildState state{};
+    state.refs = std::move(referances);
+    state.nodes.reserve(2 * state.refs.size());
+
+    AABB rootBB = getAABB(vertices);
+    float rootArea = surfaceArea(rootBB);
+
+    std::vector<BuildTask> stack;
+    stack.reserve(2u * state.refs.size());
+
+    BuildTask root{};
+    root.first = 0;
+    root.count = static_cast<uint32_t>(state.refs.size());
+    root.parent = -1;
+    root.depth = 0;
+    root.asLeft = false;
+    root.rootSA = rootArea;
+
+    stack.push_back(root);
+
+    std::vector<uint32_t> leafFirstIndexes;
+    std::vector<uint32_t> leafcounts;
+
+    while(!stack.empty())
+    {
+        BuildTask task = stack.back();
+        stack.pop_back();
+
+        int nodeIdx = static_cast<int>(state.nodes.size());
+        BVHNode node{};
+        state.nodes.push_back(node);
+
+        if (task.parent >= 0)
+        {
+            if (task.asLeft)
+            {
+                state.nodes[task.parent].left_start = static_cast<uint32_t>(nodeIdx);
+                state.nodes[task.parent].left_count = 0xFFFFFFFFu;
+            }
+            else
+            {
+                state.nodes[task.parent].right_start = static_cast<uint32_t>(nodeIdx);
+                state.nodes[task.parent].right_count = 0xFFFFFFFFu;
+            }
+        }
+
+        AABB nodeBB = makeEmptyAABB();
+        AABB centroidBB = makeEmptyAABB();
+        for (uint32_t i = 0; i < task.count; i++)
+        {
+            const AABB box = state.refs[task.first + i].boundingBox;
+            expand(nodeBB, box.min);
+            expand(nodeBB, box.max);
+            expand(centroidBB, centroid(box));
+        }
+
+        if (shouldBeLeaf(task.count, task.depth, centroidBB))
+        {
+            state.nodes[nodeIdx].bbMax_left = nodeBB.max;
+            state.nodes[nodeIdx].bbMin_left = nodeBB.min;
+            state.nodes[nodeIdx].bbMax_right = nodeBB.max;
+            state.nodes[nodeIdx].bbMin_right = nodeBB.min;
+
+            state.nodes[nodeIdx].left_start = task.first;
+            state.nodes[nodeIdx].left_count = task.count;
+            state.nodes[nodeIdx].right_start = 0;
+            state.nodes[nodeIdx].right_count = 0;
+
+            leafFirstIndexes.push_back(task.first);
+            leafcounts.push_back(task.count);
+
+            continue;
+        }
+
+        //STEP 1 object split find the best one
+
     }
 }
 

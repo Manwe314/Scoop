@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils.hpp"
+
 #include <iostream>
 #include <vector>
 #include <array>
@@ -14,6 +16,61 @@
 #include <algorithm>
 #include <numeric>
 #include <map>
+
+struct BuildTask {
+    uint32_t first;
+    uint32_t count;
+    int      parent;
+    int      depth;
+    bool     asLeft;
+    float    rootSA;
+};
+
+struct SplitResult {
+    bool      valid;
+    bool      spatial;
+    int       axis;
+    float     pos;
+    float     cost;
+    AABB      leftBB;
+    AABB      rightBB;
+    uint32_t  leftCount;
+    uint32_t  rightCount;
+};
+
+struct BuildState {
+    std::vector<TriRef>  refs;
+    std::vector<BVHNode> nodes;
+};
+
+struct TriRef {
+    Face* referance;
+    AABB boundingBox;
+};
+
+struct alignas(16) MollerTriangle {
+    glm::vec4 vertex_0;
+    glm::vec4 edge_vec1;
+    glm::vec4 edge_vec2;
+    glm::vec4 normal_mat;
+};
+
+struct alignas(16) BVHNode {
+    glm::vec3 bbMin_left;
+    glm::vec3 bbMax_left;
+    glm::vec3 bbMin_right;
+    glm::vec3 bbMax_right;
+    uint32_t left_start;
+    uint32_t left_count;
+    uint32_t right_start;
+    uint32_t right_count;
+};
+
+struct SBVH {
+    std::vector<BVHNode> nodes;
+    std::vector<MollerTriangle> tirangles;
+    AABB outerBoundingBox;
+};
 
 struct Face {
     std::array<int, 3> vertices;
@@ -74,50 +131,53 @@ private:
     void loadMaterials();
     void addNormals();
     std::optional<float> to_float(const std::string& s);
-
+    std::vector<TriRef> getRefArray() const;
+    
     std::string currantGroup = "";
     std::string currantObject = "";
     std::string currantMeterial = "";
     uint32_t currantSmoothing = 0;
-
+    
     std::string currantMTLmat = "";
-
+    size_t total_faces = 0;
+    
     int reading_line = 1;
-
+    
     inline int findObject(std::string& name)
     {
         if (objects.empty())
-            return -1;
+        return -1;
         for (int i = 0; i < objects.size(); i++)
-            if (objects[i].name == name)
-                return i;
+        if (objects[i].name == name)
+        return i;
         return -1;
     }
-
+    
     inline int findGroup(std::string& name, SubObject& obj)
     {
         if (obj.groups.empty())
-            return -1;
+        return -1;
         for (int i = 0; i < obj.groups.size(); i++)
-            if (obj.groups[i].name == name)
-                return i;
+        if (obj.groups[i].name == name)
+        return i;
         return -1;
     }
-
+    
     inline VertexNormalData findVertexData(int id, std::vector<VertexNormalData>& vertexData)
     {
         for (auto& data : vertexData)
-            if (data.id == id)
-                return data;
+        if (data.id == id)
+        return data;
         VertexNormalData vertex{};
         vertex.id = id;
         return vertex;
     }
-
-
-public:
+    
+    
+    public:
     Object(std::string &filePath);
     ~Object();
+    SBVH buildSpatialBoundingVolumeHierarchy();
     Material getDefaultMaterial();
 };
 
