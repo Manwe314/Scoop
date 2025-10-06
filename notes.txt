@@ -1,1 +1,2 @@
-swwapchain for new app
+errors:
+    emptylines in obj files craching

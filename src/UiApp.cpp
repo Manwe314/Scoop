@@ -592,6 +592,18 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("background")).id)) {
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
+        // try
+        // {
+        //     std::string filePath("./assets/models/teapot.obj");
+        //     Object obj(filePath);
+        //     SBVH sbvh = obj.buildSplitBoundingVolumeHierarchy();
+        //     std::cout << "the size of nodes: " << (int)sbvh.nodes.size() << std::endl;
+        // }
+        // catch(const std::exception& e)
+        // {
+        //     std::cerr << e.what() << '\n';
+        // }
+        
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
         std::cout << "BUTTON CLICKED!" << std::endl;

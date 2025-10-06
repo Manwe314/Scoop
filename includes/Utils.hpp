@@ -317,24 +317,6 @@ inline float surfaceArea(const AABB& box)
     return 2.0f * (dimensions.x*dimensions.y + dimensions.y*dimensions.z + dimensions.z*dimensions.x);
 }
 
-inline void getFacePositions(const Face* f, const std::vector<glm::vec3>& vertices, glm::vec3& v0, glm::vec3& v1, glm::vec3& v2)
-{
-    v0 = vertices[ f->vertices[0] - 1 ];
-    v1 = vertices[ f->vertices[1] - 1 ];
-    v2 = vertices[ f->vertices[2] - 1 ];
-}
-
-inline void computeNodeAndCentroidBounds(const std::vector<TriRef>& refs, uint32_t first, uint32_t count, AABB& nodeBox, AABB& centroidBox)
-{
-    nodeBox = makeEmptyAABB();
-    centroidBox = makeEmptyAABB();
-    for (uint32_t i=0; i<count; ++i) {
-        const auto& r = refs[first + i];
-        nodeBox = merge(nodeBox, r.boundingBox);
-        glm::vec3 c = 0.5f * (r.boundingBox.min + r.boundingBox.max);
-        expand(centroidBox, c);
-    }
-}
 
 inline bool centroidDegenerate(const AABB& cbox)
 {
@@ -351,4 +333,68 @@ inline glm::vec3 calculateFaceNormal(const glm::vec3& v0, const glm::vec3& v1, c
 {
     glm::vec3 normal = glm::cross(v1 - v0, v2 - v0);
     return normal;
+}
+
+inline int widestAxis(const AABB& box)
+{
+    glm::vec3 dimensions = box.max - box.min;
+    if (dimensions.y > dimensions.x && dimensions.y >= dimensions.z)
+        return 1;
+    if (dimensions.z > dimensions.x && dimensions.z >= dimensions.y)
+        return 2;
+    return 0;
+}
+
+inline float safeExtent(float e)
+{
+    return e < EPSILON ? EPSILON : e;
+}
+
+inline float centroidAxis(const AABB& box, int axis)
+{
+    return 0.5f * (box.min[axis] + box.max[axis]);
+}
+
+
+inline void mergeInto(AABB& dst, const AABB& src)
+{
+    dst.min = glm::min(dst.min, src.min);
+    dst.max = glm::max(dst.max, src.max);
+}
+
+inline AABB intersectAABB(const AABB& a, const AABB& b)
+{
+    AABB intersection{};
+    intersection.min = glm::max(a.min, b.min);
+    intersection.max = glm::min(a.max, b.max);
+    return intersection;
+}
+
+inline bool hasPositiveExtent(const AABB& box)
+{
+    glm::vec3 dimensions = box.max - box.min;
+    return (dimensions.x > 0.0f) && (dimensions.y > 0.0f) && (dimensions.z > 0.0f);
+}
+
+inline AABB mergeBoth(const AABB& a, const AABB& b)
+{
+    AABB r = a;
+    mergeInto(r, b);
+    return r;
+}
+
+
+inline AABB clipAABBToHalfspace(const AABB& box, int axis, float plane, bool takeLeft)
+{
+    AABB out = box;
+    if (takeLeft)
+        out.max[axis] = glm::min(out.max[axis], plane);
+    else
+        out.min[axis] = glm::max(out.min[axis], plane);
+    return out;
+}
+
+inline int clampBin(int v, int low, int high)
+{
+    return v < low ? low : (v > high ? high : v);
 }

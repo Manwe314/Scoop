@@ -17,6 +17,12 @@
 #include <numeric>
 #include <map>
 
+struct Bin
+{
+    AABB     bb;
+    uint32_t count;
+};
+
 struct BuildTask {
     uint32_t first;
     uint32_t count;
@@ -38,15 +44,6 @@ struct SplitResult {
     uint32_t  rightCount;
 };
 
-struct BuildState {
-    std::vector<TriRef>  refs;
-    std::vector<BVHNode> nodes;
-};
-
-struct TriRef {
-    Face* referance;
-    AABB boundingBox;
-};
 
 struct alignas(16) MollerTriangle {
     glm::vec4 vertex_0;
@@ -90,6 +87,16 @@ struct SubObject {
     std::vector<Group> groups;
 };
 
+struct TriRef {
+    Face* referance;
+    AABB boundingBox;
+};
+
+struct BuildState {
+    std::vector<TriRef>  refs;
+    std::vector<BVHNode> nodes;
+};
+
 struct Material {
     std::string name;
 
@@ -112,6 +119,15 @@ struct VertexNormalData
     std::map<Face*, glm::vec3> adjacentNormal;
 };
 
+struct PartitionResult {
+    uint32_t mid;
+    uint32_t leftCount;
+    uint32_t rightCount;
+    uint32_t rightStart;
+    AABB     leftBB;
+    AABB     rightBB;
+};
+
 
 class Object
 {
@@ -130,6 +146,8 @@ private:
     void parseFace(std::vector<std::string> tokens);
     void loadMaterials();
     void addNormals();
+    SplitResult findBestObjectSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count,const AABB& centroidBB, const AABB& nodeBB);
+    SplitResult findBestSpatialSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count, const AABB& centroidBB ,const AABB& nodeBB); 
     std::optional<float> to_float(const std::string& s);
     std::vector<TriRef> getRefArray() const;
     
@@ -177,7 +195,7 @@ private:
     public:
     Object(std::string &filePath);
     ~Object();
-    SBVH buildSpatialBoundingVolumeHierarchy();
+    SBVH buildSplitBoundingVolumeHierarchy();
     Material getDefaultMaterial();
 };
 
