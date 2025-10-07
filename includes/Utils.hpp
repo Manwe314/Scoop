@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <glm/glm.hpp>
+#include <glm/gtc/packing.hpp> 
 
 #define EPSILON 1e-12
 
@@ -397,4 +398,15 @@ inline AABB clipAABBToHalfspace(const AABB& box, int axis, float plane, bool tak
 inline int clampBin(int v, int low, int high)
 {
     return v < low ? low : (v > high ? high : v);
+}
+
+inline uint32_t packHalf2(glm::vec2 v) {
+    uint16_t highx = glm::packHalf1x16(v.x);
+    uint16_t highy = glm::packHalf1x16(v.y);
+    return (uint32_t(highy) << 16) | uint32_t(highx);
+}
+
+inline glm::vec4 makeNV(const glm::vec3& n, const glm::vec2& uv)
+{
+    return glm::vec4(n, glm::uintBitsToFloat(packHalf2(uv)));
 }

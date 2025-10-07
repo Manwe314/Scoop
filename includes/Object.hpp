@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <numeric>
 #include <map>
+#include <unordered_map>
 
 struct Bin
 {
@@ -44,6 +45,13 @@ struct SplitResult {
     uint32_t  rightCount;
 };
 
+struct alignas(16) ShadingTriangle {
+    glm::vec4 vertNormal0_uv;
+    glm::vec4 vertNormal1_uv;
+    glm::vec4 vertNormal2_uv;
+};
+static_assert(sizeof(ShadingTriangle) == 48);
+
 
 struct alignas(16) MollerTriangle {
     glm::vec4 vertex_0;
@@ -51,6 +59,7 @@ struct alignas(16) MollerTriangle {
     glm::vec4 edge_vec2;
     glm::vec4 normal_mat;
 };
+static_assert(sizeof(MollerTriangle) == 64, "Moller Triangle must be 64 bytes");
 
 struct alignas(16) BVHNode {
     glm::vec3 bbMin_left;
@@ -62,10 +71,18 @@ struct alignas(16) BVHNode {
     uint32_t right_start;
     uint32_t right_count;
 };
+static_assert(sizeof(BVHNode) == 64, "BVH Node must be 64 bytes");
+
+struct Triangles
+{
+    std::vector<MollerTriangle> intersectionTriangles;
+    std::vector<ShadingTriangle> shadingTrinagles;
+};
+
 
 struct SBVH {
     std::vector<BVHNode> nodes;
-    std::vector<MollerTriangle> tirangles;
+    Triangles tirangles;
     AABB outerBoundingBox;
 };
 
@@ -96,6 +113,14 @@ struct BuildState {
     std::vector<TriRef>  refs;
     std::vector<BVHNode> nodes;
 };
+
+struct alignas(16) MaterialGPU {
+    glm::vec4 baseColor_opacity;
+    glm::vec4 F0_ior_rough;
+    glm::vec4 emission_flags;
+    glm::vec4 futuretextures;
+};
+static_assert(sizeof(MaterialGPU) == 64, "MaterialGPU must be 64 bytes");
 
 struct Material {
     std::string name;
@@ -140,16 +165,22 @@ private:
 
     std::vector<SubObject> objects;
     std::map<std::string, Material> materials;
+    std::unordered_map<std::string, uint32_t> matNameToId;
+    uint32_t nextMatId = 0;
 
     void parseLine(std::vector<std::string> tokens, int type);
     void parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath);
     void parseFace(std::vector<std::string> tokens);
     void loadMaterials();
     void addNormals();
+    Triangles constructTriangles(BuildState& state);
+    MollerTriangle makeMollerTriangle(TriRef& ref);
+    ShadingTriangle makeShadingTriangle(TriRef& ref);
     SplitResult findBestObjectSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count,const AABB& centroidBB, const AABB& nodeBB);
     SplitResult findBestSpatialSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count, const AABB& centroidBB ,const AABB& nodeBB); 
     std::optional<float> to_float(const std::string& s);
     std::vector<TriRef> getRefArray() const;
+    uint32_t getMaterialId(const std::optional<std::string>& optName);
     
     std::string currantGroup = "";
     std::string currantObject = "";
@@ -193,9 +224,11 @@ private:
     
     
     public:
-    Object(std::string &filePath);
+    Object();
+    Object(const std::string &filePath);
     ~Object();
     SBVH buildSplitBoundingVolumeHierarchy();
+    std::vector<MaterialGPU> buildMaterialGPU();
     Material getDefaultMaterial();
 };
 

@@ -35,7 +35,7 @@ int main(int argc, char *argv[]) {
         throw std::runtime_error("Ui App Reurned a NULL HANDLE");
       else if (state.shouldClose == false && state.device != VK_NULL_HANDLE)
       {
-        ShowcaseApp showcaseApp(state.device, context.getInstance());
+        ShowcaseApp showcaseApp(state.device, context.getInstance(), state.sbvh, state.materials);
         showcaseApp.run();
       }
       if (state.shouldClose == true)

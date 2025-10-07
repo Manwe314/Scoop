@@ -18,6 +18,8 @@
 struct AppState {
     bool shouldClose;
     VkPhysicalDevice device;
+    SBVH sbvh;
+    std::vector<MaterialGPU> materials;
 };
 
 struct TextInputState {
@@ -127,6 +129,8 @@ class UiApp
         uint64_t clayMemSize = 0;
         void*    clayMem     = nullptr;
         Clay_Arena clayArena{};
+
+        Object model;
 
         void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);

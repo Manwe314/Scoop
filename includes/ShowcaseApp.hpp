@@ -5,6 +5,7 @@
 #include "clay.h"
 #include "Device.hpp"
 #include "SwapChain.hpp"
+#include "Object.hpp"
 #include <optional>
 #include <set>
 #include <array>
@@ -89,6 +90,9 @@ private:
     VkSurfaceKHR surface;
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
     const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    SBVH bottomLevelAS;
+    std::vector<MaterialGPU> materials;
     
     
     std::vector<const char *> getRequiredExtensions();
@@ -123,7 +127,7 @@ private:
     inline VkSwapchainKHR validOldSwapchain() const { return swapChain != VK_NULL_HANDLE ? swapChain : VK_NULL_HANDLE; }
 
 public:
-    ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst);
+    ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::vector<MaterialGPU> material);
     ~ShowcaseApp();
     void run();
 };

@@ -592,26 +592,36 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("background")).id)) {
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
-        // try
-        // {
-        //     std::string filePath("./assets/models/teapot.obj");
-        //     Object obj(filePath);
-        //     SBVH sbvh = obj.buildSplitBoundingVolumeHierarchy();
-        //     std::cout << "the size of nodes: " << (int)sbvh.nodes.size() << std::endl;
-        // }
-        // catch(const std::exception& e)
-        // {
-        //     std::cerr << e.what() << '\n';
-        // }
-        
     }
-    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
-        std::cout << "BUTTON CLICKED!" << std::endl;
-        state.shouldClose = false;
-        state.device = device.getPhysicalDevice();
-        exitRun = true;
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("model loader")).id)) {
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
+        try
+        {
+            model = Object(input.text);
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << '\n';
+        }
+    }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("launch button")).id)) {
+        input.focused = false;
+        focusedInputId = Clay_ElementId{0};
+        state.shouldClose = false;
+        state.device = device.getPhysicalDevice();
+        state.sbvh = model.buildSplitBoundingVolumeHierarchy();
+        state.materials = model.buildMaterialGPU();
+        std::cout << "sbvh size: " << state.sbvh.nodes.size() << std::endl;
+        std::cout << "materials size: " << state.materials.size() << std::endl;
+        exitRun = true;
+        
+    }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME)
+    {
+        input.focused = false;
+        focusedInputId = Clay_ElementId{0};
+        
     }
 }
 
@@ -670,32 +680,13 @@ void UiApp::buildUi()
             CLAY_TEXT(CLAY_STRING("Selected Device: "), 
             CLAY_TEXT_CONFIG({
                 .textColor = {255, 243, 232, 255}, 
-                .fontSize = 64, 
+                .fontSize = 32, 
                 .letterSpacing = 1, 
                 .wrapMode = CLAY_TEXT_WRAP_NONE, 
                 .textAlignment = CLAY_TEXT_ALIGN_CENTER
             }));
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
             CLAY_TEXT(ClayFromStable(clayFrameStrings ,name), 
-            CLAY_TEXT_CONFIG({
-                .textColor = {255, 243, 232, 255}, 
-                .fontSize = 64, 
-                .letterSpacing = 1, 
-                .wrapMode = CLAY_TEXT_WRAP_NONE, 
-                .textAlignment = CLAY_TEXT_ALIGN_CENTER
-            }));
-        }
-        CLAY({ .id = CLAY_ID("button"),
-                .layout = {
-                    .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
-                    .padding = CLAY_PADDING_ALL(10),
-                },
-                .backgroundColor = {65, 9, 114, 200},
-                .cornerRadius = CLAY_CORNER_RADIUS(35),
-                .clip = {.horizontal = true, .vertical = true}
-        }){
-            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-            CLAY_TEXT(CLAY_STRING("Button"), 
             CLAY_TEXT_CONFIG({
                 .textColor = {255, 243, 232, 255}, 
                 .fontSize = 32, 
@@ -769,6 +760,25 @@ void UiApp::buildUi()
                     }));
                 }
             }
+        }
+        CLAY({ .id = CLAY_ID("launch button"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_FIT(0),CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(8),
+                },
+                .backgroundColor = {65, 9, 114, 200},
+                .cornerRadius = CLAY_CORNER_RADIUS(35),
+                .clip = {.horizontal = true, .vertical = true}
+        }){
+            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+            CLAY_TEXT(CLAY_STRING("Run Display"), 
+            CLAY_TEXT_CONFIG({
+                .textColor = {255, 243, 232, 255}, 
+                .fontSize = 32, 
+                .letterSpacing = 1, 
+                .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+            }));
         }
     }
 

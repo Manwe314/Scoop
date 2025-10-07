@@ -1,2 +1,8 @@
 errors:
-    emptylines in obj files craching
+    empty state struct variables crash showcase startup;
+
+
+to-add later:
+    unspliting in SBVH construction;
+    add texture support from object to showcase;
+    add feedback on ui actions

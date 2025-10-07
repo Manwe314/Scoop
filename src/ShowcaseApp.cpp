@@ -45,7 +45,7 @@ VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
 
 // ~~~~ constructor / destructor ~~~~
 
-ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst) : window(1200, 900, "Scoop")
+ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::vector<MaterialGPU> material) : window(1200, 900, "Scoop"), bottomLevelAS(sbvh), materials(material)
 {
     instance = inst;
     setupDebugMessenger();
