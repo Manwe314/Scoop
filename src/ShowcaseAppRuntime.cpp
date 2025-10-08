@@ -115,6 +115,7 @@ void ShowcaseApp::destroyCommandPoolAndBuffers()
 void ShowcaseApp::run()
 {
     createCommandPoolAndBuffers();
+    uploadStaticData();
 
     while (!window.shouldClose())
     {
@@ -139,6 +140,11 @@ void ShowcaseApp::run()
         if (imagesInFlight[imageIndex] != VK_NULL_HANDLE)
             vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
         imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+
+
+        ParamsGPU params = makeDefaultParams(swapChainExtent, 0, 0.0f, glm::vec3(0));
+        std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
+        writeParamsBindingForFrame(currentFrame);
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);

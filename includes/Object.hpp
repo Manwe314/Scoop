@@ -73,16 +73,25 @@ struct alignas(16) BVHNode {
 };
 static_assert(sizeof(BVHNode) == 64, "BVH Node must be 64 bytes");
 
+struct SBVHNode
+{
+    glm::vec4 bbMin_left__left_start;
+    glm::vec4 bbMax_left__left_count;
+    glm::vec4 bbMin_right__right_start;
+    glm::vec4 bbMax_right__right_count;
+};
+static_assert(sizeof(SBVHNode) == 64, "BVH Node must be 64 bytes");
+
 struct Triangles
 {
     std::vector<MollerTriangle> intersectionTriangles;
-    std::vector<ShadingTriangle> shadingTrinagles;
+    std::vector<ShadingTriangle> shadingTriangles;
 };
 
 
 struct SBVH {
-    std::vector<BVHNode> nodes;
-    Triangles tirangles;
+    std::vector<SBVHNode> nodes;
+    Triangles triangles;
     AABB outerBoundingBox;
 };
 

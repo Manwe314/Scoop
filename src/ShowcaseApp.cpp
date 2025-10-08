@@ -30,6 +30,8 @@ static std::vector<uint32_t> uniqueIndices(std::initializer_list<std::optional<u
     return out;
 }
 
+
+
 VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
 {
     VkShaderModuleCreateInfo createInfo{};
@@ -41,6 +43,80 @@ VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
     if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create shader module!");
     return module;
+}
+
+uint32_t ShowcaseApp::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys)
+{
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(phys, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+    {
+        if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
+            return i;
+    }
+    throw std::runtime_error("Showcase: No suitable memory type.");
+}
+
+void ShowcaseApp::createBuffer(VkDevice device, VkPhysicalDevice phys, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags memFlags, VkBuffer& outBuf, VkDeviceMemory& outMem)
+{
+    VkBufferCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    createInfo.size  = size;
+    createInfo.usage = usage;
+    createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(device, &createInfo, nullptr, &outBuf) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateBuffer failed");
+
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(device, outBuf, &req);
+
+    VkMemoryAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocateInfo.allocationSize  = req.size;
+    allocateInfo.memoryTypeIndex = findMemoryType(req.memoryTypeBits, memFlags, phys);
+
+    if (vkAllocateMemory(device, &allocateInfo, nullptr, &outMem) != VK_SUCCESS)
+        throw std::runtime_error("vkAllocateMemory failed");
+
+    vkBindBufferMemory(device, outBuf, outMem, 0);
+}
+
+static VkCommandBuffer beginOneTimeCmd(VkDevice device, VkCommandPool pool)
+{
+    VkCommandBufferAllocateInfo alocateInfo{};
+    alocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alocateInfo.commandPool = pool;
+    alocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alocateInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device, &alocateInfo, &cmd);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+    return cmd;
+}
+
+static void endOneTimeCmd(VkDevice device, VkQueue queue, VkCommandPool pool, VkCommandBuffer cmd)
+{
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+}
+
+void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src, VkBuffer dst, VkDeviceSize size)
+{
+    VkCommandBuffer cmd = beginOneTimeCmd(device, pool);
+    VkBufferCopy region{0,0,size};
+    vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+    endOneTimeCmd(device, queue, pool, cmd);
 }
 
 // ~~~~ constructor / destructor ~~~~
@@ -64,6 +140,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::
     createFramebuffers();
     createGraphicsDescriptors();
     createFullscreenGraphicsPipeline();
+    createParamsBuffers();
 }
 
 ShowcaseApp::~ShowcaseApp()
@@ -86,6 +163,20 @@ ShowcaseApp::~ShowcaseApp()
     
     destroyComputeDescriptors();
     destroyOffscreenTarget();
+
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        if (paramsMapped[i])
+        {
+            vkUnmapMemory(device, paramsMemory[i]);
+            paramsMapped[i] = nullptr;
+        }
+        if (paramsBuffer[i]) 
+            vkDestroyBuffer(device, paramsBuffer[i], nullptr);
+        if (paramsMemory[i])
+            vkFreeMemory(device, paramsMemory[i], nullptr);
+    }
+    destorySSBOdata();
 
     for (auto s : imageRenderFinished)
         vkDestroySemaphore(device, s, nullptr);
@@ -555,23 +646,49 @@ void ShowcaseApp::createComputeDescriptors()
     b0.descriptorCount = 1;
     b0.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    VkDescriptorSetLayoutBinding b1{};
+    b1.binding = 1;
+    b1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b1.descriptorCount = 1;
+    b1.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutBinding b2 = b1;
+    b2.binding = 2;
+
+    VkDescriptorSetLayoutBinding b3 = b1;
+    b3.binding = 3;
+
+    VkDescriptorSetLayoutBinding b4 = b1;
+    b4.binding = 4;
+
+    VkDescriptorSetLayoutBinding b5 = b1;
+    b5.binding = 5;
+
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings = {b0, b1, b2, b3, b4, b5};
+
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutCreateInfo.bindingCount = 1;
-    layoutCreateInfo.pBindings = &b0;
+    layoutCreateInfo.bindingCount = (uint32_t)bindings.size();
+    layoutCreateInfo.pBindings = bindings.data();
 
     if (vkCreateDescriptorSetLayout(device, &layoutCreateInfo, nullptr, &computeSetLayout) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute descriptor set layout!");
 
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSize.descriptorCount = 1;
+    VkDescriptorPoolSize poolSizeImg{};
+    poolSizeImg.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizeImg.descriptorCount = 1;
+        
+    VkDescriptorPoolSize poolSizeBuf{};
+    poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizeBuf.descriptorCount = 5;
+        
+    std::array<VkDescriptorPoolSize, 2> poolSizes = {poolSizeImg, poolSizeBuf};
 
     VkDescriptorPoolCreateInfo poolCreateInfo{};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolCreateInfo.maxSets = 1;
-    poolCreateInfo.poolSizeCount = 1;
-    poolCreateInfo.pPoolSizes = &poolSize;
+    poolCreateInfo.poolSizeCount = (uint32_t)poolSizes.size();
+    poolCreateInfo.pPoolSizes = poolSizes.data();
 
     if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &computeDescPool) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute descriptor pool!");
@@ -602,9 +719,92 @@ void ShowcaseApp::updateComputeDescriptor()
     w0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w0.descriptorCount = 1;
     w0.pImageInfo = &imageInfo;
-
+    
     vkUpdateDescriptorSets(device, 1, &w0, 0, nullptr);
 }
+
+void ShowcaseApp::writeStaticComputeBindings()
+{
+    VkDescriptorBufferInfo sbvhInfo{ sbvhNodesBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet w1{};
+    w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w1.dstSet = computeSet;
+    w1.dstBinding = 1;
+    w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w1.descriptorCount = 1;
+    w1.pBufferInfo = &sbvhInfo;
+
+    VkWriteDescriptorSet w2{};
+    w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w2.dstSet = computeSet;
+    w2.dstBinding = 2;
+    w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w2.descriptorCount = 1;
+    w2.pBufferInfo = &triangleInfo;
+
+    VkWriteDescriptorSet w3{};
+    w3.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w3.dstSet = computeSet;
+    w3.dstBinding = 3;
+    w3.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w3.descriptorCount = 1;
+    w3.pBufferInfo = &shadeInfo;
+
+    VkWriteDescriptorSet w4{};
+    w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w4.dstSet = computeSet;
+    w4.dstBinding = 4;
+    w4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w4.descriptorCount = 1;
+    w4.pBufferInfo = &matInfo;
+
+    std::array<VkWriteDescriptorSet, 4> writes = {w1, w2, w3, w4};
+    vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+}
+
+void ShowcaseApp::uploadStaticData()
+{
+    uploadDeviceLocal(bottomLevelAS.nodes, 0, sbvhNodesBuffer, sbvhNodesMemory);
+    uploadDeviceLocal(bottomLevelAS.triangles.intersectionTriangles, 0, triangleBuffer, triangleMemory);
+    uploadDeviceLocal(bottomLevelAS.triangles.shadingTriangles, 0, shadingBuffer, shadingMemory);
+    uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
+    writeStaticComputeBindings();
+}
+
+void ShowcaseApp::writeParamsBindingForFrame(uint32_t frameIndex)
+{
+    VkDescriptorBufferInfo paramsInfo{ paramsBuffer[frameIndex], 0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet w5{};
+    w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w5.dstSet = computeSet;
+    w5.dstBinding = 5;
+    w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w5.descriptorCount = 1;
+    w5.pBufferInfo = &paramsInfo;
+
+    vkUpdateDescriptorSets(device, 1, &w5, 0, nullptr);
+}
+
+void ShowcaseApp::createParamsBuffers()
+{
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        createBuffer(device, physicalDevice, sizeof(ParamsGPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            paramsBuffer[i], paramsMemory[i]);
+
+        VkResult result = vkMapMemory(device, paramsMemory[i], 0, sizeof(ParamsGPU), 0, &paramsMapped[i]);
+        if (result != VK_SUCCESS)
+            throw std::runtime_error("Map params buffer failed");
+    }
+}
+
 
 void ShowcaseApp::createComputePipeline()
 {
@@ -932,4 +1132,28 @@ void ShowcaseApp::destroyOffscreenTarget()
         vkFreeMemory(device, offscreenMemory, nullptr);
         offscreenMemory = VK_NULL_HANDLE;
     }
+}
+
+void ShowcaseApp::destorySSBOdata()
+{
+    if (sbvhNodesBuffer)
+        vkDestroyBuffer(device, sbvhNodesBuffer, nullptr);
+    if (sbvhNodesMemory)
+        vkFreeMemory(device, sbvhNodesMemory, nullptr);
+
+    if (triangleBuffer)
+        vkDestroyBuffer(device, triangleBuffer, nullptr);
+    if (triangleMemory)
+        vkFreeMemory(device, triangleMemory, nullptr);
+
+    if (shadingBuffer)
+        vkDestroyBuffer(device, shadingBuffer, nullptr);
+    if (shadingMemory)
+        vkFreeMemory(device, shadingMemory, nullptr);
+
+    if (materialBuffer)
+        vkDestroyBuffer(device, materialBuffer, nullptr);
+    if (materialMemory)
+        vkFreeMemory(device, materialMemory, nullptr);
+
 }

@@ -187,6 +187,26 @@ static inline MaterialGPU packMaterialGPU(const Material& material) {
     return gpuMaterial;
 }
 
+static inline glm::vec4 pack_vec4(const glm::vec3& vec3, uint32_t uint)
+{
+    return glm::vec4(vec3, glm::uintBitsToFloat(uint));
+}
+
+static std::vector<SBVHNode> toSBVH(const std::vector<BVHNode>& src)
+{
+    std::vector<SBVHNode> out;
+    out.reserve(src.size());
+    for (const auto& n : src) {
+        SBVHNode s;
+        s.bbMin_left__left_start   = pack_vec4(n.bbMin_left,  n.left_start);
+        s.bbMax_left__left_count   = pack_vec4(n.bbMax_left,  n.left_count);
+        s.bbMin_right__right_start = pack_vec4(n.bbMin_right, n.right_start);
+        s.bbMax_right__right_count = pack_vec4(n.bbMax_right, n.right_count);
+        out.push_back(s);
+    }
+    return out;
+}
+
 uint32_t Object::getMaterialId(const std::optional<std::string>& optName)
 {
     if (!optName || optName->empty())
@@ -425,8 +445,8 @@ SBVH Object::buildSplitBoundingVolumeHierarchy()
         stack.push_back(left);
     }
     SBVH splitBoundingVolumeHierarchy{};
-    splitBoundingVolumeHierarchy.tirangles = constructTriangles(state);
-    splitBoundingVolumeHierarchy.nodes = std::move(state.nodes);
+    splitBoundingVolumeHierarchy.triangles = constructTriangles(state);
+    splitBoundingVolumeHierarchy.nodes = toSBVH(state.nodes);
     splitBoundingVolumeHierarchy.outerBoundingBox = rootBB;
     return splitBoundingVolumeHierarchy;
 }
@@ -458,7 +478,7 @@ Triangles Object::constructTriangles(BuildState& state)
                 MollerTriangle intersectionTriangle = makeMollerTriangle(state.refs[first + i]);
                 ShadingTriangle shadingTrinagle = makeShadingTriangle(state.refs[first + i]);
                 output.intersectionTriangles.push_back(intersectionTriangle);
-                output.shadingTrinagles.push_back(shadingTrinagle);
+                output.shadingTriangles.push_back(shadingTrinagle);
             }
             triangleBuilder = (uint32_t)output.intersectionTriangles.size();
         }

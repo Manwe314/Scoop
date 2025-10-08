@@ -1,12 +1,73 @@
 #version 460
 layout(local_size_x = 8, local_size_y = 8) in;
 
-// matches your descriptor: set=0, binding=0 is a storage image
-layout(rgba16f, binding = 0) uniform image2D outImage;
+layout(set = 0, binding = 0, rgba16f) uniform image2D outImage;
 
-void main() {
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 v0;
+    vec4 e1;
+    vec4 e2;
+    vec4 n_mat;
+};
+
+struct ShadingTriangle {
+    vec4 n0_uv;
+    vec4 n1_uv;
+    vec4 n2_uv;
+};
+
+struct MaterialGPU {
+    vec4 baseColor_opacity;
+    vec4 F0_ior_rough;
+    vec4 emission_flags;
+    vec4 reserved;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer BVHNodesBuf { SBVHNode nodes[]; };
+layout(set = 0, binding = 2, std430) readonly buffer MollerBuf   { MollerTriangle triangles[]; };
+layout(set = 0, binding = 3, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTriangles[]; };
+layout(set = 0, binding = 4, std430) readonly buffer MtlBuf      { MaterialGPU materials[]; };
+
+layout(set = 0, binding = 5, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  _pad;
+} Params;
+
+
+uint u_from_float(float f) { return floatBitsToUint(f); }
+
+uint left_start (SBVHNode n) { return u_from_float(n.bbMin_left__left_start.w); }
+uint left_count (SBVHNode n) { return u_from_float(n.bbMax_left__left_count.w); }
+uint right_start(SBVHNode n) { return u_from_float(n.bbMin_right__right_start.w); }
+uint right_count(SBVHNode n) { return u_from_float(n.bbMax_right__right_count.w); }
+
+uint tri_materialId(MollerTriangle t) { return u_from_float(t.n_mat.w); }
+
+// -------------------------------------------------------------------------------
+
+void main()
+{
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    vec2 uv = vec2(pix);
-    vec3 color = vec3(1, uv.y * 0.002, uv.x * 0.002);
+
+    if (pix.x < 0 || pix.y < 0 ||
+        pix.x >= int(Params.imageSize.x) || pix.y >= int(Params.imageSize.y))
+        return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(Params.imageSize);
+    vec3 color = vec3(uv, 0.2);
+
+    color = materials[1].baseColor_opacity.rgb;
+
     imageStore(outImage, pix, vec4(color, 1.0));
 }
+
