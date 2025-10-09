@@ -133,7 +133,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::
     createSwapchain();
     createImageViews();
     createSyncObjects();
-    createOffscreenTarget(); // on resizing will need to call this again
+    createOffscreenTargets(); // on resizing will need to call this again
     createComputeDescriptors();
     createComputePipeline();
     createRenderPass();
@@ -242,9 +242,11 @@ void ShowcaseApp::createLogicalDevice()
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create logical device!");
 
-  vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
-  vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
-  vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
+    vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+    vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+    vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
+    graphicsFamily = indices.graphicsFamily.value();
+    computeFamily = indices.computeFamily.value();
 }
 
 QueueFamiliyIndies ShowcaseApp::findQueueFamilies(VkPhysicalDevice device)
@@ -463,26 +465,29 @@ void ShowcaseApp::recreateSwapchain()
     createImageViews();
     createRenderPass();
     createFramebuffers();
-    createOffscreenTarget();
+    createOffscreenTargets();
 
     updateComputeDescriptor();
 
-    if (graphicsSet)
+    if (graphicsDescPool && graphicsSetLayout)
     {
-        VkDescriptorImageInfo img{};
-        img.sampler     = offscreenSampler;
-        img.imageView   = offscreenView;
-        img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkWriteDescriptorSet w{};
-        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet = graphicsSet;
-        w.dstBinding = 0;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.descriptorCount = 1;
-        w.pImageInfo = &img;
-
-        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+        for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+        {
+            VkDescriptorImageInfo img{};
+            img.sampler     = offscreenSampler;
+            img.imageView   = offscreenView[i];
+            img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    
+            VkWriteDescriptorSet w{};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = graphicsSets[i];
+            w.dstBinding = 0;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.descriptorCount = 1;
+            w.pImageInfo = &img;
+    
+            vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+        }
     }
 
     createFullscreenGraphicsPipeline();
@@ -495,7 +500,8 @@ void ShowcaseApp::recreateSwapchain()
             throw std::runtime_error("Showcase: failed to create per-image present semaphore!");
 
     imagesInFlight.assign(swapChainImages.size(), VK_NULL_HANDLE);
-    offscreenInitialized = false;
+    for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+        offscreenInitialized[i] = false;
 
     window.resetWindowResizedFlag();
 }
@@ -566,76 +572,81 @@ void ShowcaseApp::createSyncObjects()
     }
 }
 
-void ShowcaseApp::createOffscreenTarget()
+void ShowcaseApp::createOffscreenTargets()
 {
-    VkExtent3D extent3D{};
-    extent3D.width  = swapChainExtent.width;
-    extent3D.height = swapChainExtent.height;
-    extent3D.depth  = 1;
-
-    VkImageCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    createInfo.imageType = VK_IMAGE_TYPE_2D;
-    createInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-    createInfo.extent = extent3D;
-    createInfo.mipLevels = 1;
-    createInfo.arrayLayers = 1;
-    createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    createInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vkCreateImage(device, &createInfo, nullptr, &offscreenImage) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to create offscreen image!");
-
-    VkMemoryRequirements memReq{};
-    vkGetImageMemoryRequirements(device, offscreenImage, &memReq);
-
-    VkPhysicalDeviceMemoryProperties memProps{};
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
-
-    uint32_t memoryTypeIndex = UINT32_MAX;
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
-        bool typeOk = (memReq.memoryTypeBits & (1u << i)) != 0;
-        bool flagsOk = (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        if (typeOk && flagsOk)
+        VkExtent3D extent3D{};
+        extent3D.width  = swapChainExtent.width;
+        extent3D.height = swapChainExtent.height;
+        extent3D.depth  = 1;
+
+        VkImageCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        createInfo.imageType = VK_IMAGE_TYPE_2D;
+        createInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        createInfo.extent = extent3D;
+        createInfo.mipLevels = 1;
+        createInfo.arrayLayers = 1;
+        createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        createInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (vkCreateImage(device, &createInfo, nullptr, &offscreenImage[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create offscreen image!");
+        VkMemoryRequirements memReq{};
+        vkGetImageMemoryRequirements(device, offscreenImage[i], &memReq);
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+    
+        uint32_t memoryTypeIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
         {
-            memoryTypeIndex = i;
-            break;
+            bool typeOk = (memReq.memoryTypeBits & (1u << i)) != 0;
+            bool flagsOk = (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            if (typeOk && flagsOk)
+            {
+                memoryTypeIndex = i;
+                break;
+            }
         }
+        if (memoryTypeIndex == UINT32_MAX)
+            throw std::runtime_error("Showcase: no suitable memory type for offscreen image!");
+        
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memReq.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+        if (vkAllocateMemory(device, &allocateInfo, nullptr, &offscreenMemory[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to allocate offscreen image memory!");
+    
+        vkBindImageMemory(device, offscreenImage[i], offscreenMemory[i], 0);
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = offscreenImage[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = createInfo.format;
+        viewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = 1;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 1;
+    
+        if (vkCreateImageView(device, &viewCreateInfo, nullptr, &offscreenView[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create offscreen image view!");
+        VkSemaphoreCreateInfo semCreateInfo{};
+        semCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        if (vkCreateSemaphore(device, &semCreateInfo, nullptr, &computeDone[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create compute semaphore");
     }
-    if (memoryTypeIndex == UINT32_MAX)
-        throw std::runtime_error("Showcase: no suitable memory type for offscreen image!");
-
-    VkMemoryAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.allocationSize = memReq.size;
-    allocateInfo.memoryTypeIndex = memoryTypeIndex;
-
-    if (vkAllocateMemory(device, &allocateInfo, nullptr, &offscreenMemory) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to allocate offscreen image memory!");
-
-    vkBindImageMemory(device, offscreenImage, offscreenMemory, 0);
-
-    VkImageViewCreateInfo viewCreateInfo{};
-    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewCreateInfo.image = offscreenImage;
-    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewCreateInfo.format = createInfo.format;
-    viewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewCreateInfo.subresourceRange.baseMipLevel = 0;
-    viewCreateInfo.subresourceRange.levelCount = 1;
-    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-    viewCreateInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device, &viewCreateInfo, nullptr, &offscreenView) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to create offscreen image view!");
 }
 
 void ShowcaseApp::createComputeDescriptors()
@@ -676,30 +687,33 @@ void ShowcaseApp::createComputeDescriptors()
 
     VkDescriptorPoolSize poolSizeImg{};
     poolSizeImg.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizeImg.descriptorCount = 1;
+    poolSizeImg.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
         
     VkDescriptorPoolSize poolSizeBuf{};
     poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizeBuf.descriptorCount = 5;
+    poolSizeBuf.descriptorCount = 5 * SwapChain::MAX_FRAMES_IN_FLIGHT;
         
     std::array<VkDescriptorPoolSize, 2> poolSizes = {poolSizeImg, poolSizeBuf};
 
     VkDescriptorPoolCreateInfo poolCreateInfo{};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.maxSets = 1;
+    poolCreateInfo.maxSets = SwapChain::MAX_FRAMES_IN_FLIGHT;
     poolCreateInfo.poolSizeCount = (uint32_t)poolSizes.size();
     poolCreateInfo.pPoolSizes = poolSizes.data();
 
     if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &computeDescPool) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute descriptor pool!");
 
+    VkDescriptorSetLayout layouts[SwapChain::MAX_FRAMES_IN_FLIGHT];
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+        layouts[i] = computeSetLayout;
     VkDescriptorSetAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = computeDescPool;
-    allocateInfo.descriptorSetCount = 1;
-    allocateInfo.pSetLayouts = &computeSetLayout;
+    allocateInfo.descriptorSetCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+    allocateInfo.pSetLayouts = layouts;
 
-    if (vkAllocateDescriptorSets(device, &allocateInfo, &computeSet) != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(device, &allocateInfo, computeSets) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to allocate compute descriptor set!");
 
     updateComputeDescriptor();
@@ -707,63 +721,71 @@ void ShowcaseApp::createComputeDescriptors()
 
 void ShowcaseApp::updateComputeDescriptor()
 {
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    imageInfo.imageView   = offscreenView;
-    imageInfo.sampler     = VK_NULL_HANDLE;
-
-    VkWriteDescriptorSet w0{};
-    w0.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w0.dstSet = computeSet;
-    w0.dstBinding = 0;
-    w0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w0.descriptorCount = 1;
-    w0.pImageInfo = &imageInfo;
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        imageInfo.imageView   = offscreenView[i];
+        imageInfo.sampler     = VK_NULL_HANDLE;
+        
+        VkWriteDescriptorSet w0{};
+        w0.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w0.dstSet = computeSets[i];
+        w0.dstBinding = 0;
+        w0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w0.descriptorCount = 1;
+        w0.pImageInfo = &imageInfo;
+        
+        vkUpdateDescriptorSets(device, 1, &w0, 0, nullptr);
+    }
     
-    vkUpdateDescriptorSets(device, 1, &w0, 0, nullptr);
+
 }
 
 void ShowcaseApp::writeStaticComputeBindings()
 {
-    VkDescriptorBufferInfo sbvhInfo{ sbvhNodesBuffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        VkDescriptorBufferInfo sbvhInfo{ sbvhNodesBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
 
-    VkWriteDescriptorSet w1{};
-    w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w1.dstSet = computeSet;
-    w1.dstBinding = 1;
-    w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w1.descriptorCount = 1;
-    w1.pBufferInfo = &sbvhInfo;
+        VkWriteDescriptorSet w1{};
+        w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w1.dstSet = computeSets[i];
+        w1.dstBinding = 1;
+        w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w1.descriptorCount = 1;
+        w1.pBufferInfo = &sbvhInfo;
 
-    VkWriteDescriptorSet w2{};
-    w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w2.dstSet = computeSet;
-    w2.dstBinding = 2;
-    w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w2.descriptorCount = 1;
-    w2.pBufferInfo = &triangleInfo;
+        VkWriteDescriptorSet w2{};
+        w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w2.dstSet = computeSets[i];
+        w2.dstBinding = 2;
+        w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w2.descriptorCount = 1;
+        w2.pBufferInfo = &triangleInfo;
 
-    VkWriteDescriptorSet w3{};
-    w3.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w3.dstSet = computeSet;
-    w3.dstBinding = 3;
-    w3.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w3.descriptorCount = 1;
-    w3.pBufferInfo = &shadeInfo;
+        VkWriteDescriptorSet w3{};
+        w3.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w3.dstSet = computeSets[i];
+        w3.dstBinding = 3;
+        w3.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w3.descriptorCount = 1;
+        w3.pBufferInfo = &shadeInfo;
 
-    VkWriteDescriptorSet w4{};
-    w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w4.dstSet = computeSet;
-    w4.dstBinding = 4;
-    w4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w4.descriptorCount = 1;
-    w4.pBufferInfo = &matInfo;
+        VkWriteDescriptorSet w4{};
+        w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w4.dstSet = computeSets[i];
+        w4.dstBinding = 4;
+        w4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w4.descriptorCount = 1;
+        w4.pBufferInfo = &matInfo;
 
-    std::array<VkWriteDescriptorSet, 4> writes = {w1, w2, w3, w4};
-    vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+        std::array<VkWriteDescriptorSet, 4> writes = {w1, w2, w3, w4};
+        vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    }
 }
 
 void ShowcaseApp::uploadStaticData()
@@ -781,7 +803,7 @@ void ShowcaseApp::writeParamsBindingForFrame(uint32_t frameIndex)
 
     VkWriteDescriptorSet w5{};
     w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w5.dstSet = computeSet;
+    w5.dstSet = computeSets[frameIndex];
     w5.dstBinding = 5;
     w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w5.descriptorCount = 1;
@@ -935,41 +957,47 @@ void ShowcaseApp::createGraphicsDescriptors()
 
     VkDescriptorPoolSize p{};
     p.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    p.descriptorCount = 1;
+    p.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     VkDescriptorPoolCreateInfo poolCreateInfo{};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.maxSets = 1;
+    poolCreateInfo.maxSets = SwapChain::MAX_FRAMES_IN_FLIGHT;
     poolCreateInfo.poolSizeCount = 1;
     poolCreateInfo.pPoolSizes = &p;
 
     if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &graphicsDescPool) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create graphics descriptor pool!");
 
+    std::array<VkDescriptorSetLayout, SwapChain::MAX_FRAMES_IN_FLIGHT> layouts{};
+    layouts.fill(graphicsSetLayout);
     
     VkDescriptorSetAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = graphicsDescPool;
-    allocateInfo.descriptorSetCount = 1;
-    allocateInfo.pSetLayouts = &graphicsSetLayout;
+    allocateInfo.descriptorSetCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+    allocateInfo.pSetLayouts = layouts.data();
 
-    if (vkAllocateDescriptorSets(device, &allocateInfo, &graphicsSet) != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(device, &allocateInfo, graphicsSets) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to allocate graphics descriptor set!");
 
-    VkDescriptorImageInfo img{};
-    img.sampler = offscreenSampler;
-    img.imageView = offscreenView;
-    img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
 
-    VkWriteDescriptorSet w{};
-    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w.dstSet = graphicsSet;
-    w.dstBinding = 0;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w.descriptorCount = 1;
-    w.pImageInfo = &img;
-
-    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+        VkDescriptorImageInfo img{};
+        img.sampler = offscreenSampler;
+        img.imageView = offscreenView[i];
+        img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = graphicsSets[i];
+        w.dstBinding = 0;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.descriptorCount = 1;
+        w.pImageInfo = &img;
+    
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+    }
 }
 
 void ShowcaseApp::createFullscreenGraphicsPipeline()
@@ -1117,20 +1145,28 @@ void ShowcaseApp::destroyComputeDescriptors()
 
 void ShowcaseApp::destroyOffscreenTarget()
 {
-    if (offscreenView)
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
-        vkDestroyImageView(device, offscreenView, nullptr);
-        offscreenView = VK_NULL_HANDLE;
-    }
-    if (offscreenImage)
-    {
-        vkDestroyImage(device, offscreenImage, nullptr);
-        offscreenImage = VK_NULL_HANDLE;
-    }
-    if (offscreenMemory)
-    {
-        vkFreeMemory(device, offscreenMemory, nullptr);
-        offscreenMemory = VK_NULL_HANDLE;
+        if (computeDone[i])
+        {
+            vkDestroySemaphore(device, computeDone[i], nullptr);
+            computeDone[i] = VK_NULL_HANDLE;
+        }
+        if (offscreenView[i])
+        {
+            vkDestroyImageView(device, offscreenView[i], nullptr);
+            offscreenView[i] = VK_NULL_HANDLE;
+        }
+        if (offscreenImage[i])
+        {
+            vkDestroyImage(device, offscreenImage[i], nullptr);
+            offscreenImage[i] = VK_NULL_HANDLE;
+        }
+        if (offscreenMemory[i])
+        {
+            vkFreeMemory(device, offscreenMemory[i], nullptr);
+            offscreenMemory[i] = VK_NULL_HANDLE;
+        }
     }
 }
 

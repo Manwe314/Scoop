@@ -67,13 +67,13 @@ private:
 
     uint32_t currentFrame = 0;
 
-    VkImage        offscreenImage = VK_NULL_HANDLE;
-    VkDeviceMemory offscreenMemory = VK_NULL_HANDLE;
-    VkImageView    offscreenView = VK_NULL_HANDLE;
+    VkImage        offscreenImage[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory offscreenMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkImageView    offscreenView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkDescriptorSetLayout computeSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool      computeDescPool  = VK_NULL_HANDLE;
-    VkDescriptorSet       computeSet       = VK_NULL_HANDLE;
+    VkDescriptorSet       computeSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
     VkPipeline       computePipeline       = VK_NULL_HANDLE;
@@ -83,10 +83,12 @@ private:
     VkSampler             offscreenSampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout graphicsSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool      graphicsDescPool  = VK_NULL_HANDLE;
-    VkDescriptorSet       graphicsSet       = VK_NULL_HANDLE;
+    VkDescriptorSet       graphicsSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkPipelineLayout      graphicsPipelineLayout = VK_NULL_HANDLE;
     VkPipeline            graphicsPipeline       = VK_NULL_HANDLE;
+
+    VkSemaphore computeDone[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkBuffer sbvhNodesBuffer = VK_NULL_HANDLE;
     VkDeviceMemory sbvhNodesMemory = VK_NULL_HANDLE;
@@ -104,12 +106,20 @@ private:
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     void*          paramsMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    std::vector<VkCommandBuffer> commandBuffers;
-    bool offscreenInitialized = false;
+    VkCommandPool graphicsCommandPool = VK_NULL_HANDLE;
+    VkCommandPool computeCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer graphicsCommandBuffers[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkCommandBuffer computeCommandBuffers[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    bool offscreenInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+
+    uint32_t graphicsFamily = VK_QUEUE_FAMILY_IGNORED;
+    uint32_t computeFamily  = VK_QUEUE_FAMILY_IGNORED;
     
-    static void imageBarrier(VkCommandBuffer cmd, VkImage image, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, 
-                            VkPipelineStageFlags dstStage, VkAccessFlags dstAccess, VkImageLayout oldLayout, VkImageLayout newLayout);
+    void imageBarrier(VkCommandBuffer cmd, VkImage image,
+                            VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
+                            VkPipelineStageFlags dstStage, VkAccessFlags dstAccess,
+                            VkImageLayout oldLayout, VkImageLayout newLayout,
+                            uint32_t srcQue, uint32_t dstQue);
     
     VkDebugUtilsMessengerEXT debugMessenger;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -130,7 +140,7 @@ private:
     void recreateSwapchain();
     void createImageViews();
     void createSyncObjects();
-    void createOffscreenTarget();
+    void createOffscreenTargets();
     void destroyOffscreenTarget();
     void createComputeDescriptors();
     void updateComputeDescriptor();
@@ -149,7 +159,8 @@ private:
     void createParamsBuffers();
     void writeStaticComputeBindings();
     void writeParamsBindingForFrame(uint32_t frameIndex);
-    void recordFrameCommands(VkCommandBuffer cmd, uint32_t imageIndex);
+    void recordComputeCommands(uint32_t i);
+    void recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImageIndex);
     void createBuffer(VkDevice device, VkPhysicalDevice phys, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags memFlags, VkBuffer& outBuf, VkDeviceMemory& outMem);
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
     SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);
@@ -198,7 +209,7 @@ public:
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         outBuf, outMem);
 
-        copyBuffer(device, commandPool, graphicsQueue, stageBuf, outBuf, size);
+        copyBuffer(device, computeCommandPool, computeQueue, stageBuf, outBuf, size);
 
         vkDestroyBuffer(device, stageBuf, nullptr);
         vkFreeMemory(device, stageMem, nullptr);

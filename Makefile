@@ -63,4 +63,17 @@ run: all
 rerun: re
 	@./$(BUILD_DIR)/$(EXECUTABLE)
 
+shaders: ensure-vulkan
+	@rm -rf "$(BUILD_DIR)/shaders"
+	@mkdir -p "$(BUILD_DIR)/shaders"
+	@mkdir -p "$(BUILD_DIR)"
+	@if [ ! -f "$(BUILD_DIR)/CMakeCache.txt" ]; then \
+		echo "[cmake] Configuring (first run) ..."; \
+		cmake -S . -B "$(BUILD_DIR)"; \
+	fi
+	@echo "[cmake] Building shaders only ..."
+	@cmake --build "$(BUILD_DIR)" --target Shaders
+
+shader: shaders
+
 .PHONY: all clean fclean re run rerun
