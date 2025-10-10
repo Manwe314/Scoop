@@ -64,17 +64,17 @@ static std::vector<std::string> split(const std::string& str, char delimiter)
     return tokens;
 }
 
-static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertices)
+static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertices, const std::vector<glm::vec3>& textureCoords, const std::vector<glm::vec3>& normals)
 {
     if (face.vertices[0] == 0 || face.vertices[1] == 0 || face.vertices[2] == 0)
         return false;
     if (std::abs(face.vertices[0]) > vertices.size() || std::abs(face.vertices[1]) > vertices.size() || std::abs(face.vertices[2]) > vertices.size())
         return false;
     if (face.textureCoords.has_value())
-        if (std::abs((*face.textureCoords)[0]) > vertices.size() || std::abs((*face.textureCoords)[1]) > vertices.size() || std::abs((*face.textureCoords)[2]) > vertices.size())
+        if (std::abs((*face.textureCoords)[0]) > textureCoords.size() || std::abs((*face.textureCoords)[1]) > textureCoords.size() || std::abs((*face.textureCoords)[2]) > textureCoords.size())
             return false;
     if (face.normals.has_value())
-        if (std::abs((*face.normals)[0]) > vertices.size() || std::abs((*face.normals)[1]) > vertices.size() || std::abs((*face.normals)[2]) > vertices.size())
+        if (std::abs((*face.normals)[0]) > normals.size() || std::abs((*face.normals)[1]) > normals.size() || std::abs((*face.normals)[2]) > normals.size())
             return false;
     for (int i = 0; i < 3; i++)
     {
@@ -82,10 +82,10 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
             face.vertices[i] = vertices.size() - std::abs(face.vertices[i]) + 1;
         if (face.textureCoords.has_value())
             if ((*face.textureCoords)[i] < 0)
-                (*face.textureCoords)[i] = vertices.size() - std::abs((*face.textureCoords)[i]) + 1;
+                (*face.textureCoords)[i] = textureCoords.size() - std::abs((*face.textureCoords)[i]) + 1;
         if (face.normals.has_value())
             if ((*face.normals)[i] < 0)
-                (*face.normals)[i] = vertices.size() - std::abs((*face.normals)[i]) + 1;
+                (*face.normals)[i] = normals.size() - std::abs((*face.normals)[i]) + 1;
     }
     return true;
 }
@@ -119,6 +119,7 @@ Object::Object(const std::string &filePath) : vertices(), textureCoords(), norma
     std::string line;
     while (std::getline(file, line))
     {
+        std::cout << "parsing line " << reading_line << std::endl; 
         int type = -1;
         std::istringstream iss(line);
         std::string token;
@@ -325,7 +326,7 @@ void Object::parseFace(std::vector<std::string> tokens)
             else
                 throw std::runtime_error("OBJ file Corrupted: Face declaration does not follow standarts. at line - " + std::to_string(reading_line));            
         }
-        if (!correctFace(face, vertices))
+        if (!correctFace(face, vertices, textureCoords, normals))
             throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + std::to_string(reading_line));
         facesRef.push_back(std::move(face));
     }
@@ -407,7 +408,7 @@ void Object::parseFace(std::vector<std::string> tokens)
                 (*face.normals)[2] = nIdx[cOrig].value_or(0);
             }
 
-            if (!correctFace(face, vertices))
+            if (!correctFace(face, vertices, textureCoords, normals))
                 throw std::runtime_error("OBJ file Corrupted: Face declaration Indexx out of range. at line - " + std::to_string(reading_line));
             facesRef.push_back(std::move(face));
         };
@@ -509,6 +510,7 @@ void Object::loadMaterials()
             parseMaterialLine(tokens, type, filePath);
         }
     }
+    std::cout << "Loaded Materials" << std::endl;
 }
 
 void Object::parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath)
@@ -667,6 +669,7 @@ void Object::addNormals()
                     insertOrReplace(vertexData, vertex);
                 }
             }
+    std::cout << "vertex data all found moving on to adding normals!" << std::endl;
     for (auto & data : vertexData)
     {
         std::map<uint32_t, glm::vec3> shadingGroupNormal;

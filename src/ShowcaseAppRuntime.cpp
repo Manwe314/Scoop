@@ -227,12 +227,12 @@ void ShowcaseApp::run()
                             swapChainExtent,
                             /*rootIndex*/ 0,       
                             /*time*/ 0.0f,
-                            /*camPos*/ glm::vec3(0, 0, -10),
-                            /*camTarget*/ glm::vec3(0, 0, 0),
+                            /*camPos*/ glm::vec3(0, 100, 250),
+                            /*camTarget*/ glm::vec3(0, 30, 0),
                             /*up*/ glm::vec3(0, 1, 0),
                             /*fov*/ 60.0f,
                             /*near*/ 0.1f,
-                            /*far*/ 1000.0f
+                            /*far*/ 10000.0f
                         );
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);

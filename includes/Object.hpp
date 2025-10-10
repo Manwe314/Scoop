@@ -224,8 +224,8 @@ private:
     inline VertexNormalData findVertexData(int id, std::vector<VertexNormalData>& vertexData)
     {
         for (auto& data : vertexData)
-        if (data.id == id)
-        return data;
+            if (data.id == id)
+                return data;
         VertexNormalData vertex{};
         vertex.id = id;
         return vertex;
