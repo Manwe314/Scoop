@@ -14,9 +14,7 @@
 #include <vector>
 #include <stdexcept>
 #include <unordered_map>
-
-
-
+#include <future>
 
 
 struct AppState {
@@ -24,6 +22,14 @@ struct AppState {
     VkPhysicalDevice device;
     SBVH sbvh;
     std::vector<MaterialGPU> materials;
+};
+
+struct UiAppState {
+    std::string errorMsg;
+    std::string selectedDeviceName;
+    bool showError;
+    bool showDevicePicker;
+    bool isReadyToDisplay;
 };
 
 struct TextInputState {
@@ -65,9 +71,22 @@ class UiApp
         void operator=(const UiApp&) = delete;
         
         void HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData);
+        void HandleErrorShowing(Clay_ElementId elementId, Clay_PointerData pointerData);
+        void HandleFloatingShowing(Clay_ElementId elementId, Clay_PointerData pointerData);
         
         
-        static void hoverBridge(Clay_ElementId id, Clay_PointerData pd, intptr_t user) { auto* self = reinterpret_cast<UiApp*>(user); if (self) self->HandleButtonInteraction(id, pd); }
+        static void hoverBridge(Clay_ElementId id, Clay_PointerData pd, intptr_t user) {
+            auto* self = reinterpret_cast<UiApp*>(user);
+            if (self)
+            {
+                if (self->uiState.showError)
+                    self->HandleErrorShowing(id, pd);
+                else if (self->uiState.showDevicePicker)
+                    self->HandleFloatingShowing(id, pd);
+                else
+                    self->HandleButtonInteraction(id, pd);
+            }
+        }
         
         
         TextInputState getInputState() { return input; }
@@ -99,6 +118,7 @@ class UiApp
         Device device;
 
         AppState state;
+        UiAppState uiState;
         bool exitRun = false;
 
         GLFWcursor* cursorArrow = nullptr;
@@ -135,6 +155,7 @@ class UiApp
         Clay_Arena clayArena{};
 
         Object model;
+        std::future<Object> fut;
 
         void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);

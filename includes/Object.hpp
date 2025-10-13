@@ -149,8 +149,7 @@ struct Material {
 
 struct VertexNormalData
 {
-    int id;
-    std::map<Face*, glm::vec3> adjacentNormal;
+    std::vector<std::pair<Face*, glm::vec3>> adjacentNormal;
 };
 
 struct PartitionResult {
@@ -219,16 +218,6 @@ private:
         if (obj.groups[i].name == name)
         return i;
         return -1;
-    }
-    
-    inline VertexNormalData findVertexData(int id, std::vector<VertexNormalData>& vertexData)
-    {
-        for (auto& data : vertexData)
-            if (data.id == id)
-                return data;
-        VertexNormalData vertex{};
-        vertex.id = id;
-        return vertex;
     }
     
     

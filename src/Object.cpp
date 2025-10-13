@@ -90,18 +90,6 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
     return true;
 }
 
-static void insertOrReplace(std::vector<VertexNormalData>& vec, VertexNormalData data) {
-    for (auto& v : vec)
-    {
-        if (v.id == data.id)
-        {
-            v = std::move(data);
-            return;
-        }
-    }
-    vec.push_back(std::move(data));
-
-}
 
 Object::Object()
 {
@@ -119,7 +107,6 @@ Object::Object(const std::string &filePath) : vertices(), textureCoords(), norma
     std::string line;
     while (std::getline(file, line))
     {
-        std::cout << "parsing line " << reading_line << std::endl; 
         int type = -1;
         std::istringstream iss(line);
         std::string token;
@@ -655,34 +642,37 @@ void Object::addNormals()
         for (const auto& group : object.groups)
             totalFaces += group.faces.size();
     total_faces = totalFaces;
-    vertexData.reserve(totalFaces * 3);
+    vertexData.resize((int)vertices.size() + 1);
+    for (int vertexID = 0; vertexID < (int)vertices.size(); vertexID++)
+        vertexData[vertexID].adjacentNormal.reserve(12);
 
     for (auto& object : objects)
         for (auto& group : object.groups)
             for (auto& face : group.faces)
             {
+                glm::vec3 normal = calculateFaceNormal(vertices[face.vertices[0] - 1], vertices[face.vertices[1] - 1], vertices[face.vertices[2] - 1]);
                 for (int n : face.vertices)
                 {
-                    VertexNormalData vertex = findVertexData(n, vertexData);
-                    glm::vec3 normal = calculateFaceNormal(vertices[face.vertices[0] - 1], vertices[face.vertices[1] - 1], vertices[face.vertices[2] - 1]);
-                    vertex.adjacentNormal.insert({&face, normal});
-                    insertOrReplace(vertexData, vertex);
+                    if (n >= vertices.size() + 1)
+                        throw std::runtime_error("Error While calculating normals, Vertex id out of range!");
+                    vertexData[n].adjacentNormal.push_back({&face, normal});
                 }
             }
     std::cout << "vertex data all found moving on to adding normals!" << std::endl;
-    for (auto & data : vertexData)
+    for (int data = 0; data < vertexData.size(); data++)
     {
         std::map<uint32_t, glm::vec3> shadingGroupNormal;
         std::map<uint32_t, int> shadedNormalId;
-        for (auto& [face, normal] : data.adjacentNormal)
+        for (auto& [face, normal] : vertexData[data].adjacentNormal)
             if (face->smoothingGroup != 0 && glm::length(normal) > EPSILON)
                 shadingGroupNormal[face->smoothingGroup] += normal;
-        for (auto& [face, normal] : data.adjacentNormal)
+        for (auto& [face, normal] : vertexData[data].adjacentNormal)
         {
+            
             int i = 0;
             while (i < 3)
             {
-                if (face->vertices[i] == data.id)
+                if (face->vertices[i] == data)
                     break;
                 i++;
             }

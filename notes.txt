@@ -9,12 +9,11 @@ to-add later:
     add feedback on ui actions
     scene construction
     buffers -> vector of buffers <SBVHNodes>
-    add image SSBO = MAX_FRAMES_IN_FLIGHT
     construct TLAS for scene
     rotation + compute params;
     
 
 tomorrow?
     finish up scene construction
-    optimise obj loading / threads?
+    obj loading threads?
     

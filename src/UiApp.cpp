@@ -163,7 +163,9 @@ UiApp::UiApp(std::string def, VulkanContext& context) : window(WIDTH, HEIGHT, "U
     cursorIBeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
     wanted = cursorArrow;
     std::cout << def << std::endl;
-    input.text = def; 
+    input.text = def;
+    uiState.showError = false;
+    uiState.isReadyToDisplay = false;
 }
 
 void UiApp::createPipelineLayout()
@@ -574,6 +576,15 @@ UiApp::~UiApp()
     glfwDestroyCursor(cursorIBeam);
 }
 
+void UiApp::HandleErrorShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
+{
+    if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && ((elementId.id == Clay_GetElementId(CLAY_STRING("backgroundError")).id) || (elementId.id == Clay_GetElementId(CLAY_STRING("Empty1")).id)))
+    {
+        uiState.showError = false;
+    }
+
+}
+
 void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData) 
 {
 
@@ -593,16 +604,28 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
     }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Device Selector")).id)) {
+        input.focused = false;
+        focusedInputId = Clay_ElementId{0};
+        uiState.showDevicePicker = true;
+    }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("model loader")).id)) {
         input.focused = false;
         focusedInputId = Clay_ElementId{0};
+        fut = std::async(std::launch::async,[path = std::string(input.text)]()
+        {
+            return Object(path);
+        });
         try
         {
-            model = Object(input.text);
+            model = fut.get();
         }
         catch(const std::exception& e)
         {
             std::cerr << e.what() << '\n';
+            std::string errMsg(e.what());
+            uiState.errorMsg = errMsg;
+            uiState.showError = true;
         }
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("launch button")).id)) {
@@ -623,6 +646,16 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
         focusedInputId = Clay_ElementId{0};
         
     }
+}
+
+void UiApp::HandleFloatingShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
+{
+    if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Device Selector")).id))
+    {
+        uiState.showDevicePicker = true;
+        
+    }
+
 }
 
 void UiApp::buildUi() 
@@ -686,14 +719,25 @@ void UiApp::buildUi()
                 .textAlignment = CLAY_TEXT_ALIGN_CENTER
             }));
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0)}}});
-            CLAY_TEXT(ClayFromStable(clayFrameStrings ,name), 
-            CLAY_TEXT_CONFIG({
-                .textColor = {255, 243, 232, 255}, 
-                .fontSize = 32, 
-                .letterSpacing = 1, 
-                .wrapMode = CLAY_TEXT_WRAP_NONE, 
-                .textAlignment = CLAY_TEXT_ALIGN_CENTER
-            }));
+            CLAY({ .id = CLAY_ID("Device Selector"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(10),
+                },
+                .backgroundColor = {65, 9, 114, 200},
+                .cornerRadius = CLAY_CORNER_RADIUS(35),
+                .clip = {.horizontal = true, .vertical = true}
+            }){
+                Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                CLAY_TEXT(ClayFromStable(clayFrameStrings ,name), 
+                CLAY_TEXT_CONFIG({
+                    .textColor = {255, 243, 232, 255}, 
+                    .fontSize = 32, 
+                    .letterSpacing = 1, 
+                    .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                    .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                }));
+            }
         }
         CLAY({ .id = CLAY_ID("form"),
                 .layout = {
@@ -779,6 +823,138 @@ void UiApp::buildUi()
                 .wrapMode = CLAY_TEXT_WRAP_NONE, 
                 .textAlignment = CLAY_TEXT_ALIGN_CENTER
             }));
+        }
+    }
+
+    if (uiState.showDevicePicker)
+    {
+        std::vector<VkPhysicalDevice> options = device.getOptionalDevices();
+        std::vector<std::string> names;
+        names.reserve(options.size());
+        for (auto& dev : options)
+        {
+            VkPhysicalDeviceProperties properties;
+            vkGetPhysicalDeviceProperties(dev, &properties);
+            names.push_back(std::string(properties.deviceName));
+        }
+        Clay_ElementId deviceSelectorId = Clay_GetElementId(CLAY_STRING("Device Selector"));
+        Clay_ElementId menuId          = Clay_GetElementId(CLAY_STRING("picker.menu"));
+        Clay_ElementId scrimId         = Clay_GetElementId(CLAY_STRING("picker.scrim"));
+
+        Clay_PointerData p = Clay_GetCurrentContext()->pointerInfo;
+
+        CLAY({ .id = scrimId,
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+            },
+            .backgroundColor = {0,0,0,0},
+            .floating = {
+                .zIndex = 9998,
+                .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
+                .attachTo = CLAY_ATTACH_TO_ROOT,
+            }
+        }) {}
+        CLAY({ .id = menuId,
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(360), CLAY_SIZING_FIT(0) },
+                .padding = CLAY_PADDING_ALL(10),
+                .childGap = 8,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM
+            },
+            .backgroundColor = (Clay_Color){38,38,48,255},
+            .cornerRadius = CLAY_CORNER_RADIUS(12),
+            .floating = {
+                .offset = { 0, 8 },
+                .parentId = deviceSelectorId.id,
+                .zIndex = 10000,
+                .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM },
+                .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
+                .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+                .clipTo  = CLAY_CLIP_TO_ATTACHED_PARENT
+            },
+            .clip = { .horizontal = true, .vertical = true }
+        }) {
+            CLAY_TEXT(CLAY_STRING("Select a device"),
+                      CLAY_TEXT_CONFIG({ .textColor = {220,220,230,255}, .fontSize = 16 }));
+
+            // Rows
+            for (int i = 0; i < (int)names.size(); ++i) {
+                Clay_ElementId rowId = Clay_GetElementIdWithIndex(CLAY_STRING("picker.row"), (uint32_t)i);
+                bool hovered = Clay_PointerOver(rowId);
+
+                CLAY({
+                    .id = rowId,
+                    .layout = {
+                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                        .padding = { .left=12,.right=12,.top=8,.bottom=8 },
+                        .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                        .layoutDirection = CLAY_LEFT_TO_RIGHT
+                    },
+                    .backgroundColor = hovered ? (Clay_Color){52,52,64,255} : (Clay_Color){46,46,56,255},
+                    .cornerRadius = CLAY_CORNER_RADIUS(8)
+                }) {
+                    CLAY_TEXT(ClayFromStable(clayFrameStrings, names[i]),
+                              CLAY_TEXT_CONFIG({ .textColor = {240,240,245,255}, .fontSize = 16, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                }
+
+                if (Clay_PointerOver(rowId) && p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+                    uiState.selectedDeviceName = names[i];
+                    uiState.showDevicePicker = false;
+                }
+            }
+        }
+
+        if (p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+            bool overMenu   = Clay_PointerOver(menuId);
+            bool overButton = Clay_PointerOver(deviceSelectorId);
+            if (!overMenu && !overButton) {
+                uiState.showDevicePicker = false;
+            }
+        }
+
+
+    }
+
+    if (uiState.showError)
+    {
+        CLAY({ .id = CLAY_ID("backgroundError"), 
+            .layout = { 
+                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, 
+                .padding = {.left = 30, .right = 30, .top = 30, .bottom = 30}, 
+                .childGap = 16,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            },
+            .backgroundColor = {0, 0, 0, 0},
+            .floating = {
+                .zIndex = 10000,
+                .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
+                .attachTo = CLAY_ATTACH_TO_ROOT,
+            },
+        }) {
+            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+            CLAY({ .id = CLAY_ID("Empty1"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}
+                },
+            });
+            CLAY({ .id = CLAY_ID("ErrorTextBox"),
+                .layout = {
+                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                    .padding =  CLAY_PADDING_ALL(8),  
+                },
+                .backgroundColor = {255, 243, 232, 255},
+                .cornerRadius = CLAY_CORNER_RADIUS(35),
+                .clip = {.horizontal = true, .vertical = true}
+            }){
+                CLAY_TEXT(ClayFromStable(clayFrameStrings , uiState.errorMsg), 
+                CLAY_TEXT_CONFIG({
+                    .textColor = {255, 21, 21, 255}, 
+                    .fontSize = 32, 
+                    .letterSpacing = 1, 
+                    .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                    .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                }));
+            }
         }
     }
 
