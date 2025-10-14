@@ -141,6 +141,9 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::
     createGraphicsDescriptors();
     createFullscreenGraphicsPipeline();
     createParamsBuffers();
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(gpu, &properties);
+    std::cout << "Name: " << properties.deviceName << std::endl;
 }
 
 ShowcaseApp::~ShowcaseApp()

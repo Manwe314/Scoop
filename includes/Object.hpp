@@ -14,6 +14,7 @@
 #include <system_error>
 #include <optional>
 #include <algorithm>
+#include <filesystem>
 #include <numeric>
 #include <map>
 #include <unordered_map>
@@ -228,6 +229,7 @@ private:
     SBVH buildSplitBoundingVolumeHierarchy();
     std::vector<MaterialGPU> buildMaterialGPU();
     Material getDefaultMaterial();
+    std::string getFileName();
 };
 
 

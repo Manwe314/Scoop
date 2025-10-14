@@ -90,7 +90,6 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
     return true;
 }
 
-
 Object::Object()
 {
 
@@ -720,6 +719,12 @@ void Object::addNormals()
             }
         }
     }
+}
+
+std::string Object::getFileName()
+{
+    std::filesystem::path p(objFilePath);
+    return p.stem().string();
 }
 
 Material Object::getDefaultMaterial()

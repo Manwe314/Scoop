@@ -23,6 +23,10 @@ static inline void ClayHandleErrors(Clay_ErrorData e) {
     fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
 }
 
+static inline bool MatchesBase(Clay_ElementId id, Clay_ElementId base) {
+    return id.baseId == base.baseId;
+}
+
 static Clay_Dimensions MeasureTextFromAtlas(Clay_StringSlice s, Clay_TextElementConfig* cfg, void* user)
 {
     auto* tr = static_cast<TextRenderer*>(user);
@@ -128,6 +132,40 @@ static inline VkRect2D intersectScissor(VkRect2D a, VkRect2D b) {
     return VkRect2D{ {x0, y0}, { (uint32_t)(x1-x0), (uint32_t)(y1-y0) } };
 }
 
+static inline bool isObj(std::string& path)
+{
+    return path.size() >= 5 && path.compare(path.size() - 4, 4, ".obj") == 0;
+}
+
+static std::string pickObjRelativePath()
+{
+    if (NFD_Init() != NFD_OKAY)
+        throw std::runtime_error("File Dialog Init Failed.");
+
+    nfdfilteritem_t filters[] = {{ "OBJ Models", "obj" }};
+
+    nfdchar_t* outPath = nullptr;
+    const nfdresult_t res = NFD_OpenDialog(&outPath, filters, 1, nullptr); 
+
+    std::string result;
+
+    if (res == NFD_OKAY && outPath)
+    {
+        std::filesystem::path abs = outPath;
+        free(outPath);
+
+        std::error_code ec;
+        std::filesystem::path base = std::filesystem::current_path();
+        std::filesystem::path rel = std::filesystem::relative(abs, base, ec);
+
+        result = (!ec && !rel.empty()) ? rel.string() : abs.string();
+    }
+    else if (res == NFD_ERROR)
+        throw std::runtime_error("Unexpected Error wile using File dialog");
+
+    NFD_Quit();
+    return result;
+}
 
 
 struct SimplePushConstantData {
@@ -140,7 +178,7 @@ struct RectangleItem {
     uint32_t seq;
 };
 
-UiApp::UiApp(std::string def, VulkanContext& context) : window(WIDTH, HEIGHT, "UI"), device(window, context.getInstance()), clayFrameStrings()
+UiApp::UiApp(std::string def, VulkanContext& context) : window(WIDTH, HEIGHT, "UI"), device(window, context.getInstance()), clayFrameStrings(), optionalDevices(), optionalDeviceNames()
 {
     loadUi();
     createPipelineLayout();
@@ -162,10 +200,25 @@ UiApp::UiApp(std::string def, VulkanContext& context) : window(WIDTH, HEIGHT, "U
     cursorHand  = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
     cursorIBeam = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
     wanted = cursorArrow;
-    std::cout << def << std::endl;
-    input.text = def;
-    uiState.showError = false;
-    uiState.isReadyToDisplay = false;
+    auto elementId = Clay_GetElementId(CLAY_STRING("input form"));
+    inputs.get(elementId).text = def;
+    clayFrameStrings.reserve(80);
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.x"))).text = "0";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.y"))).text = "0";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.z"))).text = "5";
+
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.target.input.x"))).text = "0";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.target.input.y"))).text = "0";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.target.input.z"))).text = "0";
+
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.up.input.x"))).text = "0";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.up.input.y"))).text = "1";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.up.input.z"))).text = "0";
+
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.vfov.input"))).text     = "60";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.aspect.input"))).text   = "1.7778";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.near.input"))).text     = "0.1";
+    inputs.get(Clay_GetElementId(CLAY_STRING("cam.far.input"))).text      = "1000";
 }
 
 void UiApp::createPipelineLayout()
@@ -198,37 +251,33 @@ void UiApp::KeyCallback(GLFWwindow*, int key, int, int action, int mods) {
 }
 
 void UiApp::onChar(uint32_t cp) {
-    if (!input.focused) return;
+    auto* s = inputs.focused();
+    if (!s) return;
 
-    // Basic printable ASCII range (expand later to UTF-8 if you like)
     if (cp >= 32 && cp < 127) {
-        input.text.push_back(static_cast<char>(cp));
-        input.caret = input.text.size();
-        input.blinkStart = glfwGetTime();
-        std::cout << "[Input] text=\"" << input.text << "\"\n";
+        s->text.push_back(static_cast<char>(cp));
+        s->caret = s->text.size();
+        s->blinkStart = glfwGetTime();
     }
 }
 
 void UiApp::onKey(int key, int action, int /*mods*/) {
-    if (!input.focused) return;
-    if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+    auto* s = inputs.focused();
+    if (!s || (action != GLFW_PRESS && action != GLFW_REPEAT)) return;
 
     switch (key) {
         case GLFW_KEY_BACKSPACE:
-            if (!input.text.empty()) {
-                input.text.pop_back();
-                input.caret = input.text.size();
-                input.blinkStart = glfwGetTime();
-                std::cout << "[Input] text=\"" << input.text << "\"\n";
+            if (!s->text.empty()) {
+                s->text.pop_back();
+                s->caret = s->text.size();
+                s->blinkStart = glfwGetTime();
             }
             break;
         case GLFW_KEY_ENTER:
         case GLFW_KEY_KP_ENTER:
-            std::cout << "[Input] submit=\"" << input.text << "\"\n";
             break;
         case GLFW_KEY_ESCAPE:
-            input.focused = false;
-            std::cout << "[Input] unfocused (Esc)\n";
+            s->focused = false;
             break;
         default:
             break;
@@ -241,7 +290,7 @@ void UiApp::createTextPipelineLayout() {
     VkPushConstantRange range{};
     range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     range.offset = 0;
-    range.size   = sizeof(SimplePushConstantData); // mat4 uProj
+    range.size   = sizeof(SimplePushConstantData); 
 
     VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     info.setLayoutCount = 1;
@@ -445,7 +494,6 @@ void UiApp::recordCommandBuffer(int imageIndex)
             runs.push_back(out);
         }
 
-        // painter order
         std::stable_sort(runs.begin(), runs.end(),
             [](const TextRun& a, const TextRun& b){
                 if (a.z != b.z) return a.z < b.z;
@@ -461,62 +509,52 @@ void UiApp::recordCommandBuffer(int imageIndex)
             text->drawRange(commandBuffers[imageIndex], run.count, run.first);
         }
 
-        // restore full scissor for subsequent draws (caret, etc.)
         VkRect2D full{{0,0}, swapChain->getSwapChainExtent()};
         vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &full);
-        if (input.focused) {
-            // Blink: 0.5s on, 0.5s off
+        auto* s = inputs.focused();
+        if (s != nullptr) {
             const double now = glfwGetTime();
-            const bool show = fmod(now - input.blinkStart, 1.0) < 0.5;
+            const bool show = fmod(now - s->blinkStart, 1.0) < 0.5;
             if (show && focusedInputRect.width > 0) {
-                const float pad = 10.0f; // must match input box padding
+                const float pad = 10.0f;
                 const float startX = (float)focusedInputRect.x + pad;
                 const float startY = (float)focusedInputRect.y + pad;
             
-                // caret index = end (for now)
-                const size_t caretIdx = std::min(input.caret, input.text.size());
-                auto stops = penStops(*text, input.fontPx, input.text, startX, input.letterSpacing);
+                const size_t caretIdx = std::min(s->caret, s->text.size());
+                auto stops = penStops(*text, s->fontPx, s->text, startX, s->letterSpacing);
                 const float caretX = (caretIdx < stops.size()) ? stops[caretIdx] : stops.back();
             
-                // Clip to the input rect
                 VkRect2D inputScissor{
                     { (int32_t)focusedInputRect.x, (int32_t)focusedInputRect.y },
                     { (uint32_t)focusedInputRect.width, (uint32_t)focusedInputRect.height }
                 };
                 vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &inputScissor);
             
-                // Build a single rectangle instance as the caret
                 UiRenderer::RectangleInstance caret{};
                 caret.position = { caretX, (float)focusedInputRect.y + 8.0f };
                 caret.size     = { 2.0f, (float)focusedInputRect.height - 20.0f }; // thin bar
                 caret.color    = srgbToLinear({0.1f,0.1f,0.1f,1});
                 caret.radius   = {0,0,0,0};
             
-                // Bind rect pipeline again (we just used text pipeline)
                 pipeline->bind(commandBuffers[imageIndex]);
             
-                // Push constants for this pipeline layout again
                 SimplePushConstantData pc{};
                 pc.uProj = glm::ortho(0.0f, (float)swapChain->getSwapChainExtent().width,
                                       0.0f, (float)swapChain->getSwapChainExtent().height);
                 vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                 
-                // Upload only the caret and draw it
                 UiRenderer::RectangleInstance one = caret;
                 uiOverlay->updateInstances(std::vector<UiRenderer::RectangleInstance>{ one });
                 uiOverlay->bind(commandBuffers[imageIndex]);
                 uiOverlay->draw(commandBuffers[imageIndex]);
                 
-                // Restore full scissor
                 VkRect2D full{{0,0}, swapChain->getSwapChainExtent()};
                 vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &full);
             }
         }
     }
     
-    
-
     vkCmdEndRenderPass(commandBuffers[imageIndex]);
     if (vkEndCommandBuffer(commandBuffers[imageIndex]) != VK_SUCCESS)
         throw std::runtime_error("Failed to record Command buffer!");
@@ -595,67 +633,103 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
 
     
     if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("input form")).id)) {
-        input.focused = true;
-        input.caret = input.text.size();
-        focusedInputId = elementId;
-        input.blinkStart = glfwGetTime();
+        inputs.focus(elementId);
+        auto* s = inputs.focused();
+        if (s != nullptr)
+        {
+            s->caret = s->text.size();
+            focusedInputId = elementId;
+            s->blinkStart = glfwGetTime();
+        }
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("background")).id)) {
-        input.focused = false;
+        inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Device Selector")).id)) {
-        input.focused = false;
+        inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
         uiState.showDevicePicker = true;
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("model loader")).id)) {
-        input.focused = false;
+        inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
-        fut = std::async(std::launch::async,[path = std::string(input.text)]()
+        auto eId = Clay_GetElementId(CLAY_STRING("input form"));
+        if (!isObj(inputs.get(eId).text))
         {
-            return Object(path);
-        });
-        try
-        {
-            model = fut.get();
-        }
-        catch(const std::exception& e)
-        {
-            std::cerr << e.what() << '\n';
-            std::string errMsg(e.what());
-            uiState.errorMsg = errMsg;
+            uiState.errorMsg = "The model path is not pointing to .obj";
             uiState.showError = true;
+        }
+        else if (uiState.loadingModel)
+        {
+            uiState.errorMsg = "A model is beeing loaded, please Wait";
+            uiState.showError = true;
+        }
+        else
+        {
+            fut = std::async(std::launch::async,[path = std::string(inputs.get(eId).text)]()
+            {
+                return Object(path);
+            });
+            uiState.loadingModel = true;
         }
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("launch button")).id)) {
-        input.focused = false;
+        inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
         state.shouldClose = false;
-        state.device = device.getPhysicalDevice();
-        state.sbvh = model.buildSplitBoundingVolumeHierarchy();
-        state.materials = model.buildMaterialGPU();
-        std::cout << "sbvh size: " << state.sbvh.nodes.size() << std::endl;
-        std::cout << "materials size: " << state.materials.size() << std::endl;
+        if (state.device == VK_NULL_HANDLE)
+            state.device = device.getPhysicalDevice();
         exitRun = true;
         
     }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Menu Selector")).id))
+    {
+        auto eId = Clay_GetElementId(CLAY_STRING("input form"));
+        try
+        {
+            inputs.get(eId).text = pickObjRelativePath();
+        }
+        catch(const std::exception& e)
+        {
+            uiState.errorMsg = std::string(e.what());
+            uiState.showError = true;
+        }
+    }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME)
     {
-        input.focused = false;
+        inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
-        
     }
 }
 
 void UiApp::HandleFloatingShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
 {
+    Clay_ElementId rowBase = Clay_GetElementId(CLAY_STRING("picker.row"));
     if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Device Selector")).id))
     {
         uiState.showDevicePicker = true;
-        
+    }
+    else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Selector Exit")).id))
+    {
+        uiState.showDevicePicker = false;
     }
 
+    if (elementId.baseId == rowBase.baseId) {
+        uint32_t idx = elementId.offset;
+        wanted = cursorHand;
+        
+        if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME)
+        {
+            if (idx < optionalDeviceNames.size())
+            {
+                const std::string& name = optionalDeviceNames[idx];
+                uiState.selectedDeviceName = name;
+                uiState.showDevicePicker   = false;
+                state.device = optionalDevices[idx];
+            }
+        }
+    }
 }
 
 void UiApp::buildUi() 
@@ -663,9 +737,30 @@ void UiApp::buildUi()
     
     Clay_SetLayoutDimensions((Clay_Dimensions) {static_cast<float>(window.getWidth()), static_cast<float>(window.getHeight())});
     Clay_SetMeasureTextFunction(MeasureTextFromAtlas, text.get());
-    std::string name = device.getName();
+    std::string name = !uiState.selectedDeviceName.empty() ? uiState.selectedDeviceName  : device.getName();
     clayFrameStrings.clear();
     wanted = cursorArrow;
+    if (fut.valid())
+    {
+        using namespace std::chrono_literals;
+        auto s = fut.wait_for(0ms);
+        if (s == std::future_status::ready)
+        {
+            uiState.loadingModel = false;
+            try
+            {
+                Object loaded = fut.get();
+                models.push_back({loaded.getFileName(), loaded});
+            }
+            catch(const std::exception& e)
+            {
+                std::cerr << e.what() << '\n';
+                std::string errMsg(e.what());
+                uiState.errorMsg = errMsg;
+                uiState.showError = true;
+            }
+        }
+    }
     
     Clay_BeginLayout();
     
@@ -765,38 +860,74 @@ void UiApp::buildUi()
                         .layoutDirection = CLAY_LEFT_TO_RIGHT
                     }
             }){
-                CLAY({ .id = CLAY_ID("input form"),
+                CLAY({ .id = CLAY_ID("Input Wraper"),
+                    .layout = {
+                            .sizing = {CLAY_SIZING_GROW(0, 1650), CLAY_SIZING_GROW(0)},
+                            .padding = CLAY_PADDING_ALL(10),
+                            .childGap = 9,
+                            .layoutDirection = CLAY_LEFT_TO_RIGHT
+                        },
+                        .backgroundColor = {179, 170, 162, 170}, 
+                        .cornerRadius = CLAY_CORNER_RADIUS(20),
+                }){
+                    CLAY({ .id = CLAY_ID("input form"),
                         .layout = {
                             .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                             .padding = CLAY_PADDING_ALL(10)
                         },
-                        .backgroundColor = {179, 170, 162, 170}, 
+                        .backgroundColor = {0,0,0,0}, 
                         .cornerRadius = CLAY_CORNER_RADIUS(20),
                         .clip = {.horizontal = true, .vertical = true}
-                }){
-                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-                    CLAY_TEXT(ClayFromStable(clayFrameStrings, input.text),
-                    CLAY_TEXT_CONFIG({
-                        .textColor = {255, 243, 232, 255},
-                        .fontSize  = 32,
-                        .letterSpacing = 1,
-                        .wrapMode  = CLAY_TEXT_WRAP_NONE,
-                        .textAlignment = CLAY_TEXT_ALIGN_LEFT
-                    }));
+                    }){
+                        Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                        auto eId = Clay_GetElementId(CLAY_STRING("input form"));
+                        CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(eId).text),
+                        CLAY_TEXT_CONFIG({
+                            .textColor = {255, 243, 232, 255},
+                            .fontSize  = 32,
+                            .letterSpacing = 1,
+                            .wrapMode  = CLAY_TEXT_WRAP_NONE,
+                            .textAlignment = CLAY_TEXT_ALIGN_LEFT
+                        }));
+                    }
+                    CLAY({ .id = CLAY_ID("Menu Selector"),
+                        .layout = {
+                            .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                            .padding = CLAY_PADDING_ALL(16),
+                            
+                        },
+                        .backgroundColor = {109, 100, 92, 200},
+                        .cornerRadius = CLAY_CORNER_RADIUS(10),
+                        .clip = {.horizontal = true, .vertical = true}
+                    }){
+                        Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                        CLAY_TEXT(CLAY_STRING("Select Object"),
+                        CLAY_TEXT_CONFIG({
+                            .textColor = {255, 243, 232, 255}, 
+                            .fontSize = 32, 
+                            .letterSpacing = 1, 
+                            .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                            .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                        }));
+                    }
                 }
                 CLAY({ .id = CLAY_ID("model loader"),
                         .layout = {
-                            .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                            .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_GROW(0)},
                             .padding = CLAY_PADDING_ALL(10),
+                            .childAlignment = {
+                              .x = CLAY_ALIGN_X_CENTER,
+                              .y = CLAY_ALIGN_Y_CENTER
+                            },
                         },
-                        .backgroundColor = {65, 9, 114, 200},
+                        .backgroundColor = uiState.loadingModel ? (Clay_Color){65, 9, 114, 50} : (Clay_Color){65, 9, 114, 200},
                         .cornerRadius = CLAY_CORNER_RADIUS(35),
                         .clip = {.horizontal = true, .vertical = true}
                 }){
                     Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
                     CLAY_TEXT(CLAY_STRING("Load Model"), 
                     CLAY_TEXT_CONFIG({
-                        .textColor = {255, 243, 232, 255}, 
+                        .textColor = uiState.loadingModel ? (Clay_Color){255, 243, 232, 80} : (Clay_Color){255, 243, 232, 255}, 
                         .fontSize = 32, 
                         .letterSpacing = 1, 
                         .wrapMode = CLAY_TEXT_WRAP_NONE, 
@@ -805,45 +936,455 @@ void UiApp::buildUi()
                 }
             }
         }
-        CLAY({ .id = CLAY_ID("launch button"),
+        CLAY({ .id = CLAY_ID("tech panel"),
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+                .padding = CLAY_PADDING_ALL(16),
+                .childGap = 12,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM
+            },
+            .backgroundColor = {51, 30, 108, 170},
+            .cornerRadius    = CLAY_CORNER_RADIUS(20),
+            .clip = { .horizontal = true, .vertical = true }
+        }) {
+            CLAY({
+                .id = CLAY_ID("tech navbar"),
                 .layout = {
-                    .sizing = {CLAY_SIZING_FIT(0),CLAY_SIZING_FIT(0)},
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(56) },
                     .padding = CLAY_PADDING_ALL(8),
+                    .childGap = 8,
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT
                 },
-                .backgroundColor = {65, 9, 114, 200},
-                .cornerRadius = CLAY_CORNER_RADIUS(35),
-                .clip = {.horizontal = true, .vertical = true}
-        }){
-            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-            CLAY_TEXT(CLAY_STRING("Run Display"), 
-            CLAY_TEXT_CONFIG({
-                .textColor = {255, 243, 232, 255}, 
-                .fontSize = 32, 
-                .letterSpacing = 1, 
-                .wrapMode = CLAY_TEXT_WRAP_NONE, 
-                .textAlignment = CLAY_TEXT_ALIGN_CENTER
-            }));
+                .backgroundColor = {38,29,65,200},
+                .cornerRadius    = CLAY_CORNER_RADIUS(18),
+            }) {
+                {
+                    Clay_ElementId tabId = Clay_GetElementId(CLAY_STRING("tab.camera"));
+                    bool hovered = Clay_PointerOver(tabId);
+                
+                    CLAY({
+                        .id = tabId,
+                        .layout = {
+                            .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                            .padding = CLAY_PADDING_ALL(10),
+                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                        },
+                        .backgroundColor = hovered ? (Clay_Color){139, 85, 199,255} : (Clay_Color){65, 9, 114, 200},
+                        .cornerRadius = CLAY_CORNER_RADIUS(10),
+                        .clip = { .horizontal = true, .vertical = true }
+                    }) {
+                        Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                        CLAY_TEXT(CLAY_STRING("Camera"),
+                            CLAY_TEXT_CONFIG({
+                                .textColor = {255, 243, 232, 255},
+                                .fontSize = 32,
+                                .wrapMode = CLAY_TEXT_WRAP_NONE,
+                                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                            })
+                        );
+                    }
+                }
+            
+                for (int i = 0; i < (int)models.size(); ++i) {
+                    Clay_ElementId tabId = Clay_GetElementIdWithIndex(CLAY_STRING("tab.extra"), (uint32_t)i);
+                    bool hovered = Clay_PointerOver(tabId);
+                
+                    CLAY({
+                        .id = tabId,
+                        .layout = {
+                            .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                            .padding = CLAY_PADDING_ALL(10),
+                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                        },
+                        .backgroundColor = hovered ? (Clay_Color){139, 85, 199,255} : (Clay_Color){65, 9, 114, 200},
+                        .cornerRadius = CLAY_CORNER_RADIUS(10),
+                        .clip = { .horizontal = true, .vertical = true }
+                    }) {
+                        Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                        CLAY_TEXT(ClayFromStable(clayFrameStrings, models[i].first),
+                            CLAY_TEXT_CONFIG({
+                                .textColor = {255, 243, 232, 255},
+                                .fontSize = 32,
+                                .wrapMode = CLAY_TEXT_WRAP_NONE,
+                                .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                            })
+                        );
+                    }
+                }
+            }
+            CLAY({
+                .id = CLAY_ID("tech content"),
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+                    .padding = CLAY_PADDING_ALL(12),
+                    .childGap = 8,
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM
+                },
+                .backgroundColor = {38,29,65,200},
+                .cornerRadius    = CLAY_CORNER_RADIUS(10),
+            }) {
+                // === CAMERA PANEL (when uiState.targetEditor == -1) ===
+                if (uiState.targetEditor == -1) {
+                    // Outer stack for the camera section
+                    CLAY({
+                        .id = CLAY_ID("cam.panel"),
+                        .layout = {
+                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+                            .childGap = 12,
+                            .layoutDirection = CLAY_TOP_TO_BOTTOM
+                        }
+                    }) {
+                        CLAY({
+                            .id = CLAY_ID("cam.row1"),
+                            .layout = {
+                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                .childGap = 12,
+                                .layoutDirection = CLAY_LEFT_TO_RIGHT
+                            }
+                        }) {
+                            // ===== Position =====
+                            CLAY({
+                                .id = CLAY_ID("cam.position.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 10,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = (Clay_Color){51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Position"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.position.row"),
+                                    .layout = {
+                                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                        .childGap = 10,
+                                        .layoutDirection = CLAY_LEFT_TO_RIGHT
+                                    }
+                                }) {
+                                    // X
+                                    CLAY({
+                                        .id = CLAY_ID("cam.position.stack.x"),
+                                        .layout = {
+                                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                            .childGap = 6,
+                                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                        }
+                                    }) {
+                                        CLAY_TEXT(CLAY_STRING("X"),
+                                            CLAY_TEXT_CONFIG({ .textColor = {255,243,232,220}, .fontSize = 24, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                        CLAY({
+                                            .id = CLAY_ID("cam.position.input.x"),
+                                            .layout = { .sizing = { CLAY_SIZING_FIXED(160), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                            .backgroundColor = (Clay_Color){230,224,217,255},
+                                            .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                            .clip = { .horizontal = true, .vertical = true }
+                                        }) {
+                                            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                            CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.x"))).text),
+                                                CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_LEFT }));
+                                        }
+                                    }
+                                    // Y
+                                    CLAY({
+                                        .id = CLAY_ID("cam.position.stack.y"),
+                                        .layout = {
+                                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                            .childGap = 6,
+                                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                        }
+                                    }) {
+                                        CLAY_TEXT(CLAY_STRING("Y"),
+                                            CLAY_TEXT_CONFIG({ .textColor = {255,243,232,220}, .fontSize = 24, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                        CLAY({
+                                            .id = CLAY_ID("cam.position.input.y"),
+                                            .layout = { .sizing = { CLAY_SIZING_FIXED(160), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                            .backgroundColor = (Clay_Color){230,224,217,255},
+                                            .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                            .clip = { .horizontal = true, .vertical = true }
+                                        }) {
+                                            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                            CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.y"))).text),
+                                                CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                        }
+                                    }
+                                    // Z
+                                    CLAY({
+                                        .id = CLAY_ID("cam.position.stack.z"),
+                                        .layout = {
+                                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                            .childGap = 6,
+                                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                        }
+                                    }) {
+                                        CLAY_TEXT(CLAY_STRING("Z"),
+                                            CLAY_TEXT_CONFIG({ .textColor = {255,243,232,220}, .fontSize = 24, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                        CLAY({
+                                            .id = CLAY_ID("cam.position.input.z"),
+                                            .layout = { .sizing = { CLAY_SIZING_FIXED(160), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                            .backgroundColor = (Clay_Color){230,224,217,255},
+                                            .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                            .clip = { .horizontal = true, .vertical = true }
+                                        }) {
+                                            Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                            CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.position.input.z"))).text),
+                                                CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                        }
+                                    }
+                                }
+                            }
+                            CLAY({
+                                .id = CLAY_ID("cam.target.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 10,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = (Clay_Color){51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Target"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.target.row"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .childGap = 10, .layoutDirection = CLAY_LEFT_TO_RIGHT }
+                                }) {
+                                    // X / Y / Z (same pattern)
+                                    auto mkVecInput = [&](const char* id, const char* label) {
+                                        CLAY({
+                                            .id = Clay_GetElementId(ClayFromStable(clayFrameStrings, std::string("cam.target.stack.") + label)),
+                                            .layout = {
+                                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                                .childGap = 6,
+                                                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                            }
+                                        }) {
+                                            CLAY_TEXT(ClayFromStable(clayFrameStrings, label),
+                                                CLAY_TEXT_CONFIG({ .textColor = {255,243,232,220}, .fontSize = 24, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                            CLAY({
+                                                .id = Clay_GetElementId(ClayFromStable(clayFrameStrings, id)),
+                                                .layout = { .sizing = { CLAY_SIZING_FIXED(160), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                                .backgroundColor = (Clay_Color){230,224,217,255},
+                                                .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                                .clip = { .horizontal = true, .vertical = true }
+                                            }) {
+                                                Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                                CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(ClayFromStable(clayFrameStrings, id))).text),
+                                                    CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                            }
+                                        };
+                                    };
+                                
+                                    mkVecInput("cam.target.input.x", "X");
+                                    mkVecInput("cam.target.input.y", "Y");
+                                    mkVecInput("cam.target.input.z", "Z");
+                                }
+                            }
+                        
+                            // ===== Up =====
+                            CLAY({
+                                .id = CLAY_ID("cam.up.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 10,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = (Clay_Color){51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Up"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.up.row"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .childGap = 10, .layoutDirection = CLAY_LEFT_TO_RIGHT }
+                                }) {
+                                    auto mkVecInput = [&](const char* id, const char* label) {
+                                        CLAY({
+                                            .id = Clay_GetElementId(ClayFromStable(clayFrameStrings, std::string("cam.up.stack.") + label)),
+                                            .layout = {
+                                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                                .childGap = 6,
+                                                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                            }
+                                        }) {
+                                            CLAY_TEXT(ClayFromStable(clayFrameStrings, label),
+                                                CLAY_TEXT_CONFIG({ .textColor = {255,243,232,220}, .fontSize = 24, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                            CLAY({
+                                                .id = Clay_GetElementId(ClayFromStable(clayFrameStrings, id)),
+                                                .layout = { .sizing = { CLAY_SIZING_FIXED(160), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                                .backgroundColor = (Clay_Color){230,224,217,255},
+                                                .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                                .clip = { .horizontal = true, .vertical = true }
+                                            }) {
+                                                Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                                CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(ClayFromStable(clayFrameStrings, id))).text),
+                                                    CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                            }
+                                        };
+                                    };
+                                
+                                    mkVecInput("cam.up.input.x", "X");
+                                    mkVecInput("cam.up.input.y", "Y");
+                                    mkVecInput("cam.up.input.z", "Z");
+                                }
+                            }
+                        }
+
+                        CLAY({
+                            .id = CLAY_ID("cam.row2"),
+                            .layout = {
+                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                .childGap = 12,
+                                .layoutDirection = CLAY_LEFT_TO_RIGHT
+                            }
+                        }) {
+                            CLAY({
+                                .id = CLAY_ID("cam.vfov.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 8,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = {51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("VFOV (deg)"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.vfov.input"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                    .backgroundColor = (Clay_Color){230,224,217,255},
+                                    .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                    .clip = { .horizontal = true, .vertical = true }
+                                }) {
+                                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.vfov.input"))).text),
+                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                }
+                            }
+                            CLAY({
+                                .id = CLAY_ID("cam.aspect.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 8,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = {51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Aspect"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.aspect.input"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                    .backgroundColor = (Clay_Color){230,224,217,255},
+                                    .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                    .clip = { .horizontal = true, .vertical = true }
+                                }) {
+                                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.aspect.input"))).text),
+                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                }
+                            }
+                            CLAY({
+                                .id = CLAY_ID("cam.near.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 8,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = {51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Near"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.near.input"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                    .backgroundColor = (Clay_Color){230,224,217,255},
+                                    .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                    .clip = { .horizontal = true, .vertical = true }
+                                }) {
+                                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.near.input"))).text),
+                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                }
+                            }
+                            CLAY({
+                                .id = CLAY_ID("cam.far.card"),
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                    .padding = CLAY_PADDING_ALL(12),
+                                    .childGap = 8,
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_TOP },
+                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                },
+                                .backgroundColor = {51, 30, 108, 170},
+                                .cornerRadius    = CLAY_CORNER_RADIUS(16),
+                                .clip = { .horizontal = true, .vertical = true }
+                            }) {
+                                CLAY_TEXT(CLAY_STRING("Far"),
+                                    CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
+                                CLAY({
+                                    .id = CLAY_ID("cam.far.input"),
+                                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(10) },
+                                    .backgroundColor = (Clay_Color){230,224,217,255},
+                                    .cornerRadius    = CLAY_CORNER_RADIUS(10),
+                                    .clip = { .horizontal = true, .vertical = true }
+                                }) {
+                                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementId(CLAY_STRING("cam.far.input"))).text),
+                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     if (uiState.showDevicePicker)
     {
-        std::vector<VkPhysicalDevice> options = device.getOptionalDevices();
-        std::vector<std::string> names;
-        names.reserve(options.size());
-        for (auto& dev : options)
+        if (optionalDeviceNames.empty() || optionalDevices.empty())
         {
-            VkPhysicalDeviceProperties properties;
-            vkGetPhysicalDeviceProperties(dev, &properties);
-            names.push_back(std::string(properties.deviceName));
+            std::vector<VkPhysicalDevice> options = device.getOptionalDevices();
+            std::vector<std::string> names;
+            names.reserve(options.size());
+            for (auto& dev : options)
+            {
+                VkPhysicalDeviceProperties properties;
+                vkGetPhysicalDeviceProperties(dev, &properties);
+                names.push_back(std::string(properties.deviceName));
+            }
+            optionalDevices = options;
+            optionalDeviceNames = names;
         }
-        Clay_ElementId deviceSelectorId = Clay_GetElementId(CLAY_STRING("Device Selector"));
-        Clay_ElementId menuId          = Clay_GetElementId(CLAY_STRING("picker.menu"));
-        Clay_ElementId scrimId         = Clay_GetElementId(CLAY_STRING("picker.scrim"));
-
-        Clay_PointerData p = Clay_GetCurrentContext()->pointerInfo;
-
-        CLAY({ .id = scrimId,
+        CLAY({ .id = CLAY_ID("Selector Exit"),
             .layout = {
                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
             },
@@ -853,19 +1394,19 @@ void UiApp::buildUi()
                 .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
                 .attachTo = CLAY_ATTACH_TO_ROOT,
             }
-        }) {}
-        CLAY({ .id = menuId,
+        }) {Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));}
+        CLAY({ .id = CLAY_ID("Selector Menu"),
             .layout = {
                 .sizing = { CLAY_SIZING_FIXED(360), CLAY_SIZING_FIT(0) },
                 .padding = CLAY_PADDING_ALL(10),
                 .childGap = 8,
                 .layoutDirection = CLAY_TOP_TO_BOTTOM
             },
-            .backgroundColor = (Clay_Color){38,38,48,255},
+            .backgroundColor = {51, 30, 108, 170},
             .cornerRadius = CLAY_CORNER_RADIUS(12),
             .floating = {
                 .offset = { 0, 8 },
-                .parentId = deviceSelectorId.id,
+                .parentId = Clay_GetElementId(CLAY_STRING("Device Selector")).id,
                 .zIndex = 10000,
                 .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM },
                 .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
@@ -874,11 +1415,10 @@ void UiApp::buildUi()
             },
             .clip = { .horizontal = true, .vertical = true }
         }) {
-            CLAY_TEXT(CLAY_STRING("Select a device"),
-                      CLAY_TEXT_CONFIG({ .textColor = {220,220,230,255}, .fontSize = 16 }));
+            CLAY_TEXT(CLAY_STRING("Select a device"), CLAY_TEXT_CONFIG({ .textColor = {255, 243, 232, 255}, .fontSize = 16 }));
 
-            // Rows
-            for (int i = 0; i < (int)names.size(); ++i) {
+            for (int i = 0; i < (int)optionalDeviceNames.size(); i++)
+            {
                 Clay_ElementId rowId = Clay_GetElementIdWithIndex(CLAY_STRING("picker.row"), (uint32_t)i);
                 bool hovered = Clay_PointerOver(rowId);
 
@@ -890,31 +1430,17 @@ void UiApp::buildUi()
                         .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
                         .layoutDirection = CLAY_LEFT_TO_RIGHT
                     },
-                    .backgroundColor = hovered ? (Clay_Color){52,52,64,255} : (Clay_Color){46,46,56,255},
-                    .cornerRadius = CLAY_CORNER_RADIUS(8)
+                    .backgroundColor = hovered ? (Clay_Color){139, 85, 199,255} : (Clay_Color){65, 9, 114, 200},
+                    .cornerRadius = CLAY_CORNER_RADIUS(8),
+                    .clip = { .horizontal = true, .vertical = true }
                 }) {
-                    CLAY_TEXT(ClayFromStable(clayFrameStrings, names[i]),
-                              CLAY_TEXT_CONFIG({ .textColor = {240,240,245,255}, .fontSize = 16, .wrapMode = CLAY_TEXT_WRAP_NONE }));
-                }
-
-                if (Clay_PointerOver(rowId) && p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
-                    uiState.selectedDeviceName = names[i];
-                    uiState.showDevicePicker = false;
+                    Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                    CLAY_TEXT(ClayFromStable(clayFrameStrings, optionalDeviceNames[i]),
+                              CLAY_TEXT_CONFIG({ .textColor = {255, 243, 232, 255}, .fontSize = 16, .wrapMode = CLAY_TEXT_WRAP_NONE }));
                 }
             }
         }
-
-        if (p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
-            bool overMenu   = Clay_PointerOver(menuId);
-            bool overButton = Clay_PointerOver(deviceSelectorId);
-            if (!overMenu && !overButton) {
-                uiState.showDevicePicker = false;
-            }
-        }
-
-
     }
-
     if (uiState.showError)
     {
         CLAY({ .id = CLAY_ID("backgroundError"), 
@@ -960,6 +1486,13 @@ void UiApp::buildUi()
 
     Clay_RenderCommandArray renderCommands = Clay_EndLayout();
 
+    focusedInputRect = Clay_BoundingBox{0,0,0,0};
+    if (focusedInputId.id != 0)
+    {
+        Clay_ElementData ed = Clay_GetElementData(focusedInputId);
+        if (ed.found)
+            focusedInputRect = ed.boundingBox;
+    }
     {
         // Get cursor in window coords (origin top-left, y down)
         double mx, my;
@@ -994,6 +1527,7 @@ void UiApp::buildUi()
         if (rc.commandType != CLAY_RENDER_COMMAND_TYPE_RECTANGLE) continue;
 
         if (rc.id == focusedInputId.id) {
+
             focusedInputRect = rc.boundingBox;
         }
 

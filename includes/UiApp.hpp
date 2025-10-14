@@ -15,7 +15,10 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <future>
-
+#include <chrono>
+#include <filesystem>
+#include <system_error>
+#include <nativefiledialog-extended/src/include/nfd.h>
 
 struct AppState {
     bool shouldClose;
@@ -27,9 +30,13 @@ struct AppState {
 struct UiAppState {
     std::string errorMsg;
     std::string selectedDeviceName;
-    bool showError;
-    bool showDevicePicker;
-    bool isReadyToDisplay;
+    bool showError = false;
+    bool showDevicePicker = false;
+    bool isReadyToDisplay = false;
+    bool loadingModel = false;
+    bool hasObject = false;
+    int targetEditor = -1;
+    std::vector<bool> isObjectReady;
 };
 
 struct TextInputState {
@@ -40,6 +47,39 @@ struct TextInputState {
     float  letterSpacing = 1.0f;
     size_t caret = 0;
     double blinkStart = 0.0;
+};
+
+static inline uint64_t keyFrom(Clay_ElementId id) { return (uint64_t)id.id; }
+
+struct TextInputStore {
+    std::unordered_map<uint64_t, TextInputState> fields;
+    Clay_ElementId focusedId {0};
+    Clay_BoundingBox focusedRect{};
+
+    TextInputState& get(Clay_ElementId id) { return fields[keyFrom(id)]; }
+    
+    TextInputState* focused()
+    {
+        if (focusedId.id == 0) return nullptr;
+        auto it = fields.find(keyFrom(focusedId));
+        return (it==fields.end()) ? nullptr : &it->second;
+    }
+
+    void focus(Clay_ElementId id)
+    {
+        if (focusedId.id) fields[keyFrom(focusedId)].focused = false;
+        focusedId = id;
+        auto& s = fields[keyFrom(id)];
+        s.focused = true;
+        s.caret   = s.text.size();
+        s.blinkStart = glfwGetTime();
+    }
+    
+    void blurAll()
+    {
+        if (focusedId.id) fields[keyFrom(focusedId)].focused = false;
+        focusedId = Clay_ElementId{0};
+    }
 };
 
 struct TextRun {
@@ -89,7 +129,6 @@ class UiApp
         }
         
         
-        TextInputState getInputState() { return input; }
     private:
         void loadUi();
         void createPipelineLayout();
@@ -111,7 +150,7 @@ class UiApp
         void onKey (int key, int action, int mods);
         
         
-        TextInputState input;
+        TextInputStore inputs;
         
         
         Window window;
@@ -154,8 +193,11 @@ class UiApp
         void*    clayMem     = nullptr;
         Clay_Arena clayArena{};
 
-        Object model;
+        std::vector<std::pair<std::string, Object>> models;
         std::future<Object> fut;
+
+        std::vector<VkPhysicalDevice> optionalDevices;
+        std::vector<std::string> optionalDeviceNames;
 
         void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);

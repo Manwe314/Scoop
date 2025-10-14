@@ -29,6 +29,8 @@ FetchContent_Declare(
 set(GLM_TEST_ENABLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
+add_subdirectory(${CMAKE_SOURCE_DIR}/external/nativefiledialog-extended)
+
 # Shader compile using SDK's glslc
 if(NOT DEFINED ENV{VULKAN_SDK})
   message(FATAL_ERROR "VULKAN_SDK environment not set. Source the SDK first.")
@@ -95,7 +97,7 @@ target_include_directories(scoop
 )
 
 # Link as before
-target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm)
+target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm nfd)
 
 
 # On some distros you may need to link X11 stuff explicitly; GLFW usually handles this.
