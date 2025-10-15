@@ -6,6 +6,8 @@
 #include "Device.hpp"
 #include "SwapChain.hpp"
 #include "Object.hpp"
+#include "SceneUtils.hpp"
+
 #include <optional>
 #include <set>
 #include <array>
@@ -127,8 +129,7 @@ private:
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
     const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
-    SBVH bottomLevelAS;
-    std::vector<MaterialGPU> materials;
+    Scene scene;
     
     
     std::vector<const char *> getRequiredExtensions();
@@ -184,7 +185,7 @@ private:
     inline ParamsGPU makeDefaultParams(VkExtent2D extent, uint32_t rootIndex = 0, float time = 0.0f, const glm::vec3& camPos = glm::vec3(0.0f)) { return makeDefaultParams(extent.width, extent.height, rootIndex, time, camPos); }
 
 public:
-    ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::vector<MaterialGPU> material);
+    ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene);
     ~ShowcaseApp();
     void run();
     template<class T>

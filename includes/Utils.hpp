@@ -2,7 +2,11 @@
 #include <vector>
 #include <cmath>
 #include <stdexcept>
+#include <system_error>
+#include <optional>
 #include <algorithm>
+#include <numeric>
+#include <charconv> 
 #include <glm/glm.hpp>
 #include <glm/gtc/packing.hpp> 
 
@@ -409,4 +413,13 @@ inline uint32_t packHalf2(glm::vec2 v) {
 inline glm::vec4 makeNV(const glm::vec3& n, const glm::vec2& uv)
 {
     return glm::vec4(n, glm::uintBitsToFloat(packHalf2(uv)));
+}
+
+inline std::optional<float> to_float(const std::string& s)
+{
+    float value{};
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+    if (ec == std::errc())
+        return value;
+    return std::nullopt;
 }

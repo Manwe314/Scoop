@@ -121,7 +121,7 @@ void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src
 
 // ~~~~ constructor / destructor ~~~~
 
-ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, SBVH sbvh, std::vector<MaterialGPU> material) : window(1200, 900, "Scoop"), bottomLevelAS(sbvh), materials(material)
+ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(1200, 900, "Scoop"), scene(scene)
 {
     instance = inst;
     setupDebugMessenger();
@@ -793,11 +793,11 @@ void ShowcaseApp::writeStaticComputeBindings()
 
 void ShowcaseApp::uploadStaticData()
 {
-    uploadDeviceLocal(bottomLevelAS.nodes, 0, sbvhNodesBuffer, sbvhNodesMemory);
-    uploadDeviceLocal(bottomLevelAS.triangles.intersectionTriangles, 0, triangleBuffer, triangleMemory);
-    uploadDeviceLocal(bottomLevelAS.triangles.shadingTriangles, 0, shadingBuffer, shadingMemory);
-    uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
-    writeStaticComputeBindings();
+    // uploadDeviceLocal(bottomLevelAS.nodes, 0, sbvhNodesBuffer, sbvhNodesMemory);
+    // uploadDeviceLocal(bottomLevelAS.triangles.intersectionTriangles, 0, triangleBuffer, triangleMemory);
+    // uploadDeviceLocal(bottomLevelAS.triangles.shadingTriangles, 0, shadingBuffer, shadingMemory);
+    // uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
+    // writeStaticComputeBindings();
 }
 
 void ShowcaseApp::writeParamsBindingForFrame(uint32_t frameIndex)

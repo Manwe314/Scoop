@@ -23,14 +23,6 @@ enum {
     NAME,
 };
 
-std::optional<float> Object::to_float(const std::string& s)
-{
-    float value{};
-    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
-    if (ec == std::errc())
-        return value;
-    return std::nullopt;
-}
 
 static std::string trimAfterLastSlashOrBackslash(const std::string& input)
 {

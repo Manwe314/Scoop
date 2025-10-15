@@ -143,5 +143,9 @@ struct Camera {
 
 
 struct Scene {
-    /* data */
+    Camera camera;
+    std::vector<SceneObject> Objects;
+    std::vector<SBVH> bottomLevelAccelerationStructures;
+    std::vector<std::string> textures;
+    std::vector<std::vector<MaterialGPU>> perMeshMaterials;
 };

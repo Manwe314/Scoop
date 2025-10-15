@@ -9,6 +9,7 @@
 #include "TextRenderer.hpp"
 #include "VulkanContext.hpp"
 #include "Object.hpp"
+#include "SceneUtils.hpp"
 
 #include <memory>
 #include <vector>
@@ -23,8 +24,7 @@
 struct AppState {
     bool shouldClose;
     VkPhysicalDevice device;
-    SBVH sbvh;
-    std::vector<MaterialGPU> materials;
+    Scene scene;
 };
 
 struct UiAppState {
@@ -36,6 +36,7 @@ struct UiAppState {
     bool loadingModel = false;
     bool hasObject = false;
     int targetEditor = -1;
+    int previousTargetEditor = -1;
     std::vector<bool> isObjectReady;
 };
 
@@ -148,7 +149,9 @@ class UiApp
 
         void onChar(uint32_t cp);
         void onKey (int key, int action, int mods);
-        
+        void HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerData);
+        bool isInput(Clay_ElementId elementId);
+        void UpdateInput(bool sameIndex = false);
         
         TextInputStore inputs;
         
@@ -198,6 +201,23 @@ class UiApp
 
         std::vector<VkPhysicalDevice> optionalDevices;
         std::vector<std::string> optionalDeviceNames;
+
+        std::vector<Clay_ElementId> inputFields = {
+            Clay_GetElementId(CLAY_STRING("cam.position.input.x")),
+            Clay_GetElementId(CLAY_STRING("cam.position.input.y")),
+            Clay_GetElementId(CLAY_STRING("cam.position.input.z")),
+            Clay_GetElementId(CLAY_STRING("cam.target.input.x")),
+            Clay_GetElementId(CLAY_STRING("cam.target.input.y")),
+            Clay_GetElementId(CLAY_STRING("cam.target.input.z")),
+            Clay_GetElementId(CLAY_STRING("cam.up.input.x")),
+            Clay_GetElementId(CLAY_STRING("cam.up.input.y")),
+            Clay_GetElementId(CLAY_STRING("cam.up.input.z")),
+            Clay_GetElementId(CLAY_STRING("cam.vfov.input")),
+            Clay_GetElementId(CLAY_STRING("cam.aspect.input")),
+            Clay_GetElementId(CLAY_STRING("cam.near.input")),
+            Clay_GetElementId(CLAY_STRING("cam.far.input")),
+            Clay_GetElementId(CLAY_STRING("input form")),
+        };
 
         void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);

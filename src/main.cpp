@@ -32,10 +32,10 @@ int main(int argc, char *argv[]) {
     {
       state = uiApp.run();
       if (state.shouldClose == false && state.device == VK_NULL_HANDLE)
-        throw std::runtime_error("Ui App Reurned a NULL HANDLE");
+        throw std::runtime_error("Ui App Returned a NULL HANDLE");
       else if (state.shouldClose == false && state.device != VK_NULL_HANDLE)
       {
-        ShowcaseApp showcaseApp(state.device, context.getInstance(), state.sbvh, state.materials);
+        ShowcaseApp showcaseApp(state.device, context.getInstance(), state.scene);
         showcaseApp.run();
       }
       if (state.shouldClose == true)

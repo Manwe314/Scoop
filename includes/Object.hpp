@@ -187,7 +187,6 @@ private:
     ShadingTriangle makeShadingTriangle(TriRef& ref);
     SplitResult findBestObjectSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count,const AABB& centroidBB, const AABB& nodeBB);
     SplitResult findBestSpatialSplit(const std::vector<TriRef>& referances, uint32_t first, uint32_t count, const AABB& centroidBB ,const AABB& nodeBB); 
-    std::optional<float> to_float(const std::string& s);
     std::vector<TriRef> getRefArray() const;
     uint32_t getMaterialId(const std::optional<std::string>& optName);
     
