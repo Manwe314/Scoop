@@ -100,6 +100,21 @@ struct RunTemp {
     uint32_t seq;
 };
 
+using Sid = uint32_t;
+
+struct ModelTab {
+    std::string name;
+    std::shared_ptr<Object> object;
+    Sid stableID;
+};
+
+struct PendingBVH {
+    std::string name;
+    size_t      modelIdx;
+    std::future<ObjectMeshData> fut;
+};
+
+
 class UiApp
 {
     public:
@@ -146,29 +161,32 @@ class UiApp
         static UiApp* s_active;
         static void CharCallback(GLFWwindow* win, unsigned int codepoint);
         static void KeyCallback (GLFWwindow* win, int key, int scancode, int action, int mods);
-
+        
         void onChar(uint32_t cp);
         void onKey (int key, int action, int mods);
         void HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerData);
         bool isInput(Clay_ElementId elementId);
+        bool isModelButton(Clay_ElementId elementId);
         void UpdateInput(bool sameIndex = false);
+        void pollBVHBuilders();
+        void finalizeSceneForLaunch();
         
         TextInputStore inputs;
         
         
         Window window;
         Device device;
-
+        
         AppState state;
         UiAppState uiState;
         bool exitRun = false;
-
+        
         GLFWcursor* cursorArrow = nullptr;
         GLFWcursor* cursorHand  = nullptr;
         GLFWcursor* cursorIBeam = nullptr;
         
         std::vector<std::string> clayFrameStrings;
-
+        
         std::unique_ptr<SwapChain> swapChain;
         
         std::unique_ptr<Pipeline> textPipeline;
@@ -177,31 +195,37 @@ class UiApp
         VkPipelineLayout pipelineLayout;
         
         std::vector<VkCommandBuffer> commandBuffers;
-
+        
         std::unique_ptr<UiRenderer> ui;
         std::unique_ptr<UiRenderer> uiOverlay;
         std::unique_ptr<TextRenderer> text;
-
+        
         std::vector<UiRenderer::RectangleInstance> rects;
         std::unordered_map<int, std::vector<TextRenderer::GlyphInstance>> textBatches;
-
+        
         GLFWcursor* wanted;
-
+        
         std::vector<TextRun> textRuns;
         std::vector<RunTemp> tempRuns;
         Clay_ElementId focusedInputId{0};
         Clay_BoundingBox focusedInputRect{0,0,0,0};
-
+        
         uint64_t clayMemSize = 0;
         void*    clayMem     = nullptr;
         Clay_Arena clayArena{};
-
-        std::vector<std::pair<std::string, Object>> models;
+        
+        Sid nextSid = 1;
+        std::vector<ModelTab> models;
+        std::unordered_map<Sid, size_t> sidToIndex;
         std::future<Object> fut;
+        
 
+        std::vector<PendingBVH>         pendingBVH;
+        std::unordered_set<std::string> bvhInFlight; 
+        
         std::vector<VkPhysicalDevice> optionalDevices;
         std::vector<std::string> optionalDeviceNames;
-
+        
         std::vector<Clay_ElementId> inputFields = {
             Clay_GetElementId(CLAY_STRING("cam.position.input.x")),
             Clay_GetElementId(CLAY_STRING("cam.position.input.y")),
@@ -219,8 +243,44 @@ class UiApp
             Clay_GetElementId(CLAY_STRING("input form")),
         };
 
+        inline void rebuildSidIndexMap()
+        {
+            sidToIndex.clear();
+            for (size_t i = 0; i < models.size(); ++i)
+                sidToIndex[models[i].stableID] = i;
+        }
+
+        static inline std::optional<Sid> sidForIndex(const std::vector<ModelTab>& models, int idx)
+        {
+            if (idx < 0 || idx >= (int)models.size())
+                return std::nullopt;
+            return models[idx].stableID;
+        }
+
+        inline bool allBVHReady()
+        {
+            for (auto& m : models)
+            {
+                bool isBuilt = false;
+                for (auto& s : state.scene.meshes)
+                {
+                    if (s.name == m.name)
+                    {
+                        isBuilt = true;
+                        break;
+                    }
+                }
+                if (!isBuilt)
+                    return false;
+            }
+            if (models.size() < 1)
+                return false;
+            return true;
+        }
+        
         void buildUi();
         // void renderUi(const Clay_RenderCommandArray& cmds, int screenW, int screenH);
-};
-
-
+    };
+    
+    
+    

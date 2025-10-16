@@ -20,7 +20,7 @@
 #include "UiApp.hpp"
 
 static inline void ClayHandleErrors(Clay_ErrorData e) {
-    fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
+    //fprintf(stderr, "[Clay] %.*s\n", (int)e.errorText.length, e.errorText.chars);
 }
 
 static inline bool matchesBase(Clay_ElementId id, Clay_ElementId base) {
@@ -93,6 +93,21 @@ static std::vector<float> penStops(const TextRenderer& tr, int px, std::string_v
     }
     return stops;
 }
+
+static inline int findMeshIndexByName(const Scene& scene, const std::string& name)
+{
+    for (size_t i = 0; i < scene.meshes.size(); ++i)
+        if (scene.meshes[i].name == name) return (int)i;
+    return -1;
+}
+
+std::optional<size_t> indexFromTabSid(const Sid sid, const std::vector<ModelTab>& models)
+{
+    for (size_t i = 0; i < models.size(); ++i)
+        if (models[i].stableID == sid) return i;
+    return std::nullopt;
+}
+
 
 static inline VkRect2D fullScissor(VkExtent2D fb) {
     return VkRect2D{ {0,0}, {fb.width, fb.height} };
@@ -169,16 +184,42 @@ static inline bool PressedThis(const Clay_PointerData& p)
     return p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME;
 }
 
+bool UiApp::isModelButton(Clay_ElementId elementId)
+{
+    
+    if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.build"))) ||
+        matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.instance.add"))) ||
+        matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.instance.del")))
+    )
+        return true;
+    return false;
+}
+
 bool UiApp::isInput(Clay_ElementId elementId)
 {
-    bool isInput = false;
     for (auto& fieldId : inputFields)
-        if (elementId.id == fieldId.id)
-        {
-            isInput = true;
-            break;
-        }
-    return isInput;
+        if (elementId.id == fieldId.id) return true;
+
+    static const Clay_ElementId modelInputBases[] = {
+        Clay_GetElementId(CLAY_STRING("model.translate.input.x")),
+        Clay_GetElementId(CLAY_STRING("model.translate.input.y")),
+        Clay_GetElementId(CLAY_STRING("model.translate.input.z")),
+        Clay_GetElementId(CLAY_STRING("model.rotation.input.x")),
+        Clay_GetElementId(CLAY_STRING("model.rotation.input.y")),
+        Clay_GetElementId(CLAY_STRING("model.rotation.input.z")),
+        Clay_GetElementId(CLAY_STRING("model.scale.input.x")),
+        Clay_GetElementId(CLAY_STRING("model.scale.input.y")),
+        Clay_GetElementId(CLAY_STRING("model.scale.input.z")),
+        Clay_GetElementId(CLAY_STRING("model.rotspeed.input.x")),
+        Clay_GetElementId(CLAY_STRING("model.rotspeed.input.y")),
+        Clay_GetElementId(CLAY_STRING("model.rotspeed.input.z")),
+        Clay_GetElementId(CLAY_STRING("model.speedscalar.input")),
+    };
+
+    for (const auto& base : modelInputBases)
+        if (matchesBase(elementId, base)) return true;
+
+    return false;
 }
 
 struct SimplePushConstantData {
@@ -627,18 +668,49 @@ UiApp::~UiApp()
     glfwDestroyCursor(cursorIBeam);
 }
 
+void UiApp::finalizeSceneForLaunch()
+{
+    Scene& scene = state.scene;
+
+    for (size_t i = 0; i < models.size(); ++i) {
+        const std::string& name = models[i].name;
+
+        uint32_t meshID = 0;
+        for (uint32_t j = 0; j < scene.meshes.size(); ++j)
+            if (scene.meshes[j].name == name)
+            { 
+                meshID = j;
+                break;
+            }
+
+        SceneObject& obj = scene.objects[i];
+        obj.meshID = meshID;
+
+        obj.boundingBox = scene.meshes[meshID].bottomLevelAccelerationStructure.outerBoundingBox;
+
+        obj.transformAABB();
+    }
+}
+
 void UiApp::UpdateInput(bool sameIndex)
 {
+    auto readFloat = [&](const char* key) -> std::optional<float> {
+        Clay_String str{false, (int32_t)std::strlen(key), const_cast<char*>(key)};
+        Clay_ElementId id = Clay_GetElementId(str);
+        const std::string& s = inputs.get(id).text;
+        return to_float(s);
+    };
+
+    auto readFloatById = [&](Clay_ElementId id) -> std::optional<float> {
+        const std::string& s = inputs.get(id).text;
+        return to_float(s);
+    };
+
     if (!sameIndex && uiState.targetEditor != uiState.previousTargetEditor)
     {
+        
         if (uiState.previousTargetEditor == -1)
         {
-            auto readFloat = [&](const char* key) -> std::optional<float> {
-                Clay_String str{false, (int32_t)std::strlen(key), const_cast<char*>(key)};
-                Clay_ElementId id = Clay_GetElementId(str);
-                const std::string& s = inputs.get(id).text;
-                return to_float(s);
-            };
 
             Camera cam = state.scene.camera;
 
@@ -660,6 +732,53 @@ void UiApp::UpdateInput(bool sameIndex)
             if (auto v = readFloat("cam.far.input"))        cam.farPlane   = *v;
 
             state.scene.camera = cam;
+        }
+        else if (uiState.previousTargetEditor >= 0)
+        {
+            const int prevIdx = uiState.previousTargetEditor;
+        
+            auto optSid = sidForIndex(models, prevIdx);
+            if (!optSid) { uiState.previousTargetEditor = uiState.targetEditor; return; }
+            Sid sid = *optSid;
+        
+            SceneObject objCopy{};
+            if ((size_t)prevIdx < state.scene.objects.size())
+                objCopy = state.scene.objects[prevIdx];
+        
+            Transform         transform = objCopy.transform;
+            RotationAnimation anim      = objCopy.animation;
+        
+            auto rf = [&](const char* key) -> std::optional<float> {
+                Clay_String str{false, (int32_t)std::strlen(key), const_cast<char*>(key)};
+                Clay_ElementId id = Clay_GetElementIdWithIndex(str, sid);
+                return readFloatById(id);
+            };
+        
+            if (auto v = rf("model.translate.input.x")) transform.translate.x = *v;
+            if (auto v = rf("model.translate.input.y")) transform.translate.y = *v;
+            if (auto v = rf("model.translate.input.z")) transform.translate.z = *v;
+        
+            if (auto v = rf("model.rotation.input.x"))  transform.rotation.x  = *v;
+            if (auto v = rf("model.rotation.input.y"))  transform.rotation.y  = *v;
+            if (auto v = rf("model.rotation.input.z"))  transform.rotation.z  = *v;
+        
+            if (auto v = rf("model.scale.input.x"))     transform.scale.x     = *v;
+            if (auto v = rf("model.scale.input.y"))     transform.scale.y     = *v;
+            if (auto v = rf("model.scale.input.z"))     transform.scale.z     = *v;
+        
+            if (auto v = rf("model.rotspeed.input.x"))  anim.rotationSpeedPerAxis.x = *v;
+            if (auto v = rf("model.rotspeed.input.y"))  anim.rotationSpeedPerAxis.y = *v;
+            if (auto v = rf("model.rotspeed.input.z"))  anim.rotationSpeedPerAxis.z = *v;
+        
+            if (auto v = rf("model.speedscalar.input")) anim.SpeedScalar = *v;
+        
+            if ((size_t)prevIdx >= state.scene.objects.size())
+                state.scene.objects.resize((size_t)prevIdx + 1);
+        
+            state.scene.objects[prevIdx].transform = transform;
+            state.scene.objects[prevIdx].animation = anim;
+        
+            uiState.previousTargetEditor = uiState.targetEditor;
         }
         uiState.previousTargetEditor = uiState.targetEditor;
     }
@@ -667,12 +786,6 @@ void UiApp::UpdateInput(bool sameIndex)
     {
         if (uiState.targetEditor == -1)
         {
-            auto readFloat = [&](const char* key) -> std::optional<float> {
-                Clay_String str{false, (int32_t)std::strlen(key), const_cast<char*>(key)};
-                Clay_ElementId id = Clay_GetElementId(str);
-                const std::string& s = inputs.get(id).text;
-                return to_float(s);
-            };
 
             Camera cam = state.scene.camera;
 
@@ -695,8 +808,54 @@ void UiApp::UpdateInput(bool sameIndex)
 
             state.scene.camera = cam;
         }
+        else if (uiState.previousTargetEditor >= 0)
+        {
+            const int prevIdx = uiState.previousTargetEditor;
+        
+            auto optSid = sidForIndex(models, prevIdx);
+            if (!optSid) { uiState.previousTargetEditor = uiState.targetEditor; return; }
+            Sid sid = *optSid;
+        
+            SceneObject objCopy{};
+            if ((size_t)prevIdx < state.scene.objects.size())
+                objCopy = state.scene.objects[prevIdx];
+        
+            Transform         transform = objCopy.transform;
+            RotationAnimation anim      = objCopy.animation;
+        
+            auto rf = [&](const char* key) -> std::optional<float> {
+                Clay_String str{false, (int32_t)std::strlen(key), const_cast<char*>(key)};
+                Clay_ElementId id = Clay_GetElementIdWithIndex(str, sid);
+                return readFloatById(id);
+            };
+        
+            if (auto v = rf("model.translate.input.x")) transform.translate.x = *v;
+            if (auto v = rf("model.translate.input.y")) transform.translate.y = *v;
+            if (auto v = rf("model.translate.input.z")) transform.translate.z = *v;
+        
+            if (auto v = rf("model.rotation.input.x"))  transform.rotation.x  = *v;
+            if (auto v = rf("model.rotation.input.y"))  transform.rotation.y  = *v;
+            if (auto v = rf("model.rotation.input.z"))  transform.rotation.z  = *v;
+        
+            if (auto v = rf("model.scale.input.x"))     transform.scale.x     = *v;
+            if (auto v = rf("model.scale.input.y"))     transform.scale.y     = *v;
+            if (auto v = rf("model.scale.input.z"))     transform.scale.z     = *v;
+        
+            if (auto v = rf("model.rotspeed.input.x"))  anim.rotationSpeedPerAxis.x = *v;
+            if (auto v = rf("model.rotspeed.input.y"))  anim.rotationSpeedPerAxis.y = *v;
+            if (auto v = rf("model.rotspeed.input.z"))  anim.rotationSpeedPerAxis.z = *v;
+        
+            if (auto v = rf("model.speedscalar.input")) anim.SpeedScalar = *v;
+        
+            if ((size_t)prevIdx >= state.scene.objects.size())
+                state.scene.objects.resize((size_t)prevIdx + 1);
+        
+            state.scene.objects[prevIdx].transform = transform;
+            state.scene.objects[prevIdx].animation = anim;
+        
+            uiState.previousTargetEditor = uiState.targetEditor;
+        }
     }
-
 }
 
 void UiApp::HandleErrorShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
@@ -752,11 +911,18 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("launch button")).id)) {
         inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
+        if (!allBVHReady())
+        {
+            uiState.errorMsg  = "Not all Model SBVH's are Built";
+            uiState.showError = true;
+            return;
+        }
+        UpdateInput(true);
+        finalizeSceneForLaunch();
         state.shouldClose = false;
         if (state.device == VK_NULL_HANDLE)
             state.device = device.getPhysicalDevice();
         exitRun = true;
-        
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Menu Selector")).id))
     {
@@ -775,9 +941,15 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     {
         inputs.blurAll();
         focusedInputId = Clay_ElementId{0};
-        int idx = (int)elementId.offset;
-        if (idx >= 0 && idx < (int)models.size())
-        uiState.targetEditor = idx;
+
+        Sid sid = (Sid)elementId.offset;
+        auto it = sidToIndex.find(sid);
+        if (it != sidToIndex.end())
+            uiState.targetEditor = (int)it->second;
+
+        // int idx = (int)elementId.offset;
+        // if (idx >= 0 && idx < (int)models.size())
+        // uiState.targetEditor = idx;
         UpdateInput();
         
     }
@@ -840,24 +1012,98 @@ void UiApp::HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerD
             s->caret = s->text.size();
             s->blinkStart = glfwGetTime();
         }
-
-        if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("cam.pos.input"))))
-        {
-            
-            int axis = (int)elementId.offset;
-            // ...handle which axis got focus
-        }
-
-        if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.input")))) {
-            uint32_t which = elementId.offset;   // which model input
-            // ...use `which` to map back to models[which], etc.
-        }
-
         focusedInputId = elementId;
         return;
     }
+    else if (isModelButton(elementId))
+    {
+        if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.instance.add"))))
+        {
+            if (uiState.targetEditor == -1)
+                return;
+            auto ptr = models[uiState.targetEditor].object;
+            models.push_back(ModelTab{ models[uiState.targetEditor].name, ptr, nextSid++});
+            state.scene.objects.emplace_back(SceneObject{});
+            rebuildSidIndexMap();
+        }
+        else if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.instance.del"))))
+        {
+            Sid deadSid = models[uiState.targetEditor].stableID;
+            models.erase(models.begin() + uiState.targetEditor);
+            state.scene.objects.erase(state.scene.objects.begin() + uiState.targetEditor);
+            uiState.targetEditor--;
+            rebuildSidIndexMap();
+        }
+        else if (matchesBase(elementId, Clay_GetElementId(CLAY_STRING("model.build"))))
+        {
+            Sid sid = elementId.offset;
+            auto optIdx = indexFromTabSid(sid, models);
+            if (!optIdx) return;
+            size_t idx = *optIdx;
+        
+            const std::string& name = models[idx].name;
+        
+            if (findMeshIndexByName(state.scene, name) >= 0) {
+                uiState.errorMsg = "BVH already built for \"" + name + "\".";
+                uiState.showError = true;
+                return;
+            }
+        
+            if (bvhInFlight.count(name)) {
+                uiState.errorMsg = "BVH is already building for \"" + name + "\". Please wait.";
+                uiState.showError = true;
+                return;
+            }
+        
+            auto objSP = models[idx].object;
+            bvhInFlight.insert(name);
+        
+            pendingBVH.push_back(PendingBVH{
+                name,
+                idx,
+                std::async(std::launch::async, [name, objSP]() -> ObjectMeshData {
+                    ObjectMeshData out;
+                    out.name  = name;
+                    out.bottomLevelAccelerationStructure = objSP->buildSplitBoundingVolumeHierarchy();
+                    out.perMeshMaterials = objSP->buildMaterialGPU();
+                    return out;
+                })
+            });
+        
+        }
+    }
 
 }
+
+void UiApp::pollBVHBuilders()
+{
+    using namespace std::chrono_literals;
+
+    for (size_t i = 0; i < pendingBVH.size(); ) {
+        auto& p = pendingBVH[i];
+        if (p.fut.wait_for(0ms) == std::future_status::ready) {
+            try {
+                ObjectMeshData data = p.fut.get();
+
+                // Avoid duplicates if someone managed to build same name another way
+                if (findMeshIndexByName(state.scene, data.name) < 0) {
+                    state.scene.meshes.push_back(std::move(data));
+                }
+
+                bvhInFlight.erase(p.name);
+            } catch (const std::exception& e) {
+                bvhInFlight.erase(p.name);
+                uiState.errorMsg = std::string("BVH build failed for \"") + p.name + "\": " + e.what();
+                uiState.showError = true;
+            }
+            pendingBVH[i] = std::move(pendingBVH.back());
+            pendingBVH.pop_back();
+        }
+        else
+            ++i;
+    }
+}
+
 
 void UiApp::buildUi() 
 {
@@ -867,6 +1113,7 @@ void UiApp::buildUi()
     std::string name = !uiState.selectedDeviceName.empty() ? uiState.selectedDeviceName  : device.getName();
     clayFrameStrings.clear();
     wanted = cursorArrow;
+    bool isReady = allBVHReady();
     if (fut.valid())
     {
         using namespace std::chrono_literals;
@@ -877,7 +1124,10 @@ void UiApp::buildUi()
             try
             {
                 Object loaded = fut.get();
-                models.push_back({loaded.getFileName(), loaded});
+                auto obj = std::make_shared<Object>(std::move(loaded));
+                models.push_back(ModelTab{obj->getFileName(), obj, nextSid++});
+                state.scene.objects.emplace_back(SceneObject{});
+                rebuildSidIndexMap();
             }
             catch(const std::exception& e)
             {
@@ -888,6 +1138,7 @@ void UiApp::buildUi()
             }
         }
     }
+    pollBVHBuilders();
     
     Clay_BeginLayout();
     
@@ -903,15 +1154,17 @@ void UiApp::buildUi()
         Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
         CLAY({ .id = CLAY_ID("head sign"),
                 .layout = { 
-                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT()}, 
+                    .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, 
                     .padding = CLAY_PADDING_ALL(16),
                     .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
-                    .layoutDirection = CLAY_TOP_TO_BOTTOM
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT
                 }, 
                 .backgroundColor = {51, 30, 108, 170}, 
                 .cornerRadius = CLAY_CORNER_RADIUS(20),
                 .clip = {.horizontal = true, .vertical = true}
                 }){
+                    Clay_ElementId launchID = Clay_GetElementId(CLAY_STRING("launch button"));
+                    bool hovered = Clay_PointerOver(launchID);
             CLAY_TEXT(CLAY_STRING("Welcome To Scoop"), 
                 CLAY_TEXT_CONFIG({ 
                     .textColor = {255, 243, 232, 255}, 
@@ -920,6 +1173,28 @@ void UiApp::buildUi()
                     .wrapMode = CLAY_TEXT_WRAP_NONE, 
                     .textAlignment = CLAY_TEXT_ALIGN_CENTER
                 }));
+                CLAY({.id = CLAY_ID("emptysizer"), .layout = {.sizing = {CLAY_SIZING_GROW(0),CLAY_SIZING_GROW(0)}}});
+            CLAY({ .id = launchID,
+                .layout = {
+                    .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                    .padding = CLAY_PADDING_ALL(16),
+                    .childGap = 16,
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT
+                },
+                .backgroundColor = hovered ? (Clay_Color){139, 85, 199,255} : isReady ? (Clay_Color){65, 9, 114, 200} : (Clay_Color){55, 9, 104, 200},
+                .cornerRadius = CLAY_CORNER_RADIUS(20),
+                .clip = {.horizontal = true, .vertical = true}
+            }){
+                Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
+                CLAY_TEXT(CLAY_STRING("Launch"), 
+                CLAY_TEXT_CONFIG({
+                    .textColor = isReady ? (Clay_Color){255, 243, 232, 255} : (Clay_Color){155, 143, 132, 155}, 
+                    .fontSize = 64, 
+                    .letterSpacing = 1, 
+                    .wrapMode = CLAY_TEXT_WRAP_NONE, 
+                    .textAlignment = CLAY_TEXT_ALIGN_CENTER
+                }));
+            }
         }
         CLAY({ .id = CLAY_ID("selected device"),
                 .layout = {
@@ -1114,7 +1389,8 @@ void UiApp::buildUi()
             
                 for (int i = 0; i < (int)models.size(); i++)
                 {
-                    Clay_ElementId tabId = Clay_GetElementIdWithIndex(CLAY_STRING("tab.extra"), (uint32_t)i);
+                    Sid sid = models[i].stableID;
+                    Clay_ElementId tabId = Clay_GetElementIdWithIndex(CLAY_STRING("tab.extra"), sid);
                     bool hovered = Clay_PointerOver(tabId);
                 
                     CLAY({
@@ -1129,7 +1405,7 @@ void UiApp::buildUi()
                         .clip = { .horizontal = true, .vertical = true }
                     }) {
                         Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-                        CLAY_TEXT(ClayFromStable(clayFrameStrings, models[i].first),
+                        CLAY_TEXT(ClayFromStable(clayFrameStrings, models[i].name),
                             CLAY_TEXT_CONFIG({
                                 .textColor = {255, 243, 232, 255},
                                 .fontSize = 32,
@@ -1483,18 +1759,18 @@ void UiApp::buildUi()
                 }
                 else
                 {
-                    int idx = uiState.targetEditor;
+                    Sid idx = models[uiState.targetEditor].stableID;
                 
                     CLAY({
                         .id = CLAY_ID("model.panel"),
                         .layout = {
-                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                             .childGap = 12,
                             .layoutDirection = CLAY_TOP_TO_BOTTOM
                         }
                     }) {
                         CLAY({
-                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.transform"), (uint32_t)idx),
+                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.transform"), idx),
                             .layout = {
                                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                 .childGap = 12,
@@ -1507,7 +1783,7 @@ void UiApp::buildUi()
                                                   Clay_ElementId idZ)
                             {
                                 CLAY({
-                                    .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, title), (uint32_t)idx),
+                                    .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("model.card.") + title), idx),
                                     .layout = {
                                         .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                         .padding = CLAY_PADDING_ALL(12),
@@ -1522,8 +1798,9 @@ void UiApp::buildUi()
                                     CLAY_TEXT(ClayFromStable(clayFrameStrings, title),
                                         CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
                                 
+                                    // Unique row id per (title, idx)
                                     CLAY({
-                                        .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.vecrow"), (uint32_t)idx),
+                                        .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("model.vecrow.") + title), idx),
                                         .layout = {
                                             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                             .childGap = 10,
@@ -1532,7 +1809,7 @@ void UiApp::buildUi()
                                     }) {
                                         auto oneAxis = [&](const char* axisLabel, Clay_ElementId inputId){
                                             CLAY({
-                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string(title) + ".stack." + axisLabel), (uint32_t)idx),
+                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string(title) + ".stack." + axisLabel), idx),
                                                 .layout = {
                                                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                                     .childGap = 6,
@@ -1556,16 +1833,16 @@ void UiApp::buildUi()
                                             };
                                         };
                                     
-                                        oneAxis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.x"), (uint32_t)idx));
-                                        oneAxis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.y"), (uint32_t)idx));
-                                        oneAxis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.z"), (uint32_t)idx));
+                                        oneAxis("X", idX);
+                                        oneAxis("Y", idY);
+                                        oneAxis("Z", idZ);
                                     }
                                 };
                             };
                         
                             auto mkRotCard = [&](){
                                 CLAY({
-                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.card"), (uint32_t)idx),
+                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.card"), idx),
                                     .layout = {
                                         .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                         .padding = CLAY_PADDING_ALL(12),
@@ -1581,12 +1858,12 @@ void UiApp::buildUi()
                                         CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
                                 
                                     CLAY({
-                                        .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.row"), (uint32_t)idx),
+                                        .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.row"), idx),
                                         .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .childGap = 10, .layoutDirection = CLAY_LEFT_TO_RIGHT }
                                     }) {
                                         auto axis = [&](const char* axisLabel, Clay_ElementId inputId){
                                             CLAY({
-                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("rot.stack.") + axisLabel), (uint32_t)idx),
+                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("rot.stack.") + axisLabel), idx),
                                                 .layout = {
                                                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                                     .childGap = 6,
@@ -1610,16 +1887,16 @@ void UiApp::buildUi()
                                             };
                                         };
                                     
-                                        axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.x"), (uint32_t)idx));
-                                        axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.y"), (uint32_t)idx));
-                                        axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.z"), (uint32_t)idx));
+                                        axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.x"), idx));
+                                        axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.y"), idx));
+                                        axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotation.input.z"), idx));
                                     }
                                 };
                             };
                         
                             auto mkScaleCard = [&](){
                                 CLAY({
-                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.card"), (uint32_t)idx),
+                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.card"), idx),
                                     .layout = {
                                         .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                         .padding = CLAY_PADDING_ALL(12),
@@ -1635,12 +1912,12 @@ void UiApp::buildUi()
                                         CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
                                 
                                     CLAY({
-                                        .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.row"), (uint32_t)idx),
+                                        .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.row"), idx),
                                         .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .childGap = 10, .layoutDirection = CLAY_LEFT_TO_RIGHT }
                                     }) {
                                         auto axis = [&](const char* axisLabel, Clay_ElementId inputId){
                                             CLAY({
-                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("scale.stack.") + axisLabel), (uint32_t)idx),
+                                                .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("scale.stack.") + axisLabel), idx),
                                                 .layout = {
                                                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                                     .childGap = 6,
@@ -1664,33 +1941,31 @@ void UiApp::buildUi()
                                             };
                                         };
                                     
-                                        axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.x"), (uint32_t)idx));
-                                        axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.y"), (uint32_t)idx));
-                                        axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.z"), (uint32_t)idx));
+                                        axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.x"), idx));
+                                        axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.y"), idx));
+                                        axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.scale.input.z"), idx));
                                     }
                                 };
                             };
                         
                             mkVec3Card("Translate",
-                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.x"), (uint32_t)idx),
-                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.y"), (uint32_t)idx),
-                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.z"), (uint32_t)idx));
+                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.x"), idx),
+                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.y"), idx),
+                                Clay_GetElementIdWithIndex(CLAY_STRING("model.translate.input.z"), idx));
                             mkRotCard();
                             mkScaleCard();
                         }
                     
-                        // ---- Animation row: Rotation speed XYZ + Speed scalar ----
                         CLAY({
-                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.anim"), (uint32_t)idx),
+                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.anim"), idx),
                             .layout = {
-                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                 .childGap = 12,
                                 .layoutDirection = CLAY_LEFT_TO_RIGHT
                             }
                         }) {
-                            // Rotation speed per axis
                             CLAY({
-                                .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.card"), (uint32_t)idx),
+                                .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.card"), idx),
                                 .layout = {
                                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                     .padding = CLAY_PADDING_ALL(12),
@@ -1706,12 +1981,12 @@ void UiApp::buildUi()
                                     CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
                             
                                 CLAY({
-                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.row"), (uint32_t)idx),
+                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.row"), idx),
                                     .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .childGap = 10, .layoutDirection = CLAY_LEFT_TO_RIGHT }
                                 }) {
                                     auto axis = [&](const char* axisLabel, Clay_ElementId inputId){
                                         CLAY({
-                                            .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("rotspeed.stack.") + axisLabel), (uint32_t)idx),
+                                            .id = Clay_GetElementIdWithIndex(ClayFromStable(clayFrameStrings, std::string("rotspeed.stack.") + axisLabel), idx),
                                             .layout = {
                                                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                                 .childGap = 6,
@@ -1735,15 +2010,14 @@ void UiApp::buildUi()
                                         };
                                     };
                                 
-                                    axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.x"), (uint32_t)idx));
-                                    axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.y"), (uint32_t)idx));
-                                    axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.z"), (uint32_t)idx));
+                                    axis("X", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.x"), idx));
+                                    axis("Y", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.y"), idx));
+                                    axis("Z", Clay_GetElementIdWithIndex(CLAY_STRING("model.rotspeed.input.z"), idx));
                                 }
                             }
                         
-                            // Speed scalar
                             CLAY({
-                                .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.speed.card"), (uint32_t)idx),
+                                .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.speed.card"), idx),
                                 .layout = {
                                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                                     .padding = CLAY_PADDING_ALL(12),
@@ -1758,22 +2032,22 @@ void UiApp::buildUi()
                                 CLAY_TEXT(CLAY_STRING("Speed Multiplier"),
                                     CLAY_TEXT_CONFIG({ .textColor = {255,243,232,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE, .textAlignment = CLAY_TEXT_ALIGN_CENTER }));
                                 CLAY({
-                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.speedscalar.input"), (uint32_t)idx),
+                                    .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.speedscalar.input"), idx),
                                     .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .padding = CLAY_PADDING_ALL(10) },
                                     .backgroundColor = (Clay_Color){230,224,217,255},
                                     .cornerRadius    = CLAY_CORNER_RADIUS(10),
                                     .clip = { .horizontal = true, .vertical = true }
                                 }) {
                                     Clay_OnHover(&UiApp::hoverBridge, reinterpret_cast<intptr_t>(this));
-                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementIdWithIndex(CLAY_STRING("model.speedscalar.input"), (uint32_t)idx)).text),
-                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 32, .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                    inputs.get(Clay_GetElementIdWithIndex(CLAY_STRING("model.speedscalar.input"), idx)).fontPx = 64;
+                                    CLAY_TEXT(ClayFromStable(clayFrameStrings, inputs.get(Clay_GetElementIdWithIndex(CLAY_STRING("model.speedscalar.input"), idx)).text),
+                                        CLAY_TEXT_CONFIG({ .textColor = {40,35,50,255}, .fontSize = 64, .wrapMode = CLAY_TEXT_WRAP_NONE }));
                                 }
                             }
                         }
                     
-                        // ---- Actions row: Build SBVH/Materials, Add Instance, Delete Instance ----
                         CLAY({
-                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.actions"), (uint32_t)idx),
+                            .id = Clay_GetElementIdWithIndex(CLAY_STRING("model.row.actions"), idx),
                             .layout = {
                                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
                                 .childGap = 8,
@@ -1804,9 +2078,9 @@ void UiApp::buildUi()
                                 }
                             };
                         
-                            mkBtn("Build SBVH & Materials", Clay_GetElementIdWithIndex(CLAY_STRING("model.build"), (uint32_t)idx));
-                            mkBtn("Add Instance",          Clay_GetElementIdWithIndex(CLAY_STRING("model.instance.add"), (uint32_t)idx));
-                            mkBtn("Delete Instance",       Clay_GetElementIdWithIndex(CLAY_STRING("model.instance.del"), (uint32_t)idx));
+                            mkBtn("Build SBVH & Materials", Clay_GetElementIdWithIndex(CLAY_STRING("model.build"), idx));
+                            mkBtn("Add Instance",          Clay_GetElementIdWithIndex(CLAY_STRING("model.instance.add"), idx));
+                            mkBtn("Delete Instance",       Clay_GetElementIdWithIndex(CLAY_STRING("model.instance.del"), idx));
                         }
                     }
                 }

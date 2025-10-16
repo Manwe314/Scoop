@@ -144,6 +144,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
     std::cout << "Name: " << properties.deviceName << std::endl;
+    DumpScene(ShowcaseApp::scene);
 }
 
 ShowcaseApp::~ShowcaseApp()
