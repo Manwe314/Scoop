@@ -64,9 +64,97 @@ struct AffineMatrix {
     glm::vec3 collumn_t;
 };
 
-inline AffineMatrix makeAffine(glm::mat3& matrix, glm::vec3& vector)
+inline AffineMatrix makeAffine(const glm::mat3& matrix, const glm::vec3& vector)
 {
     return AffineMatrix{matrix[0], matrix[1], matrix[2], vector};
+}
+
+inline AffineMatrix affineIdentity() {
+    return {
+        glm::vec3(1,0,0),
+        glm::vec3(0,1,0),
+        glm::vec3(0,0,1),
+        glm::vec3(0,0,0)
+    };
+}
+
+inline glm::mat3 affineLinear(const AffineMatrix& M)
+{
+    return glm::mat3(M.collumn_0, M.collumn_1, M.collumn_2);
+}
+
+inline glm::vec3 affineTranslation(const AffineMatrix& M)
+{
+    return M.collumn_t;
+}
+
+inline AABB affineTransformAABB(const AffineMatrix& M, const AABB& b)
+{
+    const glm::mat3 A = affineLinear(M);
+    const glm::vec3 t = affineTranslation(M);
+
+    const glm::vec3 c = 0.5f * (b.min + b.max);
+    const glm::vec3 e = 0.5f * (b.max - b.min);
+
+    const glm::mat3 AbsA = glm::mat3{ glm::abs(A[0]), glm::abs(A[1]), glm::abs(A[2]) };
+    const glm::vec3 cW   = A * c + t;
+    const glm::vec3 eW   = AbsA * e;
+
+    return { cW - eW, cW + eW };
+}
+
+
+inline glm::mat4 affineToMat4(const AffineMatrix& M) {
+    glm::mat4 R(1.0f);
+    R[0] = glm::vec4(M.collumn_0, 0.0f);
+    R[1] = glm::vec4(M.collumn_1, 0.0f);
+    R[2] = glm::vec4(M.collumn_2, 0.0f);
+    R[3] = glm::vec4(M.collumn_t, 1.0f);
+    return R;
+}
+
+inline glm::vec3 affineTransformPoint(const AffineMatrix& M, const glm::vec3& p)
+{
+    const glm::mat3 A = affineLinear(M);
+    return A * p + M.collumn_t;
+}
+
+inline glm::vec3 affineTransformDirection(const AffineMatrix& M, const glm::vec3& d)
+{
+    const glm::mat3 A = affineLinear(M);
+    return A * d;
+}
+
+inline AffineMatrix affineCompose(const AffineMatrix& B, const AffineMatrix& A)
+{
+    const glm::mat3 Ab = affineLinear(B);
+    const glm::mat3 Aa = affineLinear(A);
+    const glm::mat3 Ac = Ab * Aa;
+    const glm::vec3 tc = Ab * affineTranslation(A) + affineTranslation(B);
+    return makeAffine(Ac, tc);
+}
+
+inline AffineMatrix affineInverse(const AffineMatrix& M)
+{
+    const glm::mat3 A  = affineLinear(M);
+    const float detA =
+        A[0].x * (A[1].y * A[2].z - A[1].z * A[2].y) -
+        A[1].x * (A[0].y * A[2].z - A[0].z * A[2].y) +
+        A[2].x * (A[0].y * A[1].z - A[0].z * A[1].y);
+
+    if (std::abs(detA) < EPSILON)
+        return affineIdentity();
+
+    const glm::mat3 Ainv = glm::inverse(A);
+    const glm::vec3 tinv = -Ainv * affineTranslation(M);
+    return makeAffine(Ainv, tinv);
+}
+
+
+inline glm::mat3 affineNormalMatrix(const AffineMatrix& M)
+{
+    const glm::mat3 Ainv = glm::inverse(affineLinear(M));
+    return glm::transpose(Ainv);
 }
 
 
@@ -138,8 +226,8 @@ struct Camera {
         U = glm::normalize(glm::cross(upN, W));
         V = glm::cross(W, U);
     }
-
 };
+
 
 struct ObjectMeshData {
     std::string name;

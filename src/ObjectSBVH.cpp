@@ -175,14 +175,21 @@ static inline uint32_t makeFlags(const Material& m) {
     return f;
 }
 
-static inline MaterialGPU packMaterialGPU(const Material& material) {
+static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<std::string>& textures, uint32_t& textureID) {
     MaterialGPU gpuMaterial{};
     const float rough = shininessToRoughness(material.shininess);
+    glm::uvec4 texture{0};
 
     gpuMaterial.baseColor_opacity = glm::vec4(material.albedo, glm::clamp(material.opacity, 0.0f, 1.0f));
     gpuMaterial.F0_ior_rough = glm::vec4(material.reflectance, glm::clamp(rough, 0.0f, 1.0f));
     gpuMaterial.emission_flags = glm::vec4(material.emission, glm::uintBitsToFloat(makeFlags(material)));
-    gpuMaterial.futuretextures = glm::vec4(0.0f);
+    if (material.texture.has_value())
+    {
+        textures.emplace_back(*material.texture);
+        texture[0] = textureID;
+        textureID++;
+    }
+    gpuMaterial.textureId = texture;
 
     return gpuMaterial;
 }
@@ -262,13 +269,13 @@ std::vector<MaterialGPU> Object::buildMaterialGPU()
 {
     Material defaultMat = getDefaultMaterial();
 
-    std::vector<MaterialGPU> out(nextMatId + 1, packMaterialGPU(defaultMat));
+    std::vector<MaterialGPU> out(nextMatId + 1, packMaterialGPU(defaultMat, textrues, textureId));
 
     for (const auto& [name, id] : matNameToId)
     {
         auto it = materials.find(name);
         const Material& src = (it != materials.end()) ? it->second : defaultMat;
-        out[id] = packMaterialGPU(src);
+        out[id] = packMaterialGPU(src, textrues, textureId);
     }
     return out;
 }

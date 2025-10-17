@@ -3,6 +3,79 @@
 
 // ~~~~~ helpers ~~~~~~
 
+inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
+{
+    AABB b;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        b = merge(b, inst[idx[first + i]].worldAABB);
+    }
+    return b;
+}
+
+inline uint32_t makeNode(TLAS& tlas, const TLASNode& n)
+{
+    tlas.nodes.push_back(n);
+    return static_cast<uint32_t>(tlas.nodes.size() - 1);
+}
+
+inline uint32_t buildRecursive(TLAS& tlas, std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
+{
+    TLASNode node{};
+    node.bounds = boundsOfRange(tlas.instances, idx, first, count);
+
+    const uint32_t LEAF_THRESHOLD = 1;
+    if (count <= LEAF_THRESHOLD) {
+        node.first = first;
+        node.count = count;
+        return makeNode(tlas, node);
+    }
+
+    AABB cb;
+    for (uint32_t i = 0; i < count; ++i)
+        cb = merge(cb, AABB{ centroid(tlas.instances[idx[first + i]].worldAABB), centroid(tlas.instances[idx[first + i]].worldAABB) });
+    
+    int axis = widestAxis(cb);
+
+    if (cb.min[axis] == cb.max[axis])
+    {
+        node.first = first;
+        node.count = count;
+        return makeNode(tlas, node);
+    }
+
+    uint32_t mid = first + count / 2;
+    std::nth_element(idx.begin() + first, idx.begin() + mid, idx.begin() + first + count, [&](uint32_t a, uint32_t b)
+    {
+        return centroid(tlas.instances[a].worldAABB)[axis] <
+               centroid(tlas.instances[b].worldAABB)[axis];
+    });
+
+    uint32_t left  = buildRecursive(tlas, idx, first, mid - first);
+    uint32_t right = buildRecursive(tlas, idx, mid,   first + count - mid);
+
+    node.left  = static_cast<int32_t>(left);
+    node.right = static_cast<int32_t>(right);
+    return makeNode(tlas, node);
+}
+
+inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
+{
+    TLAS tlas;
+    tlas.instances = instances;
+
+    const uint32_t N = static_cast<uint32_t>(instances.size());
+    tlas.instanceIndices.resize(N);
+    for (uint32_t i = 0; i < N; ++i) tlas.instanceIndices[i] = i;
+
+    if (N == 0)
+        return tlas;
+
+    buildRecursive(tlas, tlas.instanceIndices, 0, N);
+
+    return tlas;
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -29,8 +102,6 @@ static std::vector<uint32_t> uniqueIndices(std::initializer_list<std::optional<u
     }
     return out;
 }
-
-
 
 VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
 {
@@ -145,6 +216,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     vkGetPhysicalDeviceProperties(gpu, &properties);
     std::cout << "Name: " << properties.deviceName << std::endl;
     DumpScene(ShowcaseApp::scene);
+    makeInstances(ShowcaseApp::scene);
 }
 
 ShowcaseApp::~ShowcaseApp()
@@ -204,6 +276,40 @@ ShowcaseApp::~ShowcaseApp()
 }
 
 // ~~~~~ Creation ~~~~~
+
+void ShowcaseApp::makeInstances(Scene& scene)
+{
+    instances.reserve(scene.objects.size());
+    size_t size = scene.meshes.size();
+    std::vector<uint32_t> nodeBases(size, 0u);
+    std::vector<uint32_t> triBases(size, 0u);
+    std::vector<uint32_t> shadeTriBases(size, 0u);
+    std::vector<uint32_t> materialBases(size, 0u);
+    std::vector<uint32_t> textureBases(size, 0u);
+
+    for (auto& mesh : scene.meshes)
+    {
+        //Flaten meshes here
+        //SBVH has -> nodes and Triangles
+        //textures and Materials in mesh here.
+        //bases should be at index 0 = 0 at index n = SUM(0 to n - 1)
+        //vectors in member variables should befilled here
+    }
+
+    for (auto& object : scene.objects)
+    {
+        InstanceData inst{};
+        inst.modelToWorld = object.transform.affineTransform();
+        inst.worldToModel = affineInverse(inst.modelToWorld);
+        inst.worldAABB = object.boundingBox;
+
+        //instance data needs its bases.
+        //here we just readt mesh ID and index in the vectors created before and tts the base offset.
+    }
+
+    //scene input is done after this + texture SSBO creation and camera needs to be pluged in
+
+}
 
 void ShowcaseApp::createLogicalDevice()
 {

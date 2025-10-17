@@ -1066,6 +1066,7 @@ void UiApp::HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerD
                     out.name  = name;
                     out.bottomLevelAccelerationStructure = objSP->buildSplitBoundingVolumeHierarchy();
                     out.perMeshMaterials = objSP->buildMaterialGPU();
+                    out.textures = objSP->getTextures();
                     return out;
                 })
             });

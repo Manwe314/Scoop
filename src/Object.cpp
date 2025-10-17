@@ -719,6 +719,11 @@ std::string Object::getFileName()
     return p.stem().string();
 }
 
+std::vector<std::string> Object::getTextures()
+{
+    return textrues;
+}
+
 Material Object::getDefaultMaterial()
 {
     Material def{};

@@ -128,7 +128,7 @@ struct alignas(16) MaterialGPU {
     glm::vec4 baseColor_opacity;
     glm::vec4 F0_ior_rough;
     glm::vec4 emission_flags;
-    glm::vec4 futuretextures;
+    glm::uvec4 textureId;
 };
 static_assert(sizeof(MaterialGPU) == 64, "MaterialGPU must be 64 bytes");
 
@@ -174,8 +174,10 @@ private:
 
     std::vector<SubObject> objects;
     std::map<std::string, Material> materials;
+    std::vector<std::string> textrues;
     std::unordered_map<std::string, uint32_t> matNameToId;
     uint32_t nextMatId = 0;
+    uint32_t textureId = 0;
 
     void parseLine(std::vector<std::string> tokens, int type);
     void parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath);
@@ -227,6 +229,7 @@ private:
     ~Object();
     SBVH buildSplitBoundingVolumeHierarchy();
     std::vector<MaterialGPU> buildMaterialGPU();
+    std::vector<std::string> getTextures();
     Material getDefaultMaterial();
     std::string getFileName();
 };

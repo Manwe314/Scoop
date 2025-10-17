@@ -7,6 +7,7 @@
 #include "SwapChain.hpp"
 #include "Object.hpp"
 #include "SceneUtils.hpp"
+#include "Utils.hpp"
 
 #include <optional>
 #include <set>
@@ -40,6 +41,42 @@ struct alignas(16) ParamsGPU {
 };
 
 void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src, VkBuffer dst, VkDeviceSize size);
+
+struct InstanceData {
+    AffineMatrix modelToWorld;
+    AffineMatrix worldToModel;
+
+    AABB worldAABB;
+
+    uint32_t nodeBase = 0;
+    uint32_t triBase = 0;
+    uint32_t shadeTriBase = 0;
+    uint32_t materialBase = 0;
+    uint32_t textureBase = 0;
+};
+
+struct TLASNode {
+    AABB bounds;
+    uint32_t first = 0;
+    uint32_t count = 0;
+
+    int32_t left  = -1;
+    int32_t right = -1;
+
+    bool isLeaf() const { return count > 0; }
+};
+
+struct TLAS {
+    std::vector<TLASNode>   nodes;
+    std::vector<uint32_t>   instanceIndices;
+    std::vector<InstanceData> instances;
+
+    void clear() {
+        nodes.clear();
+        instanceIndices.clear();
+        instances.clear();
+    }
+};
 
 
 class ShowcaseApp
@@ -130,8 +167,15 @@ private:
     const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     Scene scene;
+    TLAS topLevelAS;
+    std::vector<InstanceData> instances;
+    std::vector<SBVHNode> SBVHNodes;
+    std::vector<MollerTriangle> intersectionTrinagles;
+    std::vector<ShadingTriangle> shadingTriangles;
+    std::vector<MaterialGPU> materials;
+
     
-    
+    void makeInstances(Scene& scene);
     std::vector<const char *> getRequiredExtensions();
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
     void setupDebugMessenger();
