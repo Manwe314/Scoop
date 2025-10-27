@@ -1,6 +1,214 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
 
+// --------- helpers -----------
+
+inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
+{
+    AABB b;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        b = merge(b, inst[idx[first + i]].worldAABB);
+    }
+    return b;
+}
+
+inline uint32_t makeNode(TLAS& tlas, const TLASNode& n)
+{
+    tlas.nodes.push_back(n);
+    return static_cast<uint32_t>(tlas.nodes.size() - 1);
+}
+
+inline uint32_t buildRecursive(TLAS& tlas, std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
+{
+    TLASNode node{};
+    node.bounds = boundsOfRange(tlas.instances, idx, first, count);
+
+    const uint32_t LEAF_THRESHOLD = 1;
+    if (count <= LEAF_THRESHOLD)
+    {
+        node.first = first;
+        node.count = count;
+        return makeNode(tlas, node);
+    }
+
+    AABB cb;
+    for (uint32_t i = 0; i < count; ++i)
+        cb = merge(cb, AABB{ centroid(tlas.instances[idx[first + i]].worldAABB), centroid(tlas.instances[idx[first + i]].worldAABB) });
+    
+    int axis = widestAxis(cb);
+
+    if (cb.min[axis] == cb.max[axis])
+    {
+        node.first = first;
+        node.count = count;
+        return makeNode(tlas, node);
+    }
+
+    uint32_t mid = first + count / 2;
+    std::nth_element(idx.begin() + first, idx.begin() + mid, idx.begin() + first + count, [&](uint32_t a, uint32_t b)
+    {
+        return centroid(tlas.instances[a].worldAABB)[axis] <
+               centroid(tlas.instances[b].worldAABB)[axis];
+    });
+
+    uint32_t left  = buildRecursive(tlas, idx, first, mid - first);
+    uint32_t right = buildRecursive(tlas, idx, mid,   first + count - mid);
+
+    node.left  = static_cast<int32_t>(left);
+    node.right = static_cast<int32_t>(right);
+    return makeNode(tlas, node);
+}
+
+inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
+{
+    TLAS tlas;
+    tlas.instances = instances;
+
+    const uint32_t N = static_cast<uint32_t>(instances.size());
+    tlas.instanceIndices.resize(N);
+    for (uint32_t i = 0; i < N; ++i)
+        tlas.instanceIndices[i] = i;
+
+    if (N == 0)
+        return tlas;
+
+    tlas.root = buildRecursive(tlas, tlas.instanceIndices, 0, N);
+
+    return tlas;
+}
+
+inline TLASNodeGPU packNode(const TLASNode& node)
+{
+    TLASNodeGPU out{};
+    out.bmin = glm::vec4(node.bounds.min, 0.0f);
+    out.bmax = glm::vec4(node.bounds.max, 0.0f);
+    uint32_t U = 0xFFFFFFFFu;
+    out.meta = glm::uvec4(node.first, node.count,
+                node.left  >= 0 ? uint32_t(node.left)  : U,
+                node.right >= 0 ? uint32_t(node.right) : U);
+    return out;
+}
+
+inline InstanceDataGPU packInstance(const InstanceData& data)
+{
+    InstanceDataGPU out{};
+
+    const glm::mat4 M = affineToMat4(data.modelToWorld);
+    const glm::mat4 W = affineToMat4(data.worldToModel);
+
+    out.modelToWorld[0] = glm::vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+    out.modelToWorld[1] = glm::vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+    out.modelToWorld[2] = glm::vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+
+    out.worldToModel[0] = glm::vec4(W[0][0], W[1][0], W[2][0], W[3][0]);
+    out.worldToModel[1] = glm::vec4(W[0][1], W[1][1], W[2][1], W[3][1]);
+    out.worldToModel[2] = glm::vec4(W[0][2], W[1][2], W[2][2], W[3][2]);
+
+    out.aabbMin = glm::vec4(data.worldAABB.min, 0.0f);
+    out.aabbMax = glm::vec4(data.worldAABB.max, 0.0f);
+
+    out.bases0 = glm::uvec4(data.nodeBase, data.triBase, data.shadeTriBase, data.materialBase);
+    out.bases1 = glm::uvec4(data.textureBase, 0u, 0u, 0u);
+    return out;
+}
+
+void ShowcaseApp::ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDeviceSize neededSize, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags)
+{
+    if (buf != VK_NULL_HANDLE)
+    {
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(device, buf, &req);
+        if (req.size >= neededSize)
+            return;
+        vkDestroyBuffer(device, buf, nullptr);
+        vkFreeMemory(device, mem, nullptr);
+        buf = VK_NULL_HANDLE;
+        mem = VK_NULL_HANDLE;
+    }
+    createBuffer(device, physicalDevice, neededSize, usage, flags, buf, mem);
+}
+
+void ShowcaseApp::uploadBytesToDeviceLocal(const void* src, VkDeviceSize bytes, VkBuffer dstDeviceLocal)
+{
+    if (bytes == 0) return;
+
+    VkBuffer stageBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    createBuffer(device, physicalDevice, bytes,
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stageBuf, stageMem);
+
+    void* p = nullptr;
+    vkMapMemory(device, stageMem, 0, bytes, 0, &p);
+    std::memcpy(p, src, size_t(bytes));
+    vkUnmapMemory(device, stageMem);
+
+    copyBuffer(device, computeCommandPool, computeQueue, stageBuf, dstDeviceLocal, bytes);
+
+    vkDestroyBuffer(device, stageBuf, nullptr);
+    vkFreeMemory(device, stageMem, nullptr);
+}
+
+void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
+                                    const std::vector<TLASNodeGPU>& tlasNodes,
+                                    const std::vector<InstanceDataGPU>& tlasInstances,
+                                    const std::vector<uint32_t>& instanceIndices)
+{
+    const VkDeviceSize nodesBytes = VkDeviceSize(tlasNodes.size()) * sizeof(TLASNodeGPU);
+    const VkDeviceSize instBytes  = VkDeviceSize(tlasInstances.size()) * sizeof(InstanceDataGPU);
+    const VkDeviceSize idxBytes   = VkDeviceSize(instanceIndices.size()) * sizeof(uint32_t);
+
+    ensureBufferCapacity(tlasNodesBuf[frameIndex], tlasNodesMem[frameIndex], nodesBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    ensureBufferCapacity(tlasInstBuf[frameIndex],  tlasInstMem[frameIndex],  instBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    ensureBufferCapacity(tlasIdxBuf[frameIndex],   tlasIdxMem[frameIndex],   idxBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (nodesBytes)
+        uploadBytesToDeviceLocal(tlasNodes.data(), nodesBytes, tlasNodesBuf[frameIndex]);
+    if (instBytes) 
+        uploadBytesToDeviceLocal(tlasInstances.data(), instBytes, tlasInstBuf[frameIndex]);
+    if (idxBytes)
+        uploadBytesToDeviceLocal(instanceIndices.data(), idxBytes, tlasIdxBuf[frameIndex]);
+
+    VkDescriptorBufferInfo b6{ tlasNodesBuf[frameIndex], 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b7{ tlasInstBuf[frameIndex],  0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b8{ tlasIdxBuf[frameIndex],   0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet w[3]{};
+    for (int i = 0; i < 3; i++)
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+
+    w[0].dstSet = computeSets[frameIndex];
+    w[0].dstBinding = 6;
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[0].descriptorCount = 1;
+    w[0].pBufferInfo = &b6;
+
+    w[1].dstSet = computeSets[frameIndex];
+    w[1].dstBinding = 7;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[1].descriptorCount = 1;
+    w[1].pBufferInfo = &b7;
+
+    w[2].dstSet = computeSets[frameIndex];
+    w[2].dstBinding = 8;
+    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[2].descriptorCount = 1;
+    w[2].pBufferInfo = &b8;
+
+    vkUpdateDescriptorSets(device, 3, w, 0, nullptr);
+}
+
+
 void ShowcaseApp::createCommandPoolAndBuffers()
 {
     QueueFamiliyIndies indices = findQueueFamilies(physicalDevice);
@@ -192,6 +400,20 @@ inline ParamsGPU makeParamsForVulkan(
 }
 //temp
 
+void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
+{
+    std::vector<TLASNodeGPU> nodes;
+    std::vector<InstanceDataGPU> instances;
+    topLevelAS = buildTLAS(ShowcaseApp::instances);
+
+    for (auto& node : topLevelAS.nodes)
+        nodes.push_back(packNode(node));
+    for (auto& instance : topLevelAS.instances)
+        instances.push_back(packInstance(instance));
+    
+    uploadTLASForFrame(frameIndex, nodes, instances, topLevelAS.instanceIndices);
+}
+
 
 void ShowcaseApp::run()
 {
@@ -222,17 +444,18 @@ void ShowcaseApp::run()
             vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
         imagesInFlight[imageIndex] = inFlightFences[currentFrame];
 
+        frameTLASPrepare(currentFrame);
         //temp
         ParamsGPU params = makeParamsForVulkan(
                             swapChainExtent,
-                            /*rootIndex*/ 0,       
+                            /*rootIndex*/ topLevelAS.root,       
                             /*time*/ 0.0f,
-                            /*camPos*/ glm::vec3(0, 0, 6),
-                            /*camTarget*/ glm::vec3(0, 0.2, 10),
-                            /*up*/ glm::vec3(0, 1, 0),
-                            /*fov*/ 60.0f,
-                            /*near*/ 0.1f,
-                            /*far*/ 10000.0f
+                            /*camPos*/ scene.camera.position,
+                            /*camTarget*/ scene.camera.target,
+                            /*up*/ scene.camera.up,
+                            /*fov*/ scene.camera.vfovDeg,
+                            /*near*/ scene.camera.nearPlane,
+                            /*far*/ scene.camera.farPlane
                         );
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);

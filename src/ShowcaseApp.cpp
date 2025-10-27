@@ -3,79 +3,6 @@
 
 // ~~~~~ helpers ~~~~~~
 
-inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
-{
-    AABB b;
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        b = merge(b, inst[idx[first + i]].worldAABB);
-    }
-    return b;
-}
-
-inline uint32_t makeNode(TLAS& tlas, const TLASNode& n)
-{
-    tlas.nodes.push_back(n);
-    return static_cast<uint32_t>(tlas.nodes.size() - 1);
-}
-
-inline uint32_t buildRecursive(TLAS& tlas, std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
-{
-    TLASNode node{};
-    node.bounds = boundsOfRange(tlas.instances, idx, first, count);
-
-    const uint32_t LEAF_THRESHOLD = 1;
-    if (count <= LEAF_THRESHOLD) {
-        node.first = first;
-        node.count = count;
-        return makeNode(tlas, node);
-    }
-
-    AABB cb;
-    for (uint32_t i = 0; i < count; ++i)
-        cb = merge(cb, AABB{ centroid(tlas.instances[idx[first + i]].worldAABB), centroid(tlas.instances[idx[first + i]].worldAABB) });
-    
-    int axis = widestAxis(cb);
-
-    if (cb.min[axis] == cb.max[axis])
-    {
-        node.first = first;
-        node.count = count;
-        return makeNode(tlas, node);
-    }
-
-    uint32_t mid = first + count / 2;
-    std::nth_element(idx.begin() + first, idx.begin() + mid, idx.begin() + first + count, [&](uint32_t a, uint32_t b)
-    {
-        return centroid(tlas.instances[a].worldAABB)[axis] <
-               centroid(tlas.instances[b].worldAABB)[axis];
-    });
-
-    uint32_t left  = buildRecursive(tlas, idx, first, mid - first);
-    uint32_t right = buildRecursive(tlas, idx, mid,   first + count - mid);
-
-    node.left  = static_cast<int32_t>(left);
-    node.right = static_cast<int32_t>(right);
-    return makeNode(tlas, node);
-}
-
-inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
-{
-    TLAS tlas;
-    tlas.instances = instances;
-
-    const uint32_t N = static_cast<uint32_t>(instances.size());
-    tlas.instanceIndices.resize(N);
-    for (uint32_t i = 0; i < N; ++i) tlas.instanceIndices[i] = i;
-
-    if (N == 0)
-        return tlas;
-
-    buildRecursive(tlas, tlas.instanceIndices, 0, N);
-
-    return tlas;
-}
-
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -190,9 +117,26 @@ void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src
     endOneTimeCmd(device, queue, pool, cmd);
 }
 
+static int getAspectExtent(float aspect, bool isWidth)
+{
+    if (aspect <= EPSILON)
+        return isWidth ? 1200 : 900;
+
+    float width = 1200.0f;
+    float height = width / aspect;
+    if (height > 1080.0f)
+    {
+        height = 1080.0f;
+        width = aspect * height;
+    }
+    if (width > 1920.0f)
+        return isWidth ? 1920 : static_cast<int>(height);
+    return isWidth ? static_cast<int>(width) : static_cast<int>(height);
+}
+
 // ~~~~ constructor / destructor ~~~~
 
-ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(1200, 900, "Scoop"), scene(scene)
+ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(getAspectExtent(scene.camera.aspect, true), getAspectExtent(scene.camera.aspect, false), "Scoop"), scene(scene)
 {
     instance = inst;
     setupDebugMessenger();
@@ -251,6 +195,12 @@ ShowcaseApp::~ShowcaseApp()
             vkDestroyBuffer(device, paramsBuffer[i], nullptr);
         if (paramsMemory[i])
             vkFreeMemory(device, paramsMemory[i], nullptr);
+        if (tlasNodesBuf[i]) vkDestroyBuffer(device, tlasNodesBuf[i], nullptr);
+        if (tlasNodesMem[i]) vkFreeMemory(device, tlasNodesMem[i], nullptr);
+        if (tlasInstBuf[i])  vkDestroyBuffer(device, tlasInstBuf[i], nullptr);
+        if (tlasInstMem[i])  vkFreeMemory(device, tlasInstMem[i], nullptr);
+        if (tlasIdxBuf[i])   vkDestroyBuffer(device, tlasIdxBuf[i], nullptr);
+        if (tlasIdxMem[i])   vkFreeMemory(device, tlasIdxMem[i], nullptr);
     }
     destorySSBOdata();
 
@@ -287,13 +237,57 @@ void ShowcaseApp::makeInstances(Scene& scene)
     std::vector<uint32_t> materialBases(size, 0u);
     std::vector<uint32_t> textureBases(size, 0u);
 
+    uint32_t runningNodeSize = 0;
+    uint32_t runningTriSize = 0;
+    uint32_t runningShaderSize = 0;
+    uint32_t runningMatSize = 0;
+    uint32_t runningTextureSize = 0;
+    int i = 0;
     for (auto& mesh : scene.meshes)
     {
-        //Flaten meshes here
-        //SBVH has -> nodes and Triangles
-        //textures and Materials in mesh here.
-        //bases should be at index 0 = 0 at index n = SUM(0 to n - 1)
-        //vectors in member variables should befilled here
+        if (i != 0)
+        {
+            nodeBases[i] = nodeBases[i - 1] + runningNodeSize;
+            triBases[i] = triBases[i - 1] + runningTriSize;
+            shadeTriBases[i] = shadeTriBases[i - 1] + runningShaderSize;
+            materialBases[i] = materialBases[i - 1] + runningMatSize;
+            textureBases[i] = textureBases[i - 1] + runningTextureSize;
+        }
+        
+        runningNodeSize = static_cast<uint32_t>(mesh.bottomLevelAccelerationStructure.nodes.size());
+        runningTriSize = static_cast<uint32_t>(mesh.bottomLevelAccelerationStructure.triangles.intersectionTriangles.size());
+        runningShaderSize = static_cast<uint32_t>(mesh.bottomLevelAccelerationStructure.triangles.shadingTriangles.size());
+        runningMatSize = static_cast<uint32_t>(mesh.perMeshMaterials.size());
+        runningTextureSize = static_cast<uint32_t>(mesh.textures.size());
+        i++;
+    }
+    SBVHNodes.reserve(nodeBases[i - 1] + runningNodeSize);
+    intersectionTrinagles.reserve(triBases[i - 1] + runningTriSize);
+    shadingTriangles.reserve(shadeTriBases[i - 1] + runningShaderSize);
+    materials.reserve(materialBases[i - 1] + runningMatSize);
+    // textures? .reserve(textureBases[i - 1] + runningTextureSize);
+    for (auto& mesh : scene.meshes) {
+        auto& sbvh = mesh.bottomLevelAccelerationStructure;
+
+        SBVHNodes.insert(SBVHNodes.end(),
+            std::make_move_iterator(sbvh.nodes.begin()),
+            std::make_move_iterator(sbvh.nodes.end()));
+        sbvh.nodes.clear();
+
+        intersectionTrinagles.insert(intersectionTrinagles.end(),
+            std::make_move_iterator(sbvh.triangles.intersectionTriangles.begin()),
+            std::make_move_iterator(sbvh.triangles.intersectionTriangles.end()));
+        sbvh.triangles.intersectionTriangles.clear();
+
+        shadingTriangles.insert(shadingTriangles.end(),
+            std::make_move_iterator(sbvh.triangles.shadingTriangles.begin()),
+            std::make_move_iterator(sbvh.triangles.shadingTriangles.end()));
+        sbvh.triangles.shadingTriangles.clear();
+
+        materials.insert(materials.end(),
+            std::make_move_iterator(mesh.perMeshMaterials.begin()),
+            std::make_move_iterator(mesh.perMeshMaterials.end()));
+        mesh.perMeshMaterials.clear();
     }
 
     for (auto& object : scene.objects)
@@ -303,12 +297,13 @@ void ShowcaseApp::makeInstances(Scene& scene)
         inst.worldToModel = affineInverse(inst.modelToWorld);
         inst.worldAABB = object.boundingBox;
 
-        //instance data needs its bases.
-        //here we just readt mesh ID and index in the vectors created before and tts the base offset.
+        inst.nodeBase = nodeBases[object.meshID];
+        inst.triBase = triBases[object.meshID];
+        inst.shadeTriBase = shadeTriBases[object.meshID];
+        inst.materialBase = materialBases[object.meshID];
+        inst.textureBase = textureBases[object.meshID];
+        instances.push_back(inst);
     }
-
-    //scene input is done after this + texture SSBO creation and camera needs to be pluged in
-
 }
 
 void ShowcaseApp::createLogicalDevice()
@@ -785,7 +780,19 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorSetLayoutBinding b5 = b1;
     b5.binding = 5;
 
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings = {b0, b1, b2, b3, b4, b5};
+    VkDescriptorSetLayoutBinding b6 = {};
+    b6.binding = 6;
+    b6.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b6.descriptorCount = 1;
+    b6.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutBinding b7 = b6;
+    b7.binding = 7;
+
+    VkDescriptorSetLayoutBinding b8 = b6;
+    b8.binding = 8;
+
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8};
 
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -801,7 +808,7 @@ void ShowcaseApp::createComputeDescriptors()
         
     VkDescriptorPoolSize poolSizeBuf{};
     poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizeBuf.descriptorCount = 5 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizeBuf.descriptorCount = 8 * SwapChain::MAX_FRAMES_IN_FLIGHT;
         
     std::array<VkDescriptorPoolSize, 2> poolSizes = {poolSizeImg, poolSizeBuf};
 
@@ -900,11 +907,11 @@ void ShowcaseApp::writeStaticComputeBindings()
 
 void ShowcaseApp::uploadStaticData()
 {
-    // uploadDeviceLocal(bottomLevelAS.nodes, 0, sbvhNodesBuffer, sbvhNodesMemory);
-    // uploadDeviceLocal(bottomLevelAS.triangles.intersectionTriangles, 0, triangleBuffer, triangleMemory);
-    // uploadDeviceLocal(bottomLevelAS.triangles.shadingTriangles, 0, shadingBuffer, shadingMemory);
-    // uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
-    // writeStaticComputeBindings();
+    uploadDeviceLocal(SBVHNodes, 0, sbvhNodesBuffer, sbvhNodesMemory);
+    uploadDeviceLocal(intersectionTrinagles, 0, triangleBuffer, triangleMemory);
+    uploadDeviceLocal(shadingTriangles, 0, shadingBuffer, shadingMemory);
+    uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
+    writeStaticComputeBindings();
 }
 
 void ShowcaseApp::writeParamsBindingForFrame(uint32_t frameIndex)

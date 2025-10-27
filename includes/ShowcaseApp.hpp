@@ -70,6 +70,7 @@ struct TLAS {
     std::vector<TLASNode>   nodes;
     std::vector<uint32_t>   instanceIndices;
     std::vector<InstanceData> instances;
+    uint32_t root;
 
     void clear() {
         nodes.clear();
@@ -78,6 +79,20 @@ struct TLAS {
     }
 };
 
+struct alignas(16) TLASNodeGPU {
+    glm::vec4 bmin; //w unused
+    glm::vec4 bmax; //w unused
+    glm::uvec4 meta; // first & count | left & right
+};
+
+struct alignas(16) InstanceDataGPU {
+    glm::vec4 modelToWorld[3];
+    glm::vec4 worldToModel[3];
+    glm::vec4 aabbMin; // w unused
+    glm::vec4 aabbMax; // w unused
+    glm::uvec4 bases0; // nodeBase, triBase, shadeTriBase, materialBase
+    glm::uvec4 bases1; // textureBase, sbvhRoot, flags, reserved
+};
 
 class ShowcaseApp
 {
@@ -145,6 +160,15 @@ private:
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     void*          paramsMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
+    VkBuffer       tlasNodesBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory tlasNodesMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       tlasInstBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory tlasInstMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       tlasIdxBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory tlasIdxMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
     VkCommandPool graphicsCommandPool = VK_NULL_HANDLE;
     VkCommandPool computeCommandPool = VK_NULL_HANDLE;
     VkCommandBuffer graphicsCommandBuffers[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -178,6 +202,10 @@ private:
     void makeInstances(Scene& scene);
     std::vector<const char *> getRequiredExtensions();
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
+    void ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDeviceSize neededSize, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags);
+    void uploadBytesToDeviceLocal(const void* src, VkDeviceSize bytes, VkBuffer dstDeviceLocal);
+    void uploadTLASForFrame(uint32_t frameIndex, const std::vector<TLASNodeGPU>& tlasNodes, const std::vector<InstanceDataGPU>& tlasInstances, const std::vector<uint32_t>& instanceIndices);
+    void frameTLASPrepare(uint32_t frameIndex);
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
     void createLogicalDevice();
