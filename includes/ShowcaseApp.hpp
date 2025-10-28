@@ -23,6 +23,17 @@
 
 #define VALIDATE true
 
+
+struct InputState {
+    bool rmbDown = false;
+    bool firstDrag = true;
+    double lastX = 0.0;
+    double lastY = 0.0;
+    float yawDeg   = 0.0f;
+    float pitchDeg = 0.0f;
+    float sensitivity = 0.1f;
+};
+
 struct QueueFamiliyIndies
 {
     std::optional<uint32_t> graphicsFamily;
@@ -121,6 +132,8 @@ private:
 
     uint32_t currentFrame = 0;
 
+    InputState input;
+
     VkImage        offscreenImage[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory offscreenMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkImageView    offscreenView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -198,8 +211,20 @@ private:
     std::vector<ShadingTriangle> shadingTriangles;
     std::vector<MaterialGPU> materials;
 
+    static ShowcaseApp* s_active;
+
+    static void CharCallback(GLFWwindow* win, unsigned int codepoint);
+    static void KeyCallback (GLFWwindow* win, int key, int scancode, int action, int mods);
+    
+    void onChar(uint32_t cp);
+    void onKey (int key, int action, int mods);
+
     
     void makeInstances(Scene& scene);
+    void update(float dt);
+    void initLookAnglesFromCamera();
+    void MouseButtonCallback(GLFWwindow* w, int button, int action, int mods);
+    void CursorPosCallback(GLFWwindow*, double x, double y);
     std::vector<const char *> getRequiredExtensions();
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
     void ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDeviceSize neededSize, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags);

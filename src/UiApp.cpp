@@ -296,15 +296,20 @@ void UiApp::createPipelineLayout()
 
 UiApp* UiApp::s_active = nullptr;
 
-void UiApp::CharCallback(GLFWwindow*, unsigned int cp) {
-    if (s_active) s_active->onChar(cp);
+void UiApp::CharCallback(GLFWwindow*, unsigned int cp)
+{
+    if (s_active)
+        s_active->onChar(cp);
 }
 
-void UiApp::KeyCallback(GLFWwindow*, int key, int, int action, int mods) {
-    if (s_active) s_active->onKey(key, action, mods);
+void UiApp::KeyCallback(GLFWwindow*, int key, int, int action, int mods)
+{
+    if (s_active)
+        s_active->onKey(key, action, mods);
 }
 
-void UiApp::onChar(uint32_t cp) {
+void UiApp::onChar(uint32_t cp)
+{
     auto* s = inputs.focused();
     if (!s) return;
 
@@ -315,9 +320,11 @@ void UiApp::onChar(uint32_t cp) {
     }
 }
 
-void UiApp::onKey(int key, int action, int /*mods*/) {
+void UiApp::onKey(int key, int action, int )
+{
     auto* s = inputs.focused();
-    if (!s || (action != GLFW_PRESS && action != GLFW_REPEAT)) return;
+    if (!s || (action != GLFW_PRESS && action != GLFW_REPEAT))
+        return;
 
     switch (key) {
         case GLFW_KEY_BACKSPACE:
@@ -338,7 +345,8 @@ void UiApp::onKey(int key, int action, int /*mods*/) {
     }
 }
 
-void UiApp::createTextPipelineLayout() {
+void UiApp::createTextPipelineLayout()
+{
     VkDescriptorSetLayout set0 = text->getDescriptorSetLayout();
 
     VkPushConstantRange range{};

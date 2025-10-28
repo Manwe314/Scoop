@@ -414,6 +414,39 @@ void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
     uploadTLASForFrame(frameIndex, nodes, instances, topLevelAS.instanceIndices);
 }
 
+void ShowcaseApp::update(float dt)
+{
+    const float speed = 0.1f;
+    glm::vec3 U, V, W;
+    scene.camera.basis(U, V, W);
+
+    glm::vec3 worldUp(0,1,0);
+    glm::vec3 fwd = -W;
+    fwd -= glm::dot(fwd, worldUp) * worldUp;
+    if (glm::length(fwd) > 0.0f) fwd = glm::normalize(fwd);
+
+    glm::vec3 right = glm::normalize(glm::cross(fwd, worldUp));
+
+    glm::vec3 move(0.0f);
+
+    if (glfwGetKey(window.handle(), GLFW_KEY_W) == GLFW_PRESS) move += fwd;
+    if (glfwGetKey(window.handle(), GLFW_KEY_S) == GLFW_PRESS) move -= fwd;
+    if (glfwGetKey(window.handle(), GLFW_KEY_A) == GLFW_PRESS) move -= right;
+    if (glfwGetKey(window.handle(), GLFW_KEY_D) == GLFW_PRESS) move += right;
+
+    // vertical stays consistent: space up, shift down
+    if (glfwGetKey(window.handle(), GLFW_KEY_SPACE) == GLFW_PRESS)       move += worldUp;
+    if (glfwGetKey(window.handle(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(window.handle(), GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) move -= worldUp;
+
+    if (glm::length(move) > 0.0f)
+    {
+        move = glm::normalize(move) * (speed * dt);
+        scene.camera.position += move;
+        scene.camera.target   += move;
+    }
+}
+
 
 void ShowcaseApp::run()
 {
@@ -423,6 +456,7 @@ void ShowcaseApp::run()
     while (!window.shouldClose())
     {
         glfwPollEvents();
+        update(1.0f);
 
         if (window.wasWindowResized())
             recreateSwapchain();

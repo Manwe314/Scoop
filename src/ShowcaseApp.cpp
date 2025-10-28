@@ -134,11 +134,141 @@ static int getAspectExtent(float aspect, bool isWidth)
     return isWidth ? static_cast<int>(width) : static_cast<int>(height);
 }
 
+void ShowcaseApp::CharCallback(GLFWwindow*, unsigned int cp)
+{
+    if (s_active)
+        s_active->onChar(cp);
+}
+
+void ShowcaseApp::KeyCallback(GLFWwindow*, int key, int, int action, int mods)
+{
+    if (s_active)
+        s_active->onKey(key, action, mods);
+}
+
+void ShowcaseApp::onChar(uint32_t cp)
+{
+    if (cp == 'w')
+    {
+        scene.camera.position.z -= 0.1;
+        scene.camera.target.z -= 0.1;
+    }
+    if (cp == 's')
+    {
+        scene.camera.position.z += 0.1;
+        scene.camera.target.z += 0.1;
+    }
+    if (cp == 'a')
+    {
+        scene.camera.position.x -= 0.1;
+        scene.camera.target.x -= 0.1;
+    }
+    if (cp == 'd')
+    {
+        scene.camera.position.x += 0.1;
+        scene.camera.target.x += 0.1;
+    }
+    if (cp == 32)
+    {
+        scene.camera.position.y += 0.1;
+        scene.camera.target.y += 0.1;
+    }
+    
+    std::cout << "camera pos " << scene.camera.position.x << " " << scene.camera.position.y << " " << scene.camera.position.z << std::endl;
+    
+}
+
+void ShowcaseApp::onKey(int key, int action, int )
+{
+
+    switch (key) {
+        case GLFW_KEY_BACKSPACE:
+            break;
+        case GLFW_KEY_ENTER:
+            break;
+        case GLFW_KEY_LEFT_SHIFT:
+            scene.camera.position.y -= 0.1;
+            scene.camera.target.y -= 0.1;
+            break;
+        case GLFW_KEY_KP_ENTER:
+            break;
+        case GLFW_KEY_ESCAPE:
+            break;
+        default:
+            break;
+    }
+}
+
+void ShowcaseApp::MouseButtonCallback(GLFWwindow* w, int button, int action, int mods)
+{
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        if (action == GLFW_PRESS)
+        {
+            input.rmbDown = true;
+            input.firstDrag = true;
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        else if (action == GLFW_RELEASE)
+        {
+            input.rmbDown = false;
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+    }
+}
+
+void ShowcaseApp::CursorPosCallback(GLFWwindow*, double x, double y)
+{
+    if (!input.rmbDown)
+        return;
+
+    if (input.firstDrag)
+    {
+        input.firstDrag = false;
+        input.lastX = x; input.lastY = y;
+        return;
+    }
+
+    double dx = x - input.lastX;
+    double dy = y - input.lastY;
+    input.lastX = x; input.lastY = y;
+
+    input.yawDeg   += float(dx) * input.sensitivity;
+    input.pitchDeg -= float(dy) * input.sensitivity;
+
+    input.pitchDeg = std::clamp(input.pitchDeg, -89.9f, 89.9f);
+
+    const float cy = std::cos(glm::radians(input.yawDeg));
+    const float sy = std::sin(glm::radians(input.yawDeg));
+    const float cp = std::cos(glm::radians(input.pitchDeg));
+    const float sp = std::sin(glm::radians(input.pitchDeg));
+
+    glm::vec3 forward = glm::normalize(glm::vec3(
+        cp * cy,   // x
+        sp,        // y
+        cp * sy    // z
+    ));
+
+    scene.camera.target = scene.camera.position + forward;
+}
+
+
+void ShowcaseApp::initLookAnglesFromCamera()
+{
+    glm::vec3 f = glm::normalize(scene.camera.target - scene.camera.position);
+    input.yawDeg   = glm::degrees(std::atan2(f.z, f.x));
+    input.pitchDeg = glm::degrees(std::asin(glm::clamp(f.y, -1.f, 1.f)));
+}
+
 // ~~~~ constructor / destructor ~~~~
 
 ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(getAspectExtent(scene.camera.aspect, true), getAspectExtent(scene.camera.aspect, false), "Scoop"), scene(scene)
 {
     instance = inst;
+    s_active = this;
+    glfwSetMouseButtonCallback(window.handle(), [](GLFWwindow* w, int b, int a, int m){ if (s_active) s_active->MouseButtonCallback(w,b,a,m); });
+    glfwSetCursorPosCallback(window.handle(), [](GLFWwindow* w, double x, double y){ if (s_active) s_active->CursorPosCallback(w,x,y); });
+    // glfwSetCharCallback(window.handle(), &ShowcaseApp::CharCallback);
+    // glfwSetKeyCallback (window.handle(), &ShowcaseApp::KeyCallback);
     setupDebugMessenger();
     window.createWindowSurface(instance, &surface);
     if (gpu == VK_NULL_HANDLE)
@@ -158,6 +288,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createParamsBuffers();
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
+    initLookAnglesFromCamera();
     std::cout << "Name: " << properties.deviceName << std::endl;
     DumpScene(ShowcaseApp::scene);
     makeInstances(ShowcaseApp::scene);
@@ -224,6 +355,8 @@ ShowcaseApp::~ShowcaseApp()
         DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
 }
+
+ShowcaseApp* ShowcaseApp::s_active = nullptr;
 
 // ~~~~~ Creation ~~~~~
 
