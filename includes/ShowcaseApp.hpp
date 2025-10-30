@@ -218,6 +218,7 @@ private:
     
     void onChar(uint32_t cp);
     void onKey (int key, int action, int mods);
+    bool bbView = false;
 
     
     void makeInstances(Scene& scene);

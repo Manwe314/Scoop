@@ -68,14 +68,32 @@ struct InstanceDataGPU {
 
 layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
 layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
 
 // ---------- RayTracing Engine ----------
 
+
+//~~~~~~~~~~~~~ comp specific data structs ~~~~~~~~~~~~~
 struct Ray {
     vec3 origin;
     vec3 direction;
     vec3 color;
 };
+
+struct Hit {
+    float dist_to_hit; //in world space
+    uint instanceIndex;
+    uint primitiveIndex;
+    vec2 barrycentricUV;
+};
+
+struct AABB {
+    vec3 bbMin;
+    vec3 bbMax;
+};
+
+
+//~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
 
 float rand(uvec2 pixel)
 {
@@ -83,7 +101,16 @@ float rand(uvec2 pixel)
     return fract(sin(dot(pixel + time, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
+void swap(inout float a, inout float b)
+{
+    float temp = a;
+    a = b;
+    b = temp;
+}
 
+
+
+//~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
 Ray generateRay(uvec2 pixel)
 {
     vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
@@ -104,30 +131,142 @@ Ray generateRay(uvec2 pixel)
     return ray;
 }
 
+bool inersectingAABB(Ray ray, AABB aabb, float tMin, float tMax, inout float tEnter, inout float tExit)
+{
+    //ray forula for point P along the ray at some distance t from origin:
+    // P(t) = O + t * D where O is Origin vec3 and D is Normalized vec3 Direction. 
+    float t0 = tMin;
+    float t1 = tMax;
 
+    for (int axis = 0; axis < 3; axis++)
+    {
+        float originI = ray.origin[axis];
+        float directionI = ray.direction[axis];
+        float minBoxA = aabb.bbMin[axis];
+        float maxBoxA = aabb.bbMax[axis];
+
+        if (abs(directionI) <= 1e-8f)
+            if (originI < minBoxA || originI > maxBoxA)
+                return false;
+        else
+        {
+            float inverseDirectionI = 1.0 / directionI;
+            float tNearA = (minBoxA - originI) * inverseDirectionI;
+            float tFarA = (maxBoxA - originI) * inverseDirectionI;
+            if (tNearA > tFarA)
+                swap(tNearA, tFarA);
+            
+            t0 = tNearA > t0 ? tNearA : t0;
+            t1 = tFarA < t1 ? tFarA : t1;
+            if (t1 < t0)
+                return false;
+        }
+    }
+    tEnter = t0;
+    tExit = t1;
+    return (tExit >= tMin) && (tEnter <= tMax);
+}
+
+Hit traverseTLAS(Ray ray, inout TLASNodeGPU stack[], inout int stackPointer, float tEnter, float tExit)
+{
+    TLASNodeGPU node = stack[stackPointer];
+
+    Hit hit = Hit(1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+
+    while (stackPointer >= 0)
+    {
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+        if (node.meta.y > 0)
+        {
+            hit.instanceIndex = instanceIndices[node.meta.x];
+            stackPointer--;
+            return hit;
+        }
+        TLASNodeGPU left = tlasNodes[node.meta.z];
+        TLASNodeGPU right = tlasNodes[node.meta.w];
+        AABB leftAABB = AABB(vec3(left.bbMin), vec3(left.bbMax));
+        AABB rightAABB = AABB(vec3(right.bbMin), vec3(right.bbMax));
+        bool hitLeft = inersectingAABB(ray, leftAABB, tEnter, tExit, tNearLeft, tFarLeft);
+        bool hitRight = inersectingAABB(ray, rightAABB, tEnter, tExit, tNearRight, tFarRight);
+
+        if (hitLeft && hitRight)
+        {
+            if (tNearLeft > tNearRight)
+            {
+                stack[stackPointer] = left;
+                stackPointer++;
+                stack[stackPointer] = right;
+            }
+            else
+            {
+                stack[stackPointer] = right;
+                stackPointer++;
+                stack[stackPointer] = left;
+            }
+        }
+        else if (hitLeft)
+            stack[stackPointer] = left;
+        else if (hitRight)
+            stack[stackPointer] = right;
+        else
+            stackPointer--;
+
+        if (stackPointer >= 0)
+            node = stack[stackPointer];
+    }
+    return hit;
+}
+
+
+// ~~~~~~~~~~~~~ main ~~~~~~~~~~~~~
 
 void main()
 {
+    //early pixel gate && get pixel XY.
     uvec2 pixel = gl_GlobalInvocationID.xy;
     if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
         return;
+
+    bool viewBB = Params._pad == 69 ? true : false;
+    
+    //Init TLAS with root node to begin everything
+    TLASNodeGPU TLASStack[30];
+    int TLASStackPointer = 0;
+    stack[stackPointer] = tlasNodes[Params.rootIndex];
+    AABB aabb = AABB(vec3(stack[stackPointer].bbMin), vec3(stack[stackPointer].bbMax));
+    float tEnter, tExit;
+
+    //make the main ray.
     Ray ray = generateRay(pixel);
-    float terminate = 0.0;
-    while (1)
+    //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
+    if (inersectingAABB(ray, aabb, 1e-8f, 1e30f, tEnter, tExit))
     {
-        //recursive traversal of TLAS
-        // miss logic or BLAS hit
-        // recursive traversal of BLAS
-        // miss logic or trinagle hit
-        // task based sampling over OMEGA hemisphere
-        // update Ray color based on sampling output
-        if (terminate < 1.0)
-            // update Ray origin and direction based on 
-        else
-            break;
+        //russian rulette termination float
+        float terminate = 0.0;
+        //main work loop.
+        while (1)
+        {
+            //record TLAS closest child hit. 
+            Hit hit = traverseTLAS(ray, TLASRoot, TLASStackPointer, tEnter, tExit)
+            if (hit.instanceIndex == 0xFFFFFFFFu)
+            {
+                ray.color = vec3(1.0);
+                break;
+            }
+            //recursive traversal of TLAS
+            // miss logic or BLAS hit
+            // recursive traversal of BLAS
+            // miss logic or trinagle hit
+            // task based sampling over OMEGA hemisphere
+            // update Ray color based on sampling output
+            if (terminate < 1.0)
+                // update Ray origin and direction based on 
+            else
+                break;
+        }
     }
-
-
+    else
+        ray.color = vec3(1.0);
     
     imageStore(outImage, ivec2(pix), vec4(ray.color, 1.0));
 }

@@ -374,7 +374,7 @@ inline ParamsGPU makeParamsForVulkan(
     glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
     float      fovY_deg  = 60.0f,
     float      zNear     = 0.1f,
-    float      zFar      = 2000.0f)
+    float      zFar      = 2000.0f, bool bbview)
 {
     const float aspect = float(extent.width) / float(std::max(1u, extent.height));
 
@@ -395,7 +395,7 @@ inline ParamsGPU makeParamsForVulkan(
     p.camPos_time = glm::vec4(camPos, time);
     p.imageSize   = glm::uvec2(extent.width, extent.height);
     p.rootIndex   = rootIndex;
-    p._pad0       = 0;
+    p._pad0       = bbview ? 69 : 0;
     return p;
 }
 //temp
@@ -433,6 +433,7 @@ void ShowcaseApp::update(float dt)
     if (glfwGetKey(window.handle(), GLFW_KEY_S) == GLFW_PRESS) move -= fwd;
     if (glfwGetKey(window.handle(), GLFW_KEY_A) == GLFW_PRESS) move -= right;
     if (glfwGetKey(window.handle(), GLFW_KEY_D) == GLFW_PRESS) move += right;
+    if (glfwGetKey(window.handle(), GLFW_KEY_B) == GLFW_PRESS) bbView = bbView ? false : true;
 
     // vertical stays consistent: space up, shift down
     if (glfwGetKey(window.handle(), GLFW_KEY_SPACE) == GLFW_PRESS)       move += worldUp;
@@ -489,7 +490,8 @@ void ShowcaseApp::run()
                             /*up*/ scene.camera.up,
                             /*fov*/ scene.camera.vfovDeg,
                             /*near*/ scene.camera.nearPlane,
-                            /*far*/ scene.camera.farPlane
+                            /*far*/ scene.camera.farPlane,
+                            bbView
                         );
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);
