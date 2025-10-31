@@ -374,7 +374,8 @@ inline ParamsGPU makeParamsForVulkan(
     glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
     float      fovY_deg  = 60.0f,
     float      zNear     = 0.1f,
-    float      zFar      = 2000.0f, bool bbview)
+    float      zFar      = 2000.0f, 
+    bool bbview          = false)
 {
     const float aspect = float(extent.width) / float(std::max(1u, extent.height));
 

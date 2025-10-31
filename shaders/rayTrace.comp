@@ -20,7 +20,7 @@ struct MollerTriangle {
 
 struct ShadingTriangle {
     vec4 vertexNormal0_uv;
-    vec4 vertextNormal1_uv;
+    vec4 vertexNormal1_uv;
     vec4 vertexNormal2_uv;
 };
 
@@ -87,15 +87,9 @@ struct Hit {
     vec2 barrycentricUV;
 };
 
-struct AABB {
-    vec3 bbMin;
-    vec3 bbMax;
-};
-
-
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
 
-float rand(uvec2 pixel)
+float rand(const in uvec2 pixel)
 {
     float time = Params.camPos_time.w;
     return fract(sin(dot(pixel + time, vec2(12.9898, 78.233))) * 43758.5453);
@@ -108,18 +102,62 @@ void swap(inout float a, inout float b)
     b = temp;
 }
 
+vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, point) + row0.w,
+                dot(row1.xyz, point) + row1.w,
+                dot(row2.xyz, point) + row2.w);
+}
 
+vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return normalize(vec3(dot(row0.xyz, direction),
+                          dot(row1.xyz, direction),
+                          dot(row2.xyz, direction)));
+}
+
+Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    Ray newRay;
+    newRay.color = ray.color;
+    newRay.origin = affineTransformPoint(ray.origin, row0, row1, row2); 
+    newRay.direction = affineTransformDirection(ray.direction, row0, row1, row2);
+    return newRay;
+}
+
+vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 normal2, const in float u, const in float v)
+{
+    float w = 1.0 - u - v;
+    vec3 normal = w * normal0 + u * normal1 + v * normal2;
+    return normalize(normal);
+}
+
+
+//temp
+vec3 hsv2rgb(vec3 c) { // compact HSV->RGB
+    vec3 p = abs(fract(c.x + vec3(0,2,4)/6.0)*6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p-1.0,0.0,1.0), c.y);
+}
+vec3 directionHue(vec3 n) {
+    n = normalize(n);
+    float az = atan(n.z, n.x);                 // [-pi,pi]
+    float el = asin(clamp(n.y, -1.0, 1.0));    // [-pi/2,pi/2]
+    float H = (az / (2.0*3.14159265)) + 0.5;   // [0,1]
+    float S = 0.7;
+    float V = 0.5 + 0.5 * (el/(0.5*3.14159265)); // brighter when pointing up
+    return hsv2rgb(vec3(H,S,V));
+}
 
 //~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
-Ray generateRay(uvec2 pixel)
+Ray generateRay(const in uvec2 pixel)
 {
     vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
     UV.y = 1 - UV.y;
 
     vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
 
-    vec2 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
-    vec2 farPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
+    vec4 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
+    vec4 farPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
 
     vec3 point0 = nearPoint.xyz / nearPoint.w;
     vec3 point1 = farPoint.xyz / farPoint.w;
@@ -131,7 +169,7 @@ Ray generateRay(uvec2 pixel)
     return ray;
 }
 
-bool inersectingAABB(Ray ray, AABB aabb, float tMin, float tMax, inout float tEnter, inout float tExit)
+bool intersectingAABB(const in Ray ray, const in vec3 bbMin, const in vec3 bbMax, const in float tMin, const in float tMax, inout float tEnter, inout float tExit)
 {
     //ray forula for point P along the ray at some distance t from origin:
     // P(t) = O + t * D where O is Origin vec3 and D is Normalized vec3 Direction. 
@@ -142,10 +180,10 @@ bool inersectingAABB(Ray ray, AABB aabb, float tMin, float tMax, inout float tEn
     {
         float originI = ray.origin[axis];
         float directionI = ray.direction[axis];
-        float minBoxA = aabb.bbMin[axis];
-        float maxBoxA = aabb.bbMax[axis];
+        float minBoxA = bbMin[axis];
+        float maxBoxA = bbMax[axis];
 
-        if (abs(directionI) <= 1e-8f)
+        if (abs(directionI) <= 1e-8)
             if (originI < minBoxA || originI > maxBoxA)
                 return false;
         else
@@ -167,54 +205,171 @@ bool inersectingAABB(Ray ray, AABB aabb, float tMin, float tMax, inout float tEn
     return (tExit >= tMin) && (tEnter <= tMax);
 }
 
-Hit traverseTLAS(Ray ray, inout TLASNodeGPU stack[], inout int stackPointer, float tEnter, float tExit)
+bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, const in vec3 edge_1, const in vec3 edge_2, inout float min_distance)
 {
-    TLASNodeGPU node = stack[stackPointer];
+    //algorithm final form:
+    /*
+       | t |                     | Q . edge2 |
+       | u | = 1 / (P . edge1) * |   P . T   |
+       | v |                     |   Q . D   |
+    */
+    //where:
+    /*
+        D - Nromalized ray direction
+        P = D X edge2
+        Q = T X edge1
+        T = O - vertex0
+        O - ray Origin
+    */
+    vec3 P = cross(ray.direction, edge_2);
+    float det = dot(P, edge_1);
 
-    Hit hit = Hit(1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+    if (det <= 1e-8)
+        return false;
+    
+    float inverse_det = 1 / det;
+    vec3 T = ray.origin - vertex_0;
 
+    float u = dot(T, P) * inverse_det;
+    if (u < 0.0 || u > 1.0)
+        return false;
+    
+    vec3 Q = cross(T, edge_1);
+    float v = dot(ray.direction, Q) * inverse_det;
+    if (v < 0.0 || (v + u) > 1.0)
+        return false;
+    float t = dot(edge_2, Q) * inverse_det;
+    if (t < min_distance)
+    {
+        min_distance = t;
+        hit.barrycentricUV.x = u;
+        hit.barrycentricUV.y = v;
+        return true;
+    }
+    return false;
+}
+
+void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout int stackPointer, const in float tEnter, const in float tExit)
+{
     while (stackPointer >= 0)
     {
         float tNearLeft, tNearRight, tFarLeft, tFarRight;
-        if (node.meta.y > 0)
+        uvec4 meta = tlasNodes[stack[stackPointer]].meta;
+        if (meta.y > 0)
         {
-            hit.instanceIndex = instanceIndices[node.meta.x];
+            hit.instanceIndex = instanceIndices[meta.x];
             stackPointer--;
-            return hit;
+            return;
         }
-        TLASNodeGPU left = tlasNodes[node.meta.z];
-        TLASNodeGPU right = tlasNodes[node.meta.w];
-        AABB leftAABB = AABB(vec3(left.bbMin), vec3(left.bbMax));
-        AABB rightAABB = AABB(vec3(right.bbMin), vec3(right.bbMax));
-        bool hitLeft = inersectingAABB(ray, leftAABB, tEnter, tExit, tNearLeft, tFarLeft);
-        bool hitRight = inersectingAABB(ray, rightAABB, tEnter, tExit, tNearRight, tFarRight);
+
+        vec3 left_bbMin = vec3(tlasNodes[meta.z].bbMin);
+        vec3 left_bbMax = vec3(tlasNodes[meta.z].bbMax);
+
+        vec3 right_bbMin = vec3(tlasNodes[meta.w].bbMin);
+        vec3 right_bbMax = vec3(tlasNodes[meta.w].bbMax);
+
+        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, tEnter, tExit, tNearLeft, tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
 
         if (hitLeft && hitRight)
         {
             if (tNearLeft > tNearRight)
             {
-                stack[stackPointer] = left;
+                stack[stackPointer] = meta.z;
                 stackPointer++;
-                stack[stackPointer] = right;
+                stack[stackPointer] = meta.w;
             }
             else
             {
-                stack[stackPointer] = right;
+                stack[stackPointer] = meta.w;
                 stackPointer++;
-                stack[stackPointer] = left;
+                stack[stackPointer] = meta.z;
             }
         }
         else if (hitLeft)
-            stack[stackPointer] = left;
+            stack[stackPointer] = meta.z;
         else if (hitRight)
-            stack[stackPointer] = right;
+            stack[stackPointer] = meta.w;
         else
             stackPointer--;
-
-        if (stackPointer >= 0)
-            node = stack[stackPointer];
     }
-    return hit;
+    hit.instanceIndex = 0xFFFFFFFFu;
+}
+
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
+{
+    float tEnter, tExit;
+    
+    if (!intersectingAABB(ray, bbMin, bbMax, 1e-8, 1e30, tEnter, tExit))
+        return;
+    
+    uint stack[64];
+    int stackPointer = 0;
+    stack[stackPointer] = nodeOffset;
+
+    while (stackPointer >= 0)
+    {
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+        
+        vec4 left_count_n_max = bvhNodes[stack[stackPointer]].bbMax_left__left_count;
+        vec3 left_bbMax = vec3(left_count_n_max);
+        uint left_count = floatBitsToUint(left_count_n_max.w);
+
+        vec4 left_start_n_min = bvhNodes[stack[stackPointer]].bbMin_left__left_start;
+        vec3 left_bbMin = vec3(left_start_n_min);
+        uint left_start = floatBitsToUint(left_start_n_min.w);
+
+        if (left_count != 0xFFFFFFFFu)
+        {
+            float min_distance = 1e30;
+            uint primIndex = 0;
+
+            for (uint i = 0; i < left_count; i++)
+            {
+                if (moller_trumbore(ray, hit, vec3(triangles[left_start + triBase + i].vertex_0),
+                                              vec3(triangles[left_start + triBase + i].edge_vec1),
+                                              vec3(triangles[left_start + triBase + i].edge_vec2), min_distance))
+                    primIndex = i;
+            }
+            if (min_distance != 1e30)
+            {
+                hit.primitiveIndex = left_start + triBase + primIndex;
+                return;
+            }
+        }
+
+        vec3 right_bbMax = vec3(bvhNodes[stack[stackPointer]].bbMax_right__right_count);
+
+        vec4 right_start_n_Min = bvhNodes[stack[stackPointer]].bbMin_right__right_start;
+        vec3 right_bbMin = vec3(right_start_n_Min);
+        uint right_start = floatBitsToUint(right_start_n_Min.w);
+
+
+        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, tEnter, tExit, tNearLeft, tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
+
+        if (hitLeft && hitRight)
+        {
+            if (tNearLeft > tNearRight)
+            {
+                stack[stackPointer] = left_start + nodeOffset;
+                stackPointer++;
+                stack[stackPointer] = right_start + nodeOffset;
+            }
+            else
+            {
+                stack[stackPointer] = right_start + nodeOffset;
+                stackPointer++;
+                stack[stackPointer] = left_start + nodeOffset;
+            }
+        }
+        else if (hitLeft)
+            stack[stackPointer] = left_start + nodeOffset;
+        else if (hitRight)
+            stack[stackPointer] = right_start + nodeOffset;
+        else
+            stackPointer--;
+    }
 }
 
 
@@ -230,37 +385,67 @@ void main()
     bool viewBB = Params._pad == 69 ? true : false;
     
     //Init TLAS with root node to begin everything
-    TLASNodeGPU TLASStack[30];
+    uint TLASStack[30];
     int TLASStackPointer = 0;
-    stack[stackPointer] = tlasNodes[Params.rootIndex];
-    AABB aabb = AABB(vec3(stack[stackPointer].bbMin), vec3(stack[stackPointer].bbMax));
+    TLASStack[TLASStackPointer] = Params.rootIndex;
     float tEnter, tExit;
 
     //make the main ray.
     Ray ray = generateRay(pixel);
     //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
-    if (inersectingAABB(ray, aabb, 1e-8f, 1e30f, tEnter, tExit))
+    if (intersectingAABB(ray, vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMin), vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMax), 1e-8, 1e30, tEnter, tExit))
     {
         //russian rulette termination float
         float terminate = 0.0;
+        Hit hit = Hit(1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
         //main work loop.
-        while (1)
+        while (true)
         {
             //record TLAS closest child hit. 
-            Hit hit = traverseTLAS(ray, TLASRoot, TLASStackPointer, tEnter, tExit)
+            traverseTLAS(ray, hit,TLASStack, TLASStackPointer, tEnter, tExit);
             if (hit.instanceIndex == 0xFFFFFFFFu)
             {
                 ray.color = vec3(1.0);
                 break;
             }
+            while (hit.instanceIndex != 0xFFFFFFFFu)
+            {
+                Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+                traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax));
+                if (hit.primitiveIndex != 0xFFFFFFFFu)
+                    break;
+                traverseTLAS(ray, hit, TLASStack, TLASStackPointer, tEnter, tExit);
+            }
+            if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+            {
+                ray.color = vec3(1.0);
+                break;
+            }
+
+            if (hit.instanceIndex != 0xFFFFFFFFu && viewBB)
+                ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
+            else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+                ray.color = vec3(1.0);
+            else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
+            {
+                vec3 normal = interpNormal(vec3(shadingTris[hit.primitiveIndex].vertexNormal0_uv),
+                                           vec3(shadingTris[hit.primitiveIndex].vertexNormal1_uv),
+                                           vec3(shadingTris[hit.primitiveIndex].vertexNormal2_uv),
+                                           hit.barrycentricUV.x, hit.barrycentricUV.y);
+                ray.color = directionHue(normal);
+            }
+
             //recursive traversal of TLAS
             // miss logic or BLAS hit
             // recursive traversal of BLAS
             // miss logic or trinagle hit
             // task based sampling over OMEGA hemisphere
             // update Ray color based on sampling output
-            if (terminate < 1.0)
+
+
                 // update Ray origin and direction based on 
+            if (terminate < 1.0)
+                break;
             else
                 break;
         }
@@ -268,5 +453,5 @@ void main()
     else
         ray.color = vec3(1.0);
     
-    imageStore(outImage, ivec2(pix), vec4(ray.color, 1.0));
+    imageStore(outImage, ivec2(pixel), vec4(ray.color, 1.0));
 }
