@@ -7,6 +7,7 @@
 #include <iostream>
 #include <set>
 #include <unordered_set>
+#include <algorithm>
 #include "Window.hpp"
 
 #ifdef NDEBUG

@@ -259,6 +259,65 @@ void ShowcaseApp::initLookAnglesFromCamera()
     input.pitchDeg = glm::degrees(std::asin(glm::clamp(f.y, -1.f, 1.f)));
 }
 
+void ShowcaseApp::initUploadResources()
+{
+    uint32_t family = hasDedicatedTransfer ? transferFamily : computeFamily;
+
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+        pci.queueFamilyIndex = family;
+        pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        if (vkCreateCommandPool(device, &pci, nullptr, &frameUpload[i].uploadPool) != VK_SUCCESS)
+            throw std::runtime_error("Showcase App: failed to create command pool");
+
+        VkCommandBufferAllocateInfo cai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cai.commandPool = frameUpload[i].uploadPool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device, &cai, &frameUpload[i].uploadCB) != VK_SUCCESS)
+            throw std::runtime_error("Showcase App: failed to allocate command Buffers");
+
+        VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        if (vkCreateSemaphore(device, &sci, nullptr, &frameUpload[i].uploadDone) != VK_SUCCESS)
+            throw std::runtime_error("Showcase App: failed to create upload resource semaphore");
+
+        VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;                   // NEW
+        if (vkCreateFence(device, &fci, nullptr, &frameUpload[i].uploadFence) != VK_SUCCESS)
+            throw std::runtime_error("Showcase App: failed to make Frame Upload Fence");
+    }
+}
+
+void ShowcaseApp::ensureUploadStagingCapacity(uint32_t frameIndex, VkDeviceSize need)
+{
+    auto& frame = frameUpload[frameIndex];
+    if (frame.capacity >= need)
+        return;
+
+    if (frame.staging)
+    {
+        vkDestroyBuffer(device, frame.staging, nullptr);
+        frame.staging = VK_NULL_HANDLE;
+    }
+    if (frame.stagingMem)
+    {
+        vkFreeMemory(device, frame.stagingMem, nullptr);
+        frame.stagingMem = VK_NULL_HANDLE;
+    }
+    frame.mapped = nullptr;
+
+    VkDeviceSize newCap = std::max(need, frame.capacity == 0 ? VkDeviceSize(256 * 1024) : frame.capacity * 2);
+
+    createBuffer(device, physicalDevice, newCap,
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 frame.staging, frame.stagingMem);
+
+    vkMapMemory(device, frame.stagingMem, 0, newCap, 0, &frame.mapped);
+    frame.capacity = newCap;
+}
+
 // ~~~~ constructor / destructor ~~~~
 
 ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(getAspectExtent(scene.camera.aspect, true), getAspectExtent(scene.camera.aspect, false), "Scoop"), scene(scene)
@@ -275,6 +334,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
         throw std::runtime_error("Showcase: invalid GPU passed");
     physicalDevice = gpu;
     createLogicalDevice();
+    initUploadResources();
     createSwapchain();
     createImageViews();
     createSyncObjects();
@@ -289,9 +349,11 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
-    std::cout << "Name: " << properties.deviceName << std::endl;
-    DumpScene(ShowcaseApp::scene);
+    // std::cout << "Name: " << properties.deviceName << std::endl;
+    // DumpScene(ShowcaseApp::scene);
     makeInstances(ShowcaseApp::scene);
+    QueueFamiliyIndies ind = findQueueFamilies(gpu);
+    std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
 }
 
 ShowcaseApp::~ShowcaseApp()
@@ -332,6 +394,19 @@ ShowcaseApp::~ShowcaseApp()
         if (tlasInstMem[i])  vkFreeMemory(device, tlasInstMem[i], nullptr);
         if (tlasIdxBuf[i])   vkDestroyBuffer(device, tlasIdxBuf[i], nullptr);
         if (tlasIdxMem[i])   vkFreeMemory(device, tlasIdxMem[i], nullptr);
+        auto& f = frameUpload[i];
+
+        if (f.mapped) { vkUnmapMemory(device, f.stagingMem); f.mapped = nullptr; }
+        if (f.staging)     { vkDestroyBuffer(device, f.staging, nullptr);      f.staging = VK_NULL_HANDLE; }
+        if (f.stagingMem)  { vkFreeMemory(device, f.stagingMem, nullptr);      f.stagingMem = VK_NULL_HANDLE; }
+
+        if (f.uploadCB)    { vkFreeCommandBuffers(device, f.uploadPool, 1, &f.uploadCB); f.uploadCB = VK_NULL_HANDLE; }
+        if (f.uploadPool)  { vkDestroyCommandPool(device, f.uploadPool, nullptr);        f.uploadPool = VK_NULL_HANDLE; }
+
+        if (f.uploadDone)  { vkDestroySemaphore(device, f.uploadDone, nullptr); f.uploadDone = VK_NULL_HANDLE; }
+        if (f.uploadFence) { vkDestroyFence(device, f.uploadFence, nullptr);    f.uploadFence = VK_NULL_HANDLE; }
+        if (computeFences[i]) vkDestroyFence(device, computeFences[i], nullptr);
+        if (imageAcquiredFences[i]) vkDestroyFence(device, imageAcquiredFences[i], nullptr);
     }
     destorySSBOdata();
 
@@ -442,49 +517,134 @@ void ShowcaseApp::makeInstances(Scene& scene)
 void ShowcaseApp::createLogicalDevice()
 {
     QueueFamiliyIndies indices = findQueueFamilies(physicalDevice);
+    if (!indices.isComplete())
+        throw std::runtime_error("Queue families incomplete.");
 
-    std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-    std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value(), indices.computeFamily.value()};
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> props(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, props.data());
 
-    float queuePriority = 1.0f;
-    for (uint32_t queueFamily : uniqueQueueFamilies) {
-        VkDeviceQueueCreateInfo queueCreateInfo = {};
-        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueCreateInfo.queueFamilyIndex = queueFamily;
-        queueCreateInfo.queueCount = 1;
-        queueCreateInfo.pQueuePriorities = &queuePriority;
-        queueCreateInfos.push_back(queueCreateInfo);
+    const uint32_t gfxFam = indices.graphicsFamily.value();
+    const uint32_t cmpFam = indices.computeFamily.value();
+
+    const uint32_t prsFam = indices.presentFamily.value();
+    bool presentSharesGraphics = (prsFam == gfxFam);
+
+    uint32_t xferFam = cmpFam;
+    bool transferIsDistinct = false;
+    bool canSplitComputeXfer = false;
+
+    if (indices.transferFamily.has_value())
+    {
+        xferFam = indices.transferFamily.value();
+        if (indices.hasDedicatedTransfer && xferFam != gfxFam && xferFam != cmpFam && xferFam != prsFam)
+            transferIsDistinct = true;
+        else if (xferFam != gfxFam && xferFam != cmpFam && xferFam != prsFam)
+            transferIsDistinct = true;
+        else if (xferFam == cmpFam && props[cmpFam].queueCount >= 2)
+            canSplitComputeXfer = true;
+        else
+            xferFam = cmpFam;
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures = {};
+    std::unordered_map<uint32_t, uint32_t> requested;
+    auto req_at_least = [&](uint32_t fam, uint32_t n)
+    {
+        uint32_t &cur = requested[fam];
+        if (cur < n)
+            cur = n;
+    };
+
+    req_at_least(gfxFam, 1);
+
+    if (!presentSharesGraphics)
+        req_at_least(prsFam, 1);
+
+    req_at_least(cmpFam, 1);
+
+    if (transferIsDistinct)
+        req_at_least(xferFam, 1);
+    else if (canSplitComputeXfer)
+        req_at_least(cmpFam, 2);
+    else
+        xferFam = cmpFam;
+
+    for (auto &kv : requested)
+    {
+        uint32_t fam = kv.first;
+        uint32_t want = kv.second;
+        uint32_t have = props[fam].queueCount;
+        if (want > have)
+        {
+            kv.second = have;
+            if (fam == cmpFam && want >= 2 && have < 2)
+            {
+                canSplitComputeXfer = false;
+                xferFam = cmpFam;
+            }
+        }
+    }
+
+    std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+    std::vector<std::vector<float>> priorities; priorities.reserve(requested.size());
+
+    for (auto &kv : requested)
+    {
+        uint32_t fam = kv.first;
+        uint32_t cnt = kv.second;
+        if (cnt == 0) continue;
+
+        priorities.emplace_back(cnt, 1.0f);
+        VkDeviceQueueCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = fam;
+        qci.queueCount = cnt;
+        qci.pQueuePriorities = priorities.back().data();
+        queueCreateInfos.push_back(qci);
+    }
+
+    VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
 
-    VkDeviceCreateInfo createInfo = {};
+    VkDeviceCreateInfo createInfo{ };
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
-    createInfo.pQueueCreateInfos = queueCreateInfos.data();
-
-    createInfo.pEnabledFeatures = &deviceFeatures;
+    createInfo.pQueueCreateInfos    = queueCreateInfos.data();
+    createInfo.pEnabledFeatures     = &deviceFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-
-    if (VALIDATE)
-    {
-        createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+    if (VALIDATE) {
+        createInfo.enabledLayerCount   = static_cast<uint32_t>(validationLayers.size());
         createInfo.ppEnabledLayerNames = validationLayers.data();
-    } 
-    else
+    } else {
         createInfo.enabledLayerCount = 0;
-
+    }
+    deviceFeatures.robustBufferAccess = VK_TRUE;
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to create logical device!");
+        throw std::runtime_error("Showcase App: failed to make logical device");
 
-    vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
-    vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
-    vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
-    graphicsFamily = indices.graphicsFamily.value();
-    computeFamily = indices.computeFamily.value();
+    vkGetDeviceQueue(device, gfxFam, /*index*/0, &graphicsQueue);
+
+    if (presentSharesGraphics)
+        presentQueue = graphicsQueue;
+    else
+        vkGetDeviceQueue(device, prsFam, /*index*/0, &presentQueue);
+
+    vkGetDeviceQueue(device, cmpFam, /*index*/0, &computeQueue);
+
+    if (transferIsDistinct)
+        vkGetDeviceQueue(device, xferFam, /*index*/0, &transferQueue);
+    else if (canSplitComputeXfer && requested[cmpFam] >= 2)
+        vkGetDeviceQueue(device, cmpFam, /*index*/1, &transferQueue);
+    else
+        transferQueue = computeQueue;
+
+    graphicsFamily = gfxFam;
+    presentFamily  = prsFam;
+    computeFamily  = cmpFam;
+    transferFamily = xferFam;
+    hasDedicatedTransfer = transferIsDistinct && indices.hasDedicatedTransfer;
 }
 
 QueueFamiliyIndies ShowcaseApp::findQueueFamilies(VkPhysicalDevice device)
@@ -496,6 +656,9 @@ QueueFamiliyIndies ShowcaseApp::findQueueFamilies(VkPhysicalDevice device)
 
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+    std::optional<uint32_t> dedicatedTransferCandidate;
+    std::optional<uint32_t> anyTransferCandidate;
 
     int i = 0;
     for (const auto &queueFamily : queueFamilies)
@@ -512,9 +675,42 @@ QueueFamiliyIndies ShowcaseApp::findQueueFamilies(VkPhysicalDevice device)
         if (queueFamily.queueCount > 0 && presentSupport)
             indices.presentFamily = i;
 
-        if (indices.isComplete())
-            break;
+        if (queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_TRANSFER_BIT)
+        {
+            const bool isDedicated = !(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && !(queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT);
+            if (isDedicated && !dedicatedTransferCandidate.has_value())
+                dedicatedTransferCandidate = i;
+            if (!anyTransferCandidate.has_value())
+                anyTransferCandidate = i;
+        }
         i++;
+    }
+    if (dedicatedTransferCandidate.has_value())
+    {
+        indices.transferFamily     = dedicatedTransferCandidate;
+        indices.hasDedicatedTransfer = true;
+        indices.hasSeparateTransfer  = true;
+    }
+    else if (anyTransferCandidate.has_value())
+    {
+        const uint32_t transferFamily = anyTransferCandidate.value();
+        if ((!indices.computeFamily.has_value() || transferFamily != indices.computeFamily.value()) &&
+            (!indices.graphicsFamily.has_value() || transferFamily != indices.graphicsFamily.value()) &&
+            (!indices.presentFamily.has_value()  || transferFamily != indices.presentFamily.value()))
+        {
+            indices.transferFamily    = transferFamily;
+            indices.hasSeparateTransfer = true;
+        }
+        else
+            indices.transferFamily = transferFamily;
+    }
+    if (indices.transferFamily.has_value() &&
+        indices.computeFamily.has_value() &&
+        indices.transferFamily.value() == indices.computeFamily.value())
+    {
+        const auto& queueFamily = queueFamilies[indices.computeFamily.value()];
+        if  (queueFamily.queueCount >= 2)
+            indices.canSplitComputeXfer = true;
     }
     return indices;
 }
@@ -666,6 +862,8 @@ void ShowcaseApp::createSwapchain()
 
 void ShowcaseApp::recreateSwapchain()
 {
+    vkDeviceWaitIdle(device);
+
     VkExtent2D extent = window.getExtent();
     while (extent.width == 0 || extent.height == 0) {
         glfwWaitEvents();
@@ -790,6 +988,9 @@ void ShowcaseApp::createSyncObjects()
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
+    VkFenceCreateInfo acqFenceCI{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    acqFenceCI.flags = 0;
+
     
     for (size_t i = 0; i < imageRenderFinished.size(); ++i)
     {
@@ -807,6 +1008,12 @@ void ShowcaseApp::createSyncObjects()
 
         if (vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to create inFlight fence!");
+        
+        if (vkCreateFence(device, &fenceInfo, nullptr, &computeFences[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create compute fence!");
+        
+        if (vkCreateFence(device, &acqFenceCI, nullptr, &imageAcquiredFences[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase:failed to create image acquired fence");
     }
 }
 
@@ -814,6 +1021,7 @@ void ShowcaseApp::createOffscreenTargets()
 {
     for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
+        offscreenValid[i] = false;
         VkExtent3D extent3D{};
         extent3D.width  = swapChainExtent.width;
         extent3D.height = swapChainExtent.height;
@@ -879,11 +1087,21 @@ void ShowcaseApp::createOffscreenTargets()
         viewCreateInfo.subresourceRange.layerCount = 1;
     
         if (vkCreateImageView(device, &viewCreateInfo, nullptr, &offscreenView[i]) != VK_SUCCESS)
+        {
+            if (offscreenImage[i])  { vkDestroyImage(device, offscreenImage[i], nullptr);  offscreenImage[i] = VK_NULL_HANDLE; }
+            if (offscreenMemory[i]) { vkFreeMemory(device, offscreenMemory[i], nullptr);   offscreenMemory[i] = VK_NULL_HANDLE; }
             throw std::runtime_error("Showcase: failed to create offscreen image view!");
+        }
         VkSemaphoreCreateInfo semCreateInfo{};
         semCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         if (vkCreateSemaphore(device, &semCreateInfo, nullptr, &computeDone[i]) != VK_SUCCESS)
+        {
+            if (offscreenView[i])   { vkDestroyImageView(device, offscreenView[i], nullptr); offscreenView[i] = VK_NULL_HANDLE; }
+            if (offscreenImage[i])  { vkDestroyImage(device, offscreenImage[i], nullptr);    offscreenImage[i] = VK_NULL_HANDLE; }
+            if (offscreenMemory[i]) { vkFreeMemory(device, offscreenMemory[i], nullptr);     offscreenMemory[i] = VK_NULL_HANDLE; }
             throw std::runtime_error("Showcase: failed to create compute semaphore");
+        }
+        offscreenValid[i] = true;
     }
 }
 
@@ -1397,26 +1615,22 @@ void ShowcaseApp::destroyOffscreenTarget()
 {
     for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
-        if (computeDone[i])
+        if (!offscreenValid[i])
         {
-            vkDestroySemaphore(device, computeDone[i], nullptr);
-            computeDone[i] = VK_NULL_HANDLE;
+            if (computeDone[i])   { vkDestroySemaphore(device, computeDone[i], nullptr); computeDone[i] = VK_NULL_HANDLE; }
+            if (offscreenView[i]) { vkDestroyImageView(device, offscreenView[i], nullptr); offscreenView[i] = VK_NULL_HANDLE; }
+            if (offscreenImage[i]){ vkDestroyImage(device, offscreenImage[i], nullptr);    offscreenImage[i] = VK_NULL_HANDLE; }
+            if (offscreenMemory[i]){vkFreeMemory(device, offscreenMemory[i], nullptr);     offscreenMemory[i] = VK_NULL_HANDLE; }
+            continue;
         }
-        if (offscreenView[i])
-        {
-            vkDestroyImageView(device, offscreenView[i], nullptr);
-            offscreenView[i] = VK_NULL_HANDLE;
-        }
-        if (offscreenImage[i])
-        {
-            vkDestroyImage(device, offscreenImage[i], nullptr);
-            offscreenImage[i] = VK_NULL_HANDLE;
-        }
-        if (offscreenMemory[i])
-        {
-            vkFreeMemory(device, offscreenMemory[i], nullptr);
-            offscreenMemory[i] = VK_NULL_HANDLE;
-        }
+
+        if (computeDone[i])   { vkDestroySemaphore(device, computeDone[i], nullptr); computeDone[i] = VK_NULL_HANDLE; }
+        if (offscreenView[i]) { vkDestroyImageView(device, offscreenView[i], nullptr); offscreenView[i] = VK_NULL_HANDLE; }
+        if (offscreenImage[i]){ vkDestroyImage(device, offscreenImage[i], nullptr);    offscreenImage[i] = VK_NULL_HANDLE; }
+        if (offscreenMemory[i]){vkFreeMemory(device, offscreenMemory[i], nullptr);     offscreenMemory[i] = VK_NULL_HANDLE; }
+
+        offscreenValid[i] = false;
+        
     }
 }
 

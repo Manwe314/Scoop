@@ -23,6 +23,19 @@
 
 #define VALIDATE true
 
+struct FrameUpload {
+    VkBuffer        staging = VK_NULL_HANDLE;
+    VkDeviceMemory  stagingMem = VK_NULL_HANDLE;
+    void*           mapped = nullptr;
+    VkDeviceSize    capacity = 0;
+
+    VkCommandPool   uploadPool = VK_NULL_HANDLE;
+    VkCommandBuffer uploadCB = VK_NULL_HANDLE;
+
+    VkSemaphore     uploadDone = VK_NULL_HANDLE;
+    VkFence         uploadFence = VK_NULL_HANDLE;
+
+};
 
 struct InputState {
     bool rmbDown = false;
@@ -39,6 +52,11 @@ struct QueueFamiliyIndies
     std::optional<uint32_t> graphicsFamily;
     std::optional<uint32_t> presentFamily;
     std::optional<uint32_t> computeFamily;
+    std::optional<uint32_t> transferFamily;
+
+    bool hasDedicatedTransfer   = false;
+    bool hasSeparateTransfer    = false;
+    bool canSplitComputeXfer    = false;
 
     bool isComplete() { return graphicsFamily.has_value() && presentFamily.has_value() && computeFamily.has_value(); }
 };
@@ -119,16 +137,21 @@ private:
     VkExtent2D swapChainExtent;
 
     std::vector<VkImageView> swapChainImageViews;
+    bool offscreenValid[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+
 
     VkQueue graphicsQueue;
     VkQueue presentQueue;
     VkQueue computeQueue;
+    VkQueue transferQueue;
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkSemaphore> imageRenderFinished;
     std::vector<VkFence>     inFlightFences;
     std::vector<VkFence>     imagesInFlight;
+    VkFence imageAcquiredFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
 
     uint32_t currentFrame = 0;
 
@@ -190,6 +213,11 @@ private:
 
     uint32_t graphicsFamily = VK_QUEUE_FAMILY_IGNORED;
     uint32_t computeFamily  = VK_QUEUE_FAMILY_IGNORED;
+    uint32_t presentFamily = VK_QUEUE_FAMILY_IGNORED;
+    uint32_t transferFamily = VK_QUEUE_FAMILY_IGNORED;
+
+    bool hasTransferQueue = false;
+    bool hasDedicatedTransfer = false;
     
     void imageBarrier(VkCommandBuffer cmd, VkImage image,
                             VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
@@ -202,6 +230,10 @@ private:
     VkSurfaceKHR surface;
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
     const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    FrameUpload frameUpload[SwapChain::MAX_FRAMES_IN_FLIGHT];
+    VkFence computeFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
 
     Scene scene;
     TLAS topLevelAS;
@@ -224,12 +256,13 @@ private:
     void makeInstances(Scene& scene);
     void update(float dt);
     void initLookAnglesFromCamera();
+    void initUploadResources();
+    void ensureUploadStagingCapacity(uint32_t frameIndex, VkDeviceSize need);
     void MouseButtonCallback(GLFWwindow* w, int button, int action, int mods);
     void CursorPosCallback(GLFWwindow*, double x, double y);
     std::vector<const char *> getRequiredExtensions();
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
     void ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDeviceSize neededSize, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags);
-    void uploadBytesToDeviceLocal(const void* src, VkDeviceSize bytes, VkBuffer dstDeviceLocal);
     void uploadTLASForFrame(uint32_t frameIndex, const std::vector<TLASNodeGPU>& tlasNodes, const std::vector<InstanceDataGPU>& tlasInstances, const std::vector<uint32_t>& instanceIndices);
     void frameTLASPrepare(uint32_t frameIndex);
     void setupDebugMessenger();

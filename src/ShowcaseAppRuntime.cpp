@@ -2,6 +2,12 @@
 #include <iostream>
 
 // --------- helpers -----------
+static VkDeviceSize alignUp(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1) & ~(a - 1); }
+
+static inline VkDeviceSize nonZero(VkDeviceSize v, VkDeviceSize min = 16)
+{
+    return v ? v : min;
+}
 
 inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
 {
@@ -64,6 +70,7 @@ inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
 {
     TLAS tlas;
     tlas.instances = instances;
+    tlas.root = 0;
 
     const uint32_t N = static_cast<uint32_t>(instances.size());
     tlas.instanceIndices.resize(N);
@@ -113,8 +120,15 @@ inline InstanceDataGPU packInstance(const InstanceData& data)
     return out;
 }
 
-void ShowcaseApp::ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDeviceSize neededSize, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags)
+void ShowcaseApp::ensureBufferCapacity(
+    VkBuffer& buf, VkDeviceMemory& mem,
+    VkDeviceSize neededSize,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags flags)
 {
+    
+    neededSize = nonZero(neededSize, 16);
+
     if (buf != VK_NULL_HANDLE)
     {
         VkMemoryRequirements req{};
@@ -126,36 +140,19 @@ void ShowcaseApp::ensureBufferCapacity(VkBuffer& buf, VkDeviceMemory& mem, VkDev
         buf = VK_NULL_HANDLE;
         mem = VK_NULL_HANDLE;
     }
+
     createBuffer(device, physicalDevice, neededSize, usage, flags, buf, mem);
 }
 
-void ShowcaseApp::uploadBytesToDeviceLocal(const void* src, VkDeviceSize bytes, VkBuffer dstDeviceLocal)
-{
-    if (bytes == 0) return;
-
-    VkBuffer stageBuf = VK_NULL_HANDLE;
-    VkDeviceMemory stageMem = VK_NULL_HANDLE;
-    createBuffer(device, physicalDevice, bytes,
-                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 stageBuf, stageMem);
-
-    void* p = nullptr;
-    vkMapMemory(device, stageMem, 0, bytes, 0, &p);
-    std::memcpy(p, src, size_t(bytes));
-    vkUnmapMemory(device, stageMem);
-
-    copyBuffer(device, computeCommandPool, computeQueue, stageBuf, dstDeviceLocal, bytes);
-
-    vkDestroyBuffer(device, stageBuf, nullptr);
-    vkFreeMemory(device, stageMem, nullptr);
-}
-
 void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
-                                    const std::vector<TLASNodeGPU>& tlasNodes,
-                                    const std::vector<InstanceDataGPU>& tlasInstances,
-                                    const std::vector<uint32_t>& instanceIndices)
+                                     const std::vector<TLASNodeGPU>& tlasNodes,
+                                     const std::vector<InstanceDataGPU>& tlasInstances,
+                                     const std::vector<uint32_t>& instanceIndices)
 {
+    if (computeFences[frameIndex] != VK_NULL_HANDLE)
+        vkWaitForFences(device, 1, &computeFences[frameIndex], VK_TRUE, UINT64_MAX);
+    auto& frame = frameUpload[frameIndex];
+
     const VkDeviceSize nodesBytes = VkDeviceSize(tlasNodes.size()) * sizeof(TLASNodeGPU);
     const VkDeviceSize instBytes  = VkDeviceSize(tlasInstances.size()) * sizeof(InstanceDataGPU);
     const VkDeviceSize idxBytes   = VkDeviceSize(instanceIndices.size()) * sizeof(uint32_t);
@@ -163,48 +160,112 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     ensureBufferCapacity(tlasNodesBuf[frameIndex], tlasNodesMem[frameIndex], nodesBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
     ensureBufferCapacity(tlasInstBuf[frameIndex],  tlasInstMem[frameIndex],  instBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
     ensureBufferCapacity(tlasIdxBuf[frameIndex],   tlasIdxMem[frameIndex],   idxBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
+    VkDeviceSize off = 0;
+    const VkDeviceSize A = 16;
+
+    const VkDeviceSize nodesOff = off;
+    off = alignUp(off + nodesBytes, A);
+    const VkDeviceSize instOff  = off;
+    off = alignUp(off + instBytes,  A);
+    const VkDeviceSize idxOff   = off;
+    off = alignUp(off + idxBytes,   A);
+    const VkDeviceSize total    = off;
+
+    ensureUploadStagingCapacity(frameIndex, total);
+
     if (nodesBytes)
-        uploadBytesToDeviceLocal(tlasNodes.data(), nodesBytes, tlasNodesBuf[frameIndex]);
+        std::memcpy(static_cast<char*>(frame.mapped) + nodesOff, tlasNodes.data(), size_t(nodesBytes));
     if (instBytes) 
-        uploadBytesToDeviceLocal(tlasInstances.data(), instBytes, tlasInstBuf[frameIndex]);
+        std::memcpy(static_cast<char*>(frame.mapped) + instOff,  tlasInstances.data(), size_t(instBytes));
     if (idxBytes)
-        uploadBytesToDeviceLocal(instanceIndices.data(), idxBytes, tlasIdxBuf[frameIndex]);
+        std::memcpy(static_cast<char*>(frame.mapped) + idxOff,   instanceIndices.data(), size_t(idxBytes));
+    
+
+    auto copyIf = [&](VkBuffer dst, VkDeviceSize size, VkDeviceSize srcOff)
+    {
+        if (!size)
+            return;
+        VkBufferCopy c{ srcOff, 0, size };
+        vkCmdCopyBuffer(frame.uploadCB, frame.staging, dst, 1, &c);
+    };
+
+    copyIf(tlasNodesBuf[frameIndex], nodesBytes, nodesOff);
+    copyIf(tlasInstBuf[frameIndex],  instBytes,  instOff);
+    copyIf(tlasIdxBuf[frameIndex],   idxBytes,   idxOff);
+
+    if (hasDedicatedTransfer && computeFamily != transferFamily)
+    {
+        std::vector<VkBufferMemoryBarrier> rels;
+        auto addRel = [&](VkBuffer b, VkDeviceSize sz)
+        {
+            if (!b || !sz)
+                return;
+            VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.dstAccessMask = 0;
+            bb.srcQueueFamilyIndex = transferFamily;
+            bb.dstQueueFamilyIndex = computeFamily;
+            bb.buffer = b;
+            bb.offset = 0;
+            bb.size   = VK_WHOLE_SIZE;
+            rels.push_back(bb);
+        };
+        addRel(tlasNodesBuf[frameIndex], nodesBytes);
+        addRel(tlasInstBuf[frameIndex],  instBytes);
+        addRel(tlasIdxBuf[frameIndex],   idxBytes);
+
+        if (!rels.empty())
+        {
+            vkCmdPipelineBarrier(frame.uploadCB,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, nullptr, (uint32_t)rels.size(), rels.data(), 0, nullptr);
+        }
+    }
+    else
+    {
+        std::vector<VkBufferMemoryBarrier> vis;
+        auto addVis = [&](VkBuffer b, VkDeviceSize sz)
+        {
+            if (!b || !sz)
+                return;
+            VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bb.buffer = b;
+            bb.offset = 0;
+            bb.size   = VK_WHOLE_SIZE;
+            vis.push_back(bb);
+        };
+        addVis(tlasNodesBuf[frameIndex], nodesBytes);
+        addVis(tlasInstBuf[frameIndex],  instBytes);
+        addVis(tlasIdxBuf[frameIndex],   idxBytes);
+
+        if (!vis.empty())
+        {
+            vkCmdPipelineBarrier(frame.uploadCB,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, static_cast<uint32_t>(vis.size()), vis.data(), 0, nullptr);
+        }
+    }
 
     VkDescriptorBufferInfo b6{ tlasNodesBuf[frameIndex], 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo b7{ tlasInstBuf[frameIndex],  0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo b8{ tlasIdxBuf[frameIndex],   0, VK_WHOLE_SIZE };
 
     VkWriteDescriptorSet w[3]{};
-    for (int i = 0; i < 3; i++)
-        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-
-    w[0].dstSet = computeSets[frameIndex];
-    w[0].dstBinding = 6;
-    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w[0].descriptorCount = 1;
-    w[0].pBufferInfo = &b6;
-
-    w[1].dstSet = computeSets[frameIndex];
-    w[1].dstBinding = 7;
-    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w[1].descriptorCount = 1;
-    w[1].pBufferInfo = &b7;
-
-    w[2].dstSet = computeSets[frameIndex];
-    w[2].dstBinding = 8;
-    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w[2].descriptorCount = 1;
-    w[2].pBufferInfo = &b8;
-
+    for (int i = 0; i < 3; ++i) w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 6, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b6, nullptr };
+    w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 7, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b7, nullptr };
+    w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 8, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b8, nullptr };
     vkUpdateDescriptorSets(device, 3, w, 0, nullptr);
 }
 
@@ -283,7 +344,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-            computeFamily, computeFamily);
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
         offscreenInitialized[i] = true;
     }
     else
@@ -294,6 +355,64 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
             graphicsFamily, computeFamily);
     }
+
+    if (hasDedicatedTransfer && computeFamily != transferFamily)
+    {
+        std::vector<VkBufferMemoryBarrier> acqs;
+        acqs.reserve(3);
+        auto addAcq = [&](VkBuffer b)
+        {
+            if (!b) return;
+            VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            bb.srcQueueFamilyIndex = transferFamily;
+            bb.dstQueueFamilyIndex = computeFamily;
+            bb.buffer = b;
+            bb.offset = 0;
+            bb.size   = VK_WHOLE_SIZE;
+            acqs.push_back(bb);
+        };
+        addAcq(tlasNodesBuf[i]);
+        addAcq(tlasInstBuf[i]);
+        addAcq(tlasIdxBuf[i]);
+
+        if (!acqs.empty())
+        {
+            vkCmdPipelineBarrier(computeCommandBuffers[i],
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, static_cast<uint32_t>(acqs.size()), acqs.data(), 0, nullptr);
+        }
+    }
+    else
+    {
+        std::vector<VkBufferMemoryBarrier> vis;
+        vis.reserve(3);
+        auto addVis = [&](VkBuffer b)
+        {
+            if (!b) return;
+            VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bb.buffer = b;
+            bb.offset = 0;
+            bb.size   = VK_WHOLE_SIZE;
+            vis.push_back(bb);
+        };
+        addVis(tlasNodesBuf[i]);
+        addVis(tlasInstBuf[i]);
+        addVis(tlasIdxBuf[i]);
+
+        if (!vis.empty())
+        {
+            vkCmdPipelineBarrier(computeCommandBuffers[i],
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, static_cast<uint32_t>(vis.size()), vis.data(), 0, nullptr);
+        }
+    }
+
     
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeSets[i], 0, nullptr);
@@ -301,6 +420,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     uint32_t gx = (swapChainExtent.width  + 7)/8;
     uint32_t gy = (swapChainExtent.height + 7)/8;
     vkCmdDispatch(cmd, gx, gy, 1);
+
 
     imageBarrier(cmd, offscreenImage[i],
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
@@ -466,21 +586,49 @@ void ShowcaseApp::run()
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex = 0;
-        VkResult acq = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
-
+        vkResetFences(device, 1, &imageAcquiredFences[currentFrame]);
+        VkResult acq = vkAcquireNextImageKHR(
+            device, swapChain, UINT64_MAX,
+            VK_NULL_HANDLE,
+            imageAcquiredFences[currentFrame],
+            &imageIndex
+        );
         if (acq == VK_ERROR_OUT_OF_DATE_KHR)
-        {
+        { 
             recreateSwapchain();
             continue;
-        } 
-        else if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
-            throw std::runtime_error("Showcase: failed to acquire swapchain image!");
+        }
+        if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
+            throw std::runtime_error("failed to acquire swapchain image");
+        vkWaitForFences(device, 1, &imageAcquiredFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         if (imagesInFlight[imageIndex] != VK_NULL_HANDLE)
             vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
         imagesInFlight[imageIndex] = inFlightFences[currentFrame];
 
+        vkWaitForFences(device, 1, &frameUpload[currentFrame].uploadFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &frameUpload[currentFrame].uploadFence);
+        vkWaitForFences(device, 1, &computeFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+        vkResetCommandBuffer(frameUpload[currentFrame].uploadCB, 0);
+        VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(frameUpload[currentFrame].uploadCB, &bi);
         frameTLASPrepare(currentFrame);
+        vkEndCommandBuffer(frameUpload[currentFrame].uploadCB);
+
+        VkSubmitInfo up{};
+        up.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        up.commandBufferCount = 1;
+        up.pCommandBuffers = &frameUpload[currentFrame].uploadCB;
+        up.signalSemaphoreCount = 1;
+        up.pSignalSemaphores = &frameUpload[currentFrame].uploadDone;
+
+        VkQueue uploadQ = (hasDedicatedTransfer ? transferQueue : computeQueue);
+        if (vkQueueSubmit(uploadQ, 1, &up, frameUpload[currentFrame].uploadFence) != VK_SUCCESS)
+            throw std::runtime_error("Showcase App: failed to subbmit TLAS upload");
+
+
         //temp
         ParamsGPU params = makeParamsForVulkan(
                             swapChainExtent,
@@ -500,30 +648,41 @@ void ShowcaseApp::run()
         recordComputeCommands(currentFrame);
         recordGraphicsCommands(currentFrame, imageIndex);
 
-        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+        vkResetFences(device, 1, &computeFences[currentFrame]);
         
         VkSubmitInfo submitCompute{};
         submitCompute.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        VkSemaphore waitSems[1]   = { frameUpload[currentFrame].uploadDone };
+        VkPipelineStageFlags waitComputeStages[1] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+        submitCompute.waitSemaphoreCount = 1;
+        submitCompute.pWaitSemaphores    = waitSems;
+        submitCompute.pWaitDstStageMask  = waitComputeStages;
+
         submitCompute.commandBufferCount = 1;
         submitCompute.pCommandBuffers = &computeCommandBuffers[currentFrame];
         submitCompute.signalSemaphoreCount = 1;
         submitCompute.pSignalSemaphores = &computeDone[currentFrame];
         
-        if (vkQueueSubmit(computeQueue, 1, &submitCompute, VK_NULL_HANDLE) != VK_SUCCESS)
+        if (vkQueueSubmit(computeQueue, 1, &submitCompute, computeFences[currentFrame]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to submit compute command buffer!");
 
         VkPipelineStageFlags waitStage[2] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
         VkSemaphore signalSem[2] = {imageAvailableSemaphores[currentFrame], computeDone[currentFrame]};
 
+        VkPipelineStageFlags waitStages[1] = { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
+        VkSemaphore          waits[1]      = { computeDone[currentFrame] };
         VkSubmitInfo submitGraphics{};
         submitGraphics.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitGraphics.waitSemaphoreCount = 2;
-        submitGraphics.pWaitSemaphores = signalSem;
-        submitGraphics.pWaitDstStageMask = waitStage;
-        submitGraphics.commandBufferCount = 1;
-        submitGraphics.pCommandBuffers = &graphicsCommandBuffers[currentFrame];
+        submitGraphics.waitSemaphoreCount   = 1;
+        submitGraphics.pWaitSemaphores      = waits;
+        submitGraphics.pWaitDstStageMask    = waitStages;
+        submitGraphics.commandBufferCount   = 1;
+        submitGraphics.pCommandBuffers      = &graphicsCommandBuffers[currentFrame];
         submitGraphics.signalSemaphoreCount = 1;
-        submitGraphics.pSignalSemaphores = &imageRenderFinished[imageIndex];
+        submitGraphics.pSignalSemaphores    = &imageRenderFinished[imageIndex];
+
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
         if (vkQueueSubmit(graphicsQueue, 1, &submitGraphics, inFlightFences[currentFrame]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to submit graphics command buffer!");
