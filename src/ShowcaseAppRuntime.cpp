@@ -46,8 +46,11 @@ inline uint32_t buildRecursive(TLAS& tlas, std::vector<uint32_t>& idx, uint32_t 
 
     if (cb.min[axis] == cb.max[axis])
     {
-        node.first = first;
-        node.count = count;
+        uint32_t mid = first + count / 2;
+        uint32_t left  = buildRecursive(tlas, idx, first, mid - first);
+        uint32_t right = buildRecursive(tlas, idx, mid,   first + count - mid);
+        node.left = int32_t(left);
+        node.right = int32_t(right);
         return makeNode(tlas, node);
     }
 
@@ -149,6 +152,8 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
                                      const std::vector<InstanceDataGPU>& tlasInstances,
                                      const std::vector<uint32_t>& instanceIndices)
 {
+    // std::cout << "b box min: " << tlasNodes[0].bmin.x << " " << tlasNodes[0].bmin.y << " " << tlasNodes[0].bmin.z << std::endl;
+    // std::cout << "b box max: " << tlasNodes[0].bmax.x << " " << tlasNodes[0].bmax.y << " " << tlasNodes[0].bmax.z << std::endl;
     if (computeFences[frameIndex] != VK_NULL_HANDLE)
         vkWaitForFences(device, 1, &computeFences[frameIndex], VK_TRUE, UINT64_MAX);
     auto& frame = frameUpload[frameIndex];
@@ -575,8 +580,17 @@ void ShowcaseApp::run()
     createCommandPoolAndBuffers();
     uploadStaticData();
 
+    using clock = std::chrono::high_resolution_clock;
+
+    double fps = 0.0;
+    double avgMs = 0.0;
+    const int history = 100;
+    std::array<double, history> samples{};
+    int cursor = 0;
+
     while (!window.shouldClose())
     {
+        auto t0 = clock::now();
         glfwPollEvents();
         update(1.0f);
 
@@ -707,6 +721,18 @@ void ShowcaseApp::run()
             throw std::runtime_error("Showcase: failed to present swapchain image!");
 
         currentFrame = (currentFrame + 1) % SwapChain::MAX_FRAMES_IN_FLIGHT;
+        
+        if (FPS)
+        {
+            auto t1 = clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    
+            samples[cursor++ % history] = ms;
+            double sum = 0.0; for (double s : samples) sum += s;
+            avgMs = sum / history;
+            fps = 1000.0 / avgMs;
+            std::cout << "avg FPS: " << fps << " avg MS: " << avgMs << std::endl;
+        }
     }
 
     vkDeviceWaitIdle(device);

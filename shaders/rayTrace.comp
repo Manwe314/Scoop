@@ -184,8 +184,11 @@ bool intersectingAABB(const in Ray ray, const in vec3 bbMin, const in vec3 bbMax
         float maxBoxA = bbMax[axis];
 
         if (abs(directionI) <= 1e-8)
+        {
             if (originI < minBoxA || originI > maxBoxA)
                 return false;
+
+        }
         else
         {
             float inverseDirectionI = 1.0 / directionI;
@@ -296,7 +299,7 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
     hit.instanceIndex = 0xFFFFFFFFu;
 }
 
-void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
+void traverseBLAS(in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
 {
     float tEnter, tExit;
     
@@ -335,6 +338,11 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
             {
                 hit.primitiveIndex = left_start + triBase + primIndex;
                 return;
+            }
+            else
+            {
+                stackPointer--;
+                continue;
             }
         }
 
@@ -387,7 +395,11 @@ void main()
     //Init TLAS with root node to begin everything
     uint TLASStack[30];
     int TLASStackPointer = 0;
-    TLASStack[TLASStackPointer] = Params.rootIndex;
+    if (Params.rootIndex >= tlasNodes.length())
+        TLASStack[TLASStackPointer] = tlasNodes.length() - 1;
+    else
+        TLASStack[TLASStackPointer] = Params.rootIndex;
+        
     float tEnter, tExit;
 
     //make the main ray.
@@ -410,7 +422,9 @@ void main()
             }
             while (hit.instanceIndex != 0xFFFFFFFFu)
             {
+
                 Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+                
                 traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax));
                 if (hit.primitiveIndex != 0xFFFFFFFFu)
                     break;
@@ -421,7 +435,6 @@ void main()
                 ray.color = vec3(1.0);
                 break;
             }
-
             if (hit.instanceIndex != 0xFFFFFFFFu && viewBB)
                 ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
@@ -443,7 +456,7 @@ void main()
             // update Ray color based on sampling output
 
 
-                // update Ray origin and direction based on 
+            // update Ray origin and direction based on 
             if (terminate < 1.0)
                 break;
             else
@@ -452,6 +465,7 @@ void main()
     }
     else
         ray.color = vec3(1.0);
+
     
     imageStore(outImage, ivec2(pixel), vec4(ray.color, 1.0));
 }

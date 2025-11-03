@@ -1,19 +1,15 @@
 errors:
-    empty state struct variables crash showcase startup;
-    params buffer needs seperate descriptor set
 
 
 to-add later:
     unspliting in SBVH construction;
     add texture support from object to showcase;
     add feedback on ui actions
-    scene construction
-    buffers -> vector of buffers <SBVHNodes>
-    construct TLAS for scene
     rotation + compute params;
     
 
 tomorrow?
-    finish up scene construction
-    obj loading threads?
+    TLAS OBJ transforms need FIXING
     
+
+

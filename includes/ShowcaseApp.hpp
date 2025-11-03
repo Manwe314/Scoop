@@ -22,6 +22,7 @@
 
 
 #define VALIDATE true
+#define FPS true
 
 struct FrameUpload {
     VkBuffer        staging = VK_NULL_HANDLE;
