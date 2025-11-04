@@ -22,7 +22,7 @@
 
 
 #define VALIDATE true
-#define FPS true
+#define FPS false
 
 struct FrameUpload {
     VkBuffer        staging = VK_NULL_HANDLE;
@@ -145,6 +145,10 @@ private:
     VkQueue presentQueue;
     VkQueue computeQueue;
     VkQueue transferQueue;
+
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    float timestampPeriodNs = 0.0f;
+    bool queryPrimed[SwapChain::MAX_FRAMES_IN_FLIGHT]{false};
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
@@ -286,6 +290,7 @@ private:
     void destroyGraphicsDescriptors();
     void createFullscreenGraphicsPipeline();
     void createCommandPoolAndBuffers();
+    void createQueryPool();
     void destroyCommandPoolAndBuffers();
     void destorySSBOdata();
     void uploadStaticData();

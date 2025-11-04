@@ -695,8 +695,6 @@ void UiApp::finalizeSceneForLaunch()
         obj.meshID = meshID;
 
         obj.boundingBox = scene.meshes[meshID].bottomLevelAccelerationStructure.outerBoundingBox;
-
-        obj.transformAABB();
     }
 }
 

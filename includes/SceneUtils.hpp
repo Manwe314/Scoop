@@ -8,6 +8,10 @@
 #include <stdexcept>
 #include <algorithm>
 #include <glm/glm.hpp>
+#include <glm/common.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/string_cast.hpp>
+
 
 
 
@@ -189,7 +193,9 @@ struct SceneObject {
     AABB boundingBox;
     RotationAnimation animation;
 
-    inline void transformAABB() {
+    inline AABB transformAABB()
+    {
+        AABB worldBoundingBox;
         AffineMatrix matrix = transform.affineTransform();
         glm::vec3 center = 0.5f * (boundingBox.min + boundingBox.max);
         glm::vec3 extent = 0.5f * (boundingBox.max - boundingBox.min);
@@ -200,8 +206,9 @@ struct SceneObject {
         glm::mat3 Abslin{ glm::abs(lin[0]), glm::abs(lin[1]), glm::abs(lin[2]) };
         glm::vec3 centerWorld = lin * center + translate;
         glm::vec3 extentWorld = Abslin * extent;
-        boundingBox.min = centerWorld - extentWorld;
-        boundingBox.max = centerWorld + extentWorld;
+        worldBoundingBox.min = centerWorld - extentWorld;
+        worldBoundingBox.max = centerWorld + extentWorld;
+        return worldBoundingBox;
     }
 };
 

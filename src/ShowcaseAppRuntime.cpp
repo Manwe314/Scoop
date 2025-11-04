@@ -2,6 +2,13 @@
 #include <iostream>
 
 // --------- helpers -----------
+static inline uint32_t qpBase(uint32_t fi) { return fi * 4u; }
+static inline uint32_t qpGfxBegin(uint32_t fi){ return qpBase(fi) + 0; }
+static inline uint32_t qpGfxEnd  (uint32_t fi){ return qpBase(fi) + 1; }
+static inline uint32_t qpCmpBegin(uint32_t fi){ return qpBase(fi) + 2; }
+static inline uint32_t qpCmpEnd  (uint32_t fi){ return qpBase(fi) + 3; }
+
+
 static VkDeviceSize alignUp(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1) & ~(a - 1); }
 
 static inline VkDeviceSize nonZero(VkDeviceSize v, VkDeviceSize min = 16)
@@ -67,6 +74,22 @@ inline uint32_t buildRecursive(TLAS& tlas, std::vector<uint32_t>& idx, uint32_t 
     node.left  = static_cast<int32_t>(left);
     node.right = static_cast<int32_t>(right);
     return makeNode(tlas, node);
+}
+
+inline void updateInstances(std::vector<InstanceData>& instances, Scene& scene)
+{
+    for (int i = 0; i < scene.objects.size(); i++)
+    {
+        auto& object = scene.objects[i];
+        float speed = object.animation.SpeedScalar * 0.02;
+        object.transform.rotation = glm::mod(object.transform.rotation + object.animation.rotationSpeedPerAxis * speed, 360.0f);
+        instances[i].worldAABB = object.transformAABB();
+        instances[i].modelToWorld = object.transform.affineTransform();
+        instances[i].worldToModel = affineInverse(instances[i].modelToWorld);
+        std::cout << "after Transforming:" << std::endl;
+        std::cout << "BB MAX: " << glm::to_string(instances[i].worldAABB.max) << " BB MIN: " << glm::to_string(instances[i].worldAABB.min) << std::endl;
+    }
+    
 }
 
 inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
@@ -343,6 +366,9 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(cmd, &beginInfo);
     
+    vkCmdResetQueryPool(cmd, queryPool, qpCmpBegin(i), 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, qpCmpBegin(i));
+    
     if (!offscreenInitialized[i])
     {
         imageBarrier(cmd, offscreenImage[i],
@@ -433,6 +459,8 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         computeFamily, graphicsFamily);
 
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, qpCmpEnd(i));
+    
     vkEndCommandBuffer(cmd);
 }
 
@@ -444,6 +472,9 @@ void ShowcaseApp::recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImage
     VkCommandBufferBeginInfo cmdBufferBeginInfo{};
     cmdBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(cmd, &cmdBufferBeginInfo);
+
+    vkCmdResetQueryPool(cmd, queryPool, qpGfxBegin(frameIndex), 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,    queryPool, qpGfxBegin(frameIndex));
 
     
     VkClearValue clear{};
@@ -466,6 +497,8 @@ void ShowcaseApp::recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImage
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
     vkCmdEndRenderPass(cmd);
+
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, qpGfxEnd(frameIndex));
 
     vkEndCommandBuffer(cmd);
 }
@@ -530,13 +563,18 @@ void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
 {
     std::vector<TLASNodeGPU> nodes;
     std::vector<InstanceDataGPU> instances;
+    for (auto& inst: ShowcaseApp::instances)
+    {
+        std::cout << "Before Transforming: " <<std::endl;
+        std::cout << "BB MAX: " << glm::to_string(inst.worldAABB.max) << " BB MIN: " << glm::to_string(inst.worldAABB.min) << std::endl;
+    }
+    updateInstances(ShowcaseApp::instances, scene);
     topLevelAS = buildTLAS(ShowcaseApp::instances);
 
     for (auto& node : topLevelAS.nodes)
         nodes.push_back(packNode(node));
     for (auto& instance : topLevelAS.instances)
         instances.push_back(packInstance(instance));
-    
     uploadTLASForFrame(frameIndex, nodes, instances, topLevelAS.instanceIndices);
 }
 
@@ -624,6 +662,32 @@ void ShowcaseApp::run()
         vkResetFences(device, 1, &frameUpload[currentFrame].uploadFence);
         vkWaitForFences(device, 1, &computeFences[currentFrame], VK_TRUE, UINT64_MAX);
 
+        if (queryPool && queryPrimed[currentFrame])
+        {
+            const uint32_t fi = currentFrame;
+            uint64_t ts[4] = {};
+            VkResult r = vkGetQueryPoolResults(
+                device, queryPool,
+                qpBase(fi), 4,
+                sizeof(ts), ts, sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            
+            if (r == VK_SUCCESS)
+            {
+                const double toMs = timestampPeriodNs / 1.0e6;
+                double gfxMs = double(ts[1] - ts[0]) * toMs;
+                double cmpMs = double(ts[3] - ts[2]) * toMs;
+            
+                double combinedMs = cmpMs + gfxMs;
+            
+                if (FPS) {
+                    std::cout << "[GPU] compute: " << cmpMs
+                              << " ms, graphics: " << gfxMs
+                              << " ms, combined: " << combinedMs << " ms\n";
+                }
+            }
+            queryPrimed[currentFrame] = false;
+        }
         vkResetCommandBuffer(frameUpload[currentFrame].uploadCB, 0);
         VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -661,6 +725,7 @@ void ShowcaseApp::run()
 
         recordComputeCommands(currentFrame);
         recordGraphicsCommands(currentFrame, imageIndex);
+        queryPrimed[currentFrame] = true;
 
         vkResetFences(device, 1, &computeFences[currentFrame]);
         
@@ -731,7 +796,7 @@ void ShowcaseApp::run()
             double sum = 0.0; for (double s : samples) sum += s;
             avgMs = sum / history;
             fps = 1000.0 / avgMs;
-            std::cout << "avg FPS: " << fps << " avg MS: " << avgMs << std::endl;
+            std::cout << "[CPU] avg FPS: " << fps << " avg MS: " << avgMs << std::endl;
         }
     }
 

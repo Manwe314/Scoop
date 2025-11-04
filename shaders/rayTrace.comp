@@ -420,6 +420,11 @@ void main()
                 ray.color = vec3(1.0);
                 break;
             }
+            else if (viewBB)
+            {
+                ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
+                break;
+            }
             while (hit.instanceIndex != 0xFFFFFFFFu)
             {
 
@@ -431,12 +436,7 @@ void main()
                 traverseTLAS(ray, hit, TLASStack, TLASStackPointer, tEnter, tExit);
             }
             if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
-            {
                 ray.color = vec3(1.0);
-                break;
-            }
-            if (hit.instanceIndex != 0xFFFFFFFFu && viewBB)
-                ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
                 ray.color = vec3(1.0);
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)

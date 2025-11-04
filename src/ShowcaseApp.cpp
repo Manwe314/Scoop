@@ -334,6 +334,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
         throw std::runtime_error("Showcase: invalid GPU passed");
     physicalDevice = gpu;
     createLogicalDevice();
+    createQueryPool();
     initUploadResources();
     createSwapchain();
     createImageViews();
@@ -376,6 +377,9 @@ ShowcaseApp::~ShowcaseApp()
     
     destroyComputeDescriptors();
     destroyOffscreenTarget();
+
+    if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
+
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
@@ -434,6 +438,52 @@ ShowcaseApp::~ShowcaseApp()
 ShowcaseApp* ShowcaseApp::s_active = nullptr;
 
 // ~~~~~ Creation ~~~~~
+
+void ShowcaseApp::createQueryPool()
+{
+    if (queryPool)
+    {
+        vkDestroyQueryPool(device, queryPool, nullptr);
+        queryPool = VK_NULL_HANDLE;
+    }
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> fams(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, fams.data());
+
+    auto checkFam = [&](uint32_t famIdx, const char* name) -> uint32_t
+    {
+        if (famIdx >= familyCount)
+            throw std::runtime_error(std::string("Showcase: invalid ") + name + " queue family index");
+        uint32_t bits = fams[famIdx].timestampValidBits;
+        if (bits == 0) {
+            std::cerr << "Showcase warning: " << name
+                      << " queue family does not support timestamp queries.\n";
+        }
+        return bits;
+    };
+
+    const uint32_t gfxBits = checkFam(graphicsFamily, "graphics");
+    const uint32_t cmpBits = checkFam(computeFamily,  "compute");
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    timestampPeriodNs = props.limits.timestampPeriod;
+
+    constexpr uint32_t kQueriesPerQueue  = 2;
+    constexpr uint32_t kQueuesToTime     = 2;
+    constexpr uint32_t kQueriesPerFrame  = kQueriesPerQueue * kQueuesToTime;
+    const uint32_t     totalQueries      = kQueriesPerFrame * SwapChain::MAX_FRAMES_IN_FLIGHT;
+
+    VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    ci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+    ci.queryCount = totalQueries;
+
+    if (vkCreateQueryPool(device, &ci, nullptr, &queryPool) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create timestamp query pool");
+}
+
 
 void ShowcaseApp::makeInstances(Scene& scene)
 {
@@ -518,7 +568,7 @@ void ShowcaseApp::createLogicalDevice()
 {
     QueueFamiliyIndies indices = findQueueFamilies(physicalDevice);
     if (!indices.isComplete())
-        throw std::runtime_error("Queue families incomplete.");
+        throw std::runtime_error("Showcase: Queue families incomplete.");
 
     uint32_t familyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
