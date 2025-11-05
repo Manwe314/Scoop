@@ -302,86 +302,106 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
 }
 
 
-void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax, inout float closestT)
 {
     float tEnter, tExit;
-    
-    if (!intersectingAABB(ray, bbMin, bbMax, 1e-8, 1e30, tEnter, tExit))
+    if (!intersectingAABB(ray, bbMin, bbMax, 1e-6, closestT, tEnter, tExit))
         return;
-    
+
+    const float ORDER_EPS = 1e-6;
+
     uint stack[64];
-    int stackPointer = 0;
+    int  stackPointer = 0;
     stack[stackPointer] = nodeOffset;
+
 
     while (stackPointer >= 0)
     {
-        float tNearLeft, tNearRight, tFarLeft, tFarRight;
-        
-        vec4 left_count_n_max = bvhNodes[stack[stackPointer]].bbMax_left__left_count;
-        vec3 left_bbMax = vec3(left_count_n_max);
-        uint left_count = floatBitsToUint(left_count_n_max.w);
 
-        vec4 left_start_n_min = bvhNodes[stack[stackPointer]].bbMin_left__left_start;
-        vec3 left_bbMin = vec3(left_start_n_min);
-        uint left_start = floatBitsToUint(left_start_n_min.w);
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+
+        uint nodeIndex = stack[stackPointer];
+
+        vec4 left_count_n_max = bvhNodes[nodeIndex].bbMax_left__left_count;
+        vec3 left_bbMax       = vec3(left_count_n_max);
+        uint left_count       = floatBitsToUint(left_count_n_max.w);
+
+        vec4 left_start_n_min = bvhNodes[nodeIndex].bbMin_left__left_start;
+        vec3 left_bbMin       = vec3(left_start_n_min);
+        uint left_start       = floatBitsToUint(left_start_n_min.w);
 
         if (left_count != 0xFFFFFFFFu)
         {
-            float min_distance = 1e30;
-            uint primIndex = 0;
-
-            for (uint i = 0; i < left_count; i++)
-            {
-                if (moller_trumbore(ray, hit, vec3(triangles[left_start + triBase + i].vertex_0),
-                                              vec3(triangles[left_start + triBase + i].edge_vec1),
-                                              vec3(triangles[left_start + triBase + i].edge_vec2), min_distance))
-                    primIndex = i;
-            }
-            if (min_distance != 1e30)
-            {
-                hit.primitiveIndex = left_start + triBase + primIndex;
-                return;
-            }
-            else
+            float tNearLeaf, tFarLeaf;
+            bool leafHit = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, closestT, tNearLeaf, tFarLeaf);
+            if (!leafHit || tNearLeaf >= closestT)
             {
                 stackPointer--;
                 continue;
             }
+
+            float min_distance = closestT;
+            uint  primIndex    = 0xFFFFFFFFu;
+
+            for (uint i = 0; i < left_count; i++)
+            {
+                uint prim = left_start + triBase + i;
+                if (moller_trumbore(ray, hit,
+                                    vec3(triangles[prim].vertex_0),
+                                    vec3(triangles[prim].edge_vec1),
+                                    vec3(triangles[prim].edge_vec2),
+                                    min_distance))
+                {
+                    primIndex = prim;
+                }
+            }
+            if (primIndex != 0xFFFFFFFFu)
+            {
+                closestT = min_distance;
+                hit.primitiveIndex = primIndex;
+            }
+            stackPointer--;
+            continue;
         }
 
-        vec3 right_bbMax = vec3(bvhNodes[stack[stackPointer]].bbMax_right__right_count);
+        vec3 right_bbMax = vec3(bvhNodes[nodeIndex].bbMax_right__right_count);
 
-        vec4 right_start_n_Min = bvhNodes[stack[stackPointer]].bbMin_right__right_start;
-        vec3 right_bbMin = vec3(right_start_n_Min);
-        uint right_start = floatBitsToUint(right_start_n_Min.w);
+        vec4 right_start_n_Min = bvhNodes[nodeIndex].bbMin_right__right_start;
+        vec3 right_bbMin       = vec3(right_start_n_Min);
+        uint right_start       = floatBitsToUint(right_start_n_Min.w);
 
 
-        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, 1e30, tNearLeft, tFarLeft);
-        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, 1e30, tNearRight, tFarRight);
+        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  1e-6, closestT, tNearLeft,  tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, closestT, tNearRight, tFarRight);
+
+        if (!hitLeft && !hitRight)
+        {
+            stackPointer--;
+            continue;
+        }
 
         if (hitLeft && hitRight)
         {
-            if (tNearLeft > tNearRight)
-            {
-                stack[stackPointer] = left_start + nodeOffset;
-                stackPointer++;
-                stack[stackPointer] = right_start + nodeOffset;
-            }
-            else
-            {
-                stack[stackPointer] = right_start + nodeOffset;
-                stackPointer++;
-                stack[stackPointer] = left_start + nodeOffset;
-            }
+            bool leftIsNear = (abs(tNearLeft - tNearRight) > ORDER_EPS) ? (tNearLeft < tNearRight) : (left_start < right_start);
+
+            uint nearIdx = leftIsNear ? (left_start  + nodeOffset) : (right_start + nodeOffset);
+            uint farIdx  = leftIsNear ? (right_start + nodeOffset) : (left_start  + nodeOffset);
+
+            stack[stackPointer] = farIdx;
+            stackPointer++;
+            stack[stackPointer] = nearIdx;
         }
         else if (hitLeft)
+        {
             stack[stackPointer] = left_start + nodeOffset;
-        else if (hitRight)
-            stack[stackPointer] = right_start + nodeOffset;
+        }
         else
-            stackPointer--;
+        {
+            stack[stackPointer] = right_start + nodeOffset;
+        }
     }
 }
+
 
 
 // ~~~~~~~~~~~~~ main ~~~~~~~~~~~~~
@@ -432,8 +452,8 @@ void main()
             {
 
                 Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
-                
-                traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax));
+                float closestT = 1e30;
+                traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax), closestT);
                 if (hit.primitiveIndex != 0xFFFFFFFFu)
                     break;
                 traverseTLAS(ray, hit, TLASStack, TLASStackPointer, tEnter, tExit);
