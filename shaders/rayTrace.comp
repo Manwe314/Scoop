@@ -111,9 +111,9 @@ vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4
 
 vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
 {
-    return normalize(vec3(dot(row0.xyz, direction),
-                          dot(row1.xyz, direction),
-                          dot(row2.xyz, direction)));
+    return vec3(dot(row0.xyz, direction),
+                dot(row1.xyz, direction),
+                dot(row2.xyz, direction));
 }
 
 Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
@@ -227,7 +227,7 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     vec3 P = cross(ray.direction, edge_2);
     float det = dot(P, edge_1);
 
-    if (det <= 1e-8)
+    if (abs(det) <= 1e-8)
         return false;
     
     float inverse_det = 1 / det;
@@ -242,6 +242,8 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     if (v < 0.0 || (v + u) > 1.0)
         return false;
     float t = dot(edge_2, Q) * inverse_det;
+    if (t < 1e-8)
+        return false;
     if (t < min_distance)
     {
         min_distance = t;
@@ -299,7 +301,8 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
     hit.instanceIndex = 0xFFFFFFFFu;
 }
 
-void traverseBLAS(in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
+
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax)
 {
     float tEnter, tExit;
     
@@ -353,8 +356,8 @@ void traverseBLAS(in Ray ray, inout Hit hit, const in uint nodeOffset, const in 
         uint right_start = floatBitsToUint(right_start_n_Min.w);
 
 
-        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, tEnter, tExit, tNearLeft, tFarLeft);
-        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
+        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, 1e30, tNearLeft, tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, 1e30, tNearRight, tFarRight);
 
         if (hitLeft && hitRight)
         {
@@ -445,6 +448,8 @@ void main()
                                            vec3(shadingTris[hit.primitiveIndex].vertexNormal1_uv),
                                            vec3(shadingTris[hit.primitiveIndex].vertexNormal2_uv),
                                            hit.barrycentricUV.x, hit.barrycentricUV.y);
+                bool frontFace = dot(normal, -ray.direction) > 0.0;
+                vec3 adjustedNormal = frontFace ? normal : -normal;
                 ray.color = directionHue(normal);
             }
 

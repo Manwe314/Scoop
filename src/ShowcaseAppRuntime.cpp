@@ -18,11 +18,9 @@ static inline VkDeviceSize nonZero(VkDeviceSize v, VkDeviceSize min = 16)
 
 inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
 {
-    AABB b;
+    AABB b = makeEmptyAABB();
     for (uint32_t i = 0; i < count; ++i)
-    {
-        b = merge(b, inst[idx[first + i]].worldAABB);
-    }
+        mergeInto(b, inst[idx[first + i]].worldAABB);
     return b;
 }
 
@@ -86,10 +84,7 @@ inline void updateInstances(std::vector<InstanceData>& instances, Scene& scene)
         instances[i].worldAABB = object.transformAABB();
         instances[i].modelToWorld = object.transform.affineTransform();
         instances[i].worldToModel = affineInverse(instances[i].modelToWorld);
-        std::cout << "after Transforming:" << std::endl;
-        std::cout << "BB MAX: " << glm::to_string(instances[i].worldAABB.max) << " BB MIN: " << glm::to_string(instances[i].worldAABB.min) << std::endl;
     }
-    
 }
 
 inline TLAS buildTLAS(const std::vector<InstanceData>& instances)
@@ -123,7 +118,7 @@ inline TLASNodeGPU packNode(const TLASNode& node)
     return out;
 }
 
-inline InstanceDataGPU packInstance(const InstanceData& data)
+inline InstanceDataGPU packInstance(const InstanceData& data, AABB modelBB)
 {
     InstanceDataGPU out{};
 
@@ -138,8 +133,8 @@ inline InstanceDataGPU packInstance(const InstanceData& data)
     out.worldToModel[1] = glm::vec4(W[0][1], W[1][1], W[2][1], W[3][1]);
     out.worldToModel[2] = glm::vec4(W[0][2], W[1][2], W[2][2], W[3][2]);
 
-    out.aabbMin = glm::vec4(data.worldAABB.min, 0.0f);
-    out.aabbMax = glm::vec4(data.worldAABB.max, 0.0f);
+    out.aabbMin = glm::vec4(modelBB.min, 0.0f);
+    out.aabbMax = glm::vec4(modelBB.max, 0.0f);
 
     out.bases0 = glm::uvec4(data.nodeBase, data.triBase, data.shadeTriBase, data.materialBase);
     out.bases1 = glm::uvec4(data.textureBase, 0u, 0u, 0u);
@@ -175,8 +170,6 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
                                      const std::vector<InstanceDataGPU>& tlasInstances,
                                      const std::vector<uint32_t>& instanceIndices)
 {
-    // std::cout << "b box min: " << tlasNodes[0].bmin.x << " " << tlasNodes[0].bmin.y << " " << tlasNodes[0].bmin.z << std::endl;
-    // std::cout << "b box max: " << tlasNodes[0].bmax.x << " " << tlasNodes[0].bmax.y << " " << tlasNodes[0].bmax.z << std::endl;
     if (computeFences[frameIndex] != VK_NULL_HANDLE)
         vkWaitForFences(device, 1, &computeFences[frameIndex], VK_TRUE, UINT64_MAX);
     auto& frame = frameUpload[frameIndex];
@@ -563,18 +556,17 @@ void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
 {
     std::vector<TLASNodeGPU> nodes;
     std::vector<InstanceDataGPU> instances;
-    for (auto& inst: ShowcaseApp::instances)
-    {
-        std::cout << "Before Transforming: " <<std::endl;
-        std::cout << "BB MAX: " << glm::to_string(inst.worldAABB.max) << " BB MIN: " << glm::to_string(inst.worldAABB.min) << std::endl;
-    }
     updateInstances(ShowcaseApp::instances, scene);
     topLevelAS = buildTLAS(ShowcaseApp::instances);
 
     for (auto& node : topLevelAS.nodes)
         nodes.push_back(packNode(node));
-    for (auto& instance : topLevelAS.instances)
-        instances.push_back(packInstance(instance));
+    for (int i = 0; i < topLevelAS.instances.size(); i++)
+    {
+        auto& instance = topLevelAS.instances[i];
+        AABB modelBB = scene.objects[i].boundingBox;
+        instances.push_back(packInstance(instance, modelBB));
+    }
     uploadTLASForFrame(frameIndex, nodes, instances, topLevelAS.instanceIndices);
 }
 
