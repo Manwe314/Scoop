@@ -24,6 +24,18 @@
 #define VALIDATE true
 #define FPS false
 
+
+struct GpuTexture {
+    VkImage        image        = VK_NULL_HANDLE;
+    VkImageView    view         = VK_NULL_HANDLE;
+    VkDeviceMemory memory       = VK_NULL_HANDLE;
+    uint32_t       width        = 0;
+    uint32_t       height       = 0;
+    uint32_t       mipLevels    = 1;
+    VkFormat       format       = VK_FORMAT_UNDEFINED;
+};
+
+
 struct FrameUpload {
     VkBuffer        staging = VK_NULL_HANDLE;
     VkDeviceMemory  stagingMem = VK_NULL_HANDLE;
@@ -159,6 +171,7 @@ private:
 
 
     uint32_t currentFrame = 0;
+    VkSampler textureSampler = VK_NULL_HANDLE;
 
     InputState input;
 
@@ -247,6 +260,10 @@ private:
     std::vector<MollerTriangle> intersectionTrinagles;
     std::vector<ShadingTriangle> shadingTriangles;
     std::vector<MaterialGPU> materials;
+    std::map<std::string, uint32_t> textureIndexMap;
+    std::vector<ImageRGBA8> flattened;
+    std::vector<GpuTexture> gpuTextures;
+    
 
     static ShowcaseApp* s_active;
 
@@ -292,20 +309,26 @@ private:
     void createCommandPoolAndBuffers();
     void createQueryPool();
     void destroyCommandPoolAndBuffers();
+    void destroySceneTextures();
     void destorySSBOdata();
     void uploadStaticData();
     void createParamsBuffers();
     void writeStaticComputeBindings();
     void writeParamsBindingForFrame(uint32_t frameIndex);
+    void createTextureSampler(VkPhysicalDevice phys, float requestedAniso = 8.0f);
     void recordComputeCommands(uint32_t i);
     void recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImageIndex);
     void createBuffer(VkDevice device, VkPhysicalDevice phys, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags memFlags, VkBuffer& outBuf, VkDeviceMemory& outMem);
+    void uploadTextureImages();
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
     SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &capabilities);
     VkShaderModule createShaderModule(const std::vector<char>& code);
+    void FlattenSceneTexturesAndRemapMaterials();
+    GpuTexture createTextureFromImageRGBA8(const ImageRGBA8& img, VkDevice device, VkPhysicalDevice phys, VkFormat format, bool generateMips);
+    
     inline VkSwapchainKHR validOldSwapchain() const { return swapChain != VK_NULL_HANDLE ? swapChain : VK_NULL_HANDLE; }
 
     inline ParamsGPU makeDefaultParams(uint32_t width = 1, uint32_t height = 1, uint32_t rootIndex = 0, float time = 0.0f, const glm::vec3& camPos = glm::vec3(0.0f))

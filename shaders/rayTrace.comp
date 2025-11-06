@@ -1,4 +1,5 @@
 #version 460
+#extension GL_EXT_nonuniform_qualifier : enable
 // ------ Cpu side passed Objects -------
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -69,6 +70,7 @@ struct InstanceDataGPU {
 layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
 layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
 layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
+layout(set = 0, binding = 9) uniform sampler2D tex2D[];
 
 // ---------- RayTracing Engine ----------
 

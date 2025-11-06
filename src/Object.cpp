@@ -1,4 +1,7 @@
 #include "Object.hpp"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 
 enum {
     VERTEX,
@@ -26,15 +29,19 @@ enum {
 
 static std::string trimAfterLastSlashOrBackslash(const std::string& input)
 {
-    size_t posSlash = input.find_last_of('/');
-    size_t posBackslash = input.find_last_of('\\');
+    std::filesystem::path path(input);
+    std::filesystem::path directory = path.parent_path();
 
-    size_t pos = std::max(posSlash, posBackslash);
-
-    if (pos == std::string::npos)
+    if (directory.empty())
         return "";
 
-    return input.substr(0, pos + 1);
+    std::string str = directory.make_preferred().string();
+
+    const char sep = std::filesystem::path::preferred_separator;
+    if (!str.empty() && str.back() != sep)
+        str.push_back(sep);
+
+    return str;
 }
 
 static std::vector<std::string> split(const std::string& str, char delimiter)
@@ -80,6 +87,49 @@ static inline bool correctFace(Face& face, const std::vector<glm::vec3>& vertice
                 (*face.normals)[i] = normals.size() - std::abs((*face.normals)[i]) + 1;
     }
     return true;
+}
+
+static constexpr int    maxWidth     = 4096;
+static constexpr int    maxHeight    = 4096;
+static constexpr size_t maxPixels    = size_t(maxWidth) * size_t(maxHeight);
+
+static inline bool isPngSignature(const char* path)
+{
+    FILE* f = std::fopen(path, "rb");
+    if (!f)
+        return false;
+    unsigned char sig[8] = {};
+    size_t n = std::fread(sig, 1, 8, f);
+    std::fclose(f);
+    static const unsigned char pngSignature[8] = { 0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A };
+    return n == 8 && std::equal(std::begin(sig), std::end(sig), std::begin(pngSignature));
+}
+
+static inline ImageRGBA8 loadPngToRGBA8(const std::string& path)
+{
+    if (!isPngSignature(path.c_str()))
+        throw std::runtime_error("MTL file points at an image that is not a PNG file or unreadable: " + path);
+
+    int w=0, h=0, comp=0;
+    if (!stbi_info(path.c_str(), &w, &h, &comp))
+        throw std::runtime_error("stbi_info failed for: " + path);
+    if (w <= 0 || h <= 0)
+        throw std::runtime_error("Invalid image dimensions for: " + path);
+    if (w > maxWidth || h > maxHeight || (size_t(w) * size_t(h) > maxPixels))
+        throw std::runtime_error("Image exceeds 4K guard (" + std::to_string(maxWidth) + "x" + std::to_string(maxHeight) + "): " + std::to_string(w) + "x" + std::to_string(h) + " (" + path + ")");
+
+    int reqChannels = 4;
+    stbi_uc* data = stbi_load(path.c_str(), &w, &h, &comp, reqChannels);
+    if (!data)
+        throw std::runtime_error(std::string("stbi_load failed: ") + stbi_failure_reason());
+
+    ImageRGBA8 img;
+    img.width  = w;
+    img.height = h;
+    img.pixels.assign(data, data + (size_t(w) * size_t(h) * reqChannels));
+    img.filePath = path;
+    stbi_image_free(data);
+    return img;
 }
 
 Object::Object()
@@ -719,9 +769,23 @@ std::string Object::getFileName()
     return p.stem().string();
 }
 
-std::vector<std::string> Object::getTextures()
+std::vector<ImageRGBA8> Object::getTextures()
 {
-    return textrues;
+    std::vector<ImageRGBA8> out;
+    out.reserve(textrues.size());
+
+    for (auto& textureFilePath : textrues)
+    {
+        try
+        {
+            out.push_back(loadPngToRGBA8(textureFilePath));
+        }
+        catch(const std::exception& e)
+        {
+            throw std::runtime_error("Error While Loading Textures: " + std::string(e.what()));
+        }
+    }
+    return out;
 }
 
 Material Object::getDefaultMaterial()

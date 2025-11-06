@@ -1092,13 +1092,13 @@ void UiApp::pollBVHBuilders()
             try {
                 ObjectMeshData data = p.fut.get();
 
-                // Avoid duplicates if someone managed to build same name another way
-                if (findMeshIndexByName(state.scene, data.name) < 0) {
+                if (findMeshIndexByName(state.scene, data.name) < 0)
                     state.scene.meshes.push_back(std::move(data));
-                }
 
                 bvhInFlight.erase(p.name);
-            } catch (const std::exception& e) {
+            }
+            catch (const std::exception& e)
+            {
                 bvhInFlight.erase(p.name);
                 uiState.errorMsg = std::string("BVH build failed for \"") + p.name + "\": " + e.what();
                 uiState.showError = true;
@@ -1107,7 +1107,7 @@ void UiApp::pollBVHBuilders()
             pendingBVH.pop_back();
         }
         else
-            ++i;
+            i++;
     }
 }
 

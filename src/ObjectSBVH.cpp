@@ -175,7 +175,8 @@ static inline uint32_t makeFlags(const Material& m) {
     return f;
 }
 
-static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<std::string>& textures, uint32_t& textureID) {
+static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<std::string>& textures, uint32_t& textureID)
+{
     MaterialGPU gpuMaterial{};
     const float rough = shininessToRoughness(material.shininess);
     glm::uvec4 texture{0};

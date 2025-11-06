@@ -3,6 +3,16 @@
 
 // ~~~~~ helpers ~~~~~~
 
+static ImageRGBA8 makeDummyPink1x1()
+{
+    ImageRGBA8 img;
+    img.width  = 1;
+    img.height = 1;
+    img.pixels = { 255, 0, 255, 255 };
+    img.filePath = "dummy://pink";
+    return img;
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -28,6 +38,12 @@ static std::vector<uint32_t> uniqueIndices(std::initializer_list<std::optional<u
             out.push_back(idx);
     }
     return out;
+}
+
+static void destroyGpuTexture(VkDevice device, GpuTexture& tex) {
+    if (tex.view)   { vkDestroyImageView(device, tex.view, nullptr);  tex.view = VK_NULL_HANDLE; }
+    if (tex.image)  { vkDestroyImage(device, tex.image, nullptr);     tex.image = VK_NULL_HANDLE; }
+    if (tex.memory) { vkFreeMemory(device, tex.memory, nullptr);      tex.memory = VK_NULL_HANDLE; }
 }
 
 VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
@@ -318,6 +334,245 @@ void ShowcaseApp::ensureUploadStagingCapacity(uint32_t frameIndex, VkDeviceSize 
     frame.capacity = newCap;
 }
 
+void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
+{
+    std::vector<ImageRGBA8> flat;
+
+    std::vector<std::vector<uint32_t>> remap(scene.meshes.size());
+    std::cout << "TEST sizes MESH: " << scene.meshes.size() << std::endl;
+
+    for (size_t m = 0; m < scene.meshes.size(); m++)
+    {
+        auto& mesh = scene.meshes[m];
+        remap[m].resize(mesh.textures.size(), 0xFFFFFFFFu);
+        std::cout << "TEST sizes TEXTURES: " << mesh.textures.size() << std::endl;
+
+        for (size_t i = 0; i < mesh.textures.size(); i++)
+        {
+            const ImageRGBA8& img = mesh.textures[i];
+
+            uint32_t globalIdx = 0xFFFFFFFFu;
+
+            if (!img.filePath.empty())
+            {
+                auto it = textureIndexMap.find(img.filePath);
+                if (it != textureIndexMap.end())
+                    globalIdx = it->second;
+                else
+                {
+                    globalIdx = static_cast<uint32_t>(flat.size());
+                    flat.push_back(img);
+                    textureIndexMap.emplace(img.filePath, globalIdx);
+                }
+            }
+            else
+                throw std::runtime_error("ShowcaseApp: Unexpected Texture ImageRGBA8 without filepath found");
+            remap[m][i] = globalIdx;
+        }
+    }
+
+    for (size_t m = 0; m < scene.meshes.size(); m++)
+    {
+        auto& mesh = scene.meshes[m];
+
+        for (auto& mat : mesh.perMeshMaterials)
+        {
+            uint32_t local = mat.textureId.x;
+
+            if (local < remap[m].size())
+            {
+                uint32_t globalIdx = remap[m][local];
+                mat.textureId.x = (globalIdx != 0xFFFFFFFFu) ? globalIdx : 0xFFFFFFFFu;
+            }
+            else 
+                mat.textureId.x = 0xFFFFFFFFu;
+        }
+    }
+
+    flattened = std::move(flat);
+}
+
+static void transitionImage(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess, VkAccessFlags dstAccess, uint32_t baseMip, uint32_t mipCount)
+{
+    VkImageMemoryBarrier barrier{};
+    barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout                       = oldLayout;
+    barrier.newLayout                       = newLayout;
+    barrier.srcAccessMask                   = srcAccess;
+    barrier.dstAccessMask                   = dstAccess;
+    barrier.image                           = image;
+    barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount     = 1;
+    barrier.subresourceRange.baseMipLevel   = baseMip;
+    barrier.subresourceRange.levelCount     = mipCount;
+
+    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+static void generateMipChainBlit(VkPhysicalDevice phys, VkCommandBuffer cmd, VkImage image, VkFormat format, int32_t width, int32_t height, uint32_t mipLevels)
+{
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(phys, format, &props);
+    const bool canBlit = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    if (!canBlit || mipLevels <= 1)
+        return;
+
+    int32_t w = width;
+    int32_t h = height;
+
+    for (uint32_t level = 1; level < mipLevels; ++level)
+    {
+        transitionImage(cmd, image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                        level - 1, 1);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel       = level - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount     = 1;
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {std::max(1, w), std::max(1, h), 1};
+
+        const int32_t nw = std::max(1, w >> 1);
+        const int32_t nh = std::max(1, h >> 1);
+
+        blit.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel       = level;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount     = 1;
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {nw, nh, 1};
+
+        vkCmdBlitImage(cmd,
+                       image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_LINEAR);
+
+        transitionImage(cmd, image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // or FRAGMENT
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                        level - 1, 1);
+
+        w = nw;
+        h = nh;
+    }
+
+    transitionImage(cmd, image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // or FRAGMENT
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    mipLevels - 1, 1);
+}
+
+GpuTexture ShowcaseApp::createTextureFromImageRGBA8(const ImageRGBA8& img, VkDevice device, VkPhysicalDevice phys, VkFormat format, bool generateMips)
+{
+    GpuTexture out{};
+    out.width  = static_cast<uint32_t>(img.width);
+    out.height = static_cast<uint32_t>(img.height);
+    out.format = format;
+    out.mipLevels = generateMips ? (1u + uint32_t(std::floor(std::log2(std::max(out.width, out.height))))) : 1u;
+
+    VkImageCreateInfo createInfo{};
+    createInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    createInfo.imageType     = VK_IMAGE_TYPE_2D;
+    createInfo.format        = format;
+    createInfo.extent        = { out.width, out.height, 1 };
+    createInfo.mipLevels     = out.mipLevels;
+    createInfo.arrayLayers   = 1;
+    createInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    createInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    createInfo.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        (generateMips ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(device, &createInfo, nullptr, &out.image) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateImage failed");
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(device, out.image, &req);
+
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, phys);
+    if (vkAllocateMemory(device, &mai, nullptr, &out.memory) != VK_SUCCESS)
+        throw std::runtime_error("vkAllocateMemory (image) failed");
+
+    vkBindImageMemory(device, out.image, out.memory, 0);
+
+    const VkDeviceSize byteSize = VkDeviceSize(out.width) * out.height * 4;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+
+    createBuffer(device, phys, byteSize,
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging, stagingMem);
+
+    void* mapped = nullptr;
+    vkMapMemory(device, stagingMem, 0, byteSize, 0, &mapped);
+    std::memcpy(mapped, img.pixels.data(), size_t(byteSize));
+    vkUnmapMemory(device, stagingMem);
+
+    VkCommandBuffer cmd = beginOneTimeCmd(device, graphicsCommandPool);
+
+    transitionImage(cmd, out.image,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    0, out.mipLevels);
+
+    VkBufferImageCopy imageCopy{};
+    imageCopy.bufferOffset = 0;
+    imageCopy.bufferRowLength   = 0;
+    imageCopy.bufferImageHeight = 0;
+    imageCopy.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageCopy.imageSubresource.mipLevel       = 0;
+    imageCopy.imageSubresource.baseArrayLayer = 0;
+    imageCopy.imageSubresource.layerCount     = 1;
+    imageCopy.imageOffset = {0,0,0};
+    imageCopy.imageExtent = { out.width, out.height, 1 };
+
+    vkCmdCopyBufferToImage(cmd, staging, out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &imageCopy);
+
+    if (generateMips && out.mipLevels > 1)
+        generateMipChainBlit(phys, cmd, out.image, format, int32_t(out.width), int32_t(out.height), out.mipLevels);
+    else 
+        transitionImage(cmd, out.image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        0, 1);
+
+    endOneTimeCmd(device, graphicsQueue, graphicsCommandPool, cmd);
+
+    vkDestroyBuffer(device, staging, nullptr);
+    vkFreeMemory(device, stagingMem, nullptr);
+
+    VkImageViewCreateInfo imageViewCreateInfo{};
+    imageViewCreateInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    imageViewCreateInfo.image    = out.image;
+    imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    imageViewCreateInfo.format   = format;
+    imageViewCreateInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageViewCreateInfo.subresourceRange.baseMipLevel   = 0;
+    imageViewCreateInfo.subresourceRange.levelCount     = out.mipLevels;
+    imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    imageViewCreateInfo.subresourceRange.layerCount     = 1;
+
+    if (vkCreateImageView(device, &imageViewCreateInfo, nullptr, &out.view) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateImageView failed");
+
+    return out;
+}
+
 // ~~~~ constructor / destructor ~~~~
 
 ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : window(getAspectExtent(scene.camera.aspect, true), getAspectExtent(scene.camera.aspect, false), "Scoop"), scene(scene)
@@ -333,9 +588,11 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     if (gpu == VK_NULL_HANDLE)
         throw std::runtime_error("Showcase: invalid GPU passed");
     physicalDevice = gpu;
+    FlattenSceneTexturesAndRemapMaterials();
     createLogicalDevice();
     createQueryPool();
     initUploadResources();
+    createTextureSampler(gpu);
     createSwapchain();
     createImageViews();
     createSyncObjects();
@@ -351,7 +608,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
     // std::cout << "Name: " << properties.deviceName << std::endl;
-    // DumpScene(ShowcaseApp::scene);
+    DumpScene(ShowcaseApp::scene);
     makeInstances(ShowcaseApp::scene);
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
     std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
@@ -379,6 +636,12 @@ ShowcaseApp::~ShowcaseApp()
     destroyOffscreenTarget();
 
     if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
+    destroySceneTextures();
+    if (textureSampler)
+    {
+        vkDestroySampler(device, textureSampler, nullptr);
+        textureSampler = VK_NULL_HANDLE;
+    }
 
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
@@ -438,6 +701,47 @@ ShowcaseApp::~ShowcaseApp()
 ShowcaseApp* ShowcaseApp::s_active = nullptr;
 
 // ~~~~~ Creation ~~~~~
+
+void ShowcaseApp::createTextureSampler(VkPhysicalDevice phys, float requestedAniso)
+{
+    if (textureSampler != VK_NULL_HANDLE)
+    {
+        vkDestroySampler(device, textureSampler, nullptr);
+        textureSampler = VK_NULL_HANDLE;
+    }
+
+    VkPhysicalDeviceFeatures feats{};
+    vkGetPhysicalDeviceFeatures(phys, &feats);
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(phys, &props);
+
+    const bool enableAniso = feats.samplerAnisotropy == VK_TRUE && requestedAniso > 1.0f;
+    const float maxAniso = enableAniso ? std::min(requestedAniso, props.limits.maxSamplerAnisotropy) : 1.0f;
+
+    VkSamplerCreateInfo createInfo{};
+    createInfo.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    createInfo.magFilter    = VK_FILTER_LINEAR;
+    createInfo.minFilter    = VK_FILTER_LINEAR;
+    createInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    createInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    createInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    createInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+
+    createInfo.anisotropyEnable = enableAniso ? VK_TRUE : VK_FALSE;
+    createInfo.maxAnisotropy    = maxAniso;
+
+    createInfo.minLod     = 0.0f;
+    createInfo.maxLod     = VK_LOD_CLAMP_NONE;
+    createInfo.mipLodBias = 0.0f;
+
+    createInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    createInfo.unnormalizedCoordinates = VK_FALSE;
+
+    if (vkCreateSampler(device, &createInfo, nullptr, &textureSampler) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateSampler failed");
+}
+
 
 void ShowcaseApp::createQueryPool()
 {
@@ -561,6 +865,51 @@ void ShowcaseApp::makeInstances(Scene& scene)
         inst.materialBase = materialBases[object.meshID];
         inst.textureBase = textureBases[object.meshID];
         instances.push_back(inst);
+    }
+}
+
+void ShowcaseApp::uploadTextureImages()
+{
+    gpuTextures.reserve(flattened.size());
+
+    VkFormat fmt = VK_FORMAT_R8G8B8A8_SRGB;
+    for (auto& image : flattened)
+        gpuTextures.push_back(createTextureFromImageRGBA8(image, device, physicalDevice, fmt, true));
+
+    if (gpuTextures.empty())
+        gpuTextures.push_back(createTextureFromImageRGBA8(makeDummyPink1x1(), device, physicalDevice, fmt, false));
+    
+    if (textureSampler == VK_NULL_HANDLE)
+        throw std::runtime_error("ShowcaseApp: textureSampler is null");
+
+    std::vector<VkDescriptorImageInfo> infos;
+    infos.reserve(gpuTextures.size());
+    for (const auto& texture : gpuTextures)
+    {
+        if (texture.view == VK_NULL_HANDLE)
+            throw std::runtime_error("ShowcaseApp: texture has null VkImageView");
+        VkDescriptorImageInfo di{};
+        di.sampler     = textureSampler;
+        di.imageView   = texture.view;
+        di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        infos.push_back(di);
+    }
+
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (computeSets[i] == VK_NULL_HANDLE)
+            continue;
+
+        VkWriteDescriptorSet w{};
+        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet          = computeSets[i];
+        w.dstBinding      = 9;
+        w.dstArrayElement = 0;
+        w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.descriptorCount = static_cast<uint32_t>(infos.size());
+        w.pImageInfo      = infos.data();
+
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
     }
 }
 
@@ -1157,6 +1506,7 @@ void ShowcaseApp::createOffscreenTargets()
 
 void ShowcaseApp::createComputeDescriptors()
 {
+
     VkDescriptorSetLayoutBinding b0{};
     b0.binding = 0;
     b0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1193,7 +1543,13 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorSetLayoutBinding b8 = b6;
     b8.binding = 8;
 
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8};
+    VkDescriptorSetLayoutBinding b9 = {};
+    b9.binding = 9;
+    b9.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    b9.descriptorCount = std::max(1u, static_cast<uint32_t>(flattened.size()));
+    b9.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    std::array<VkDescriptorSetLayoutBinding, 10> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9};
 
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1210,8 +1566,12 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorPoolSize poolSizeBuf{};
     poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizeBuf.descriptorCount = 8 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+
+    VkDescriptorPoolSize poolSizeTex{};
+    poolSizeTex.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizeTex.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT * std::max(1u, static_cast<uint32_t>(flattened.size()));
         
-    std::array<VkDescriptorPoolSize, 2> poolSizes = {poolSizeImg, poolSizeBuf};
+    std::array<VkDescriptorPoolSize, 3> poolSizes = {poolSizeImg, poolSizeBuf, poolSizeTex};
 
     VkDescriptorPoolCreateInfo poolCreateInfo{};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1312,6 +1672,7 @@ void ShowcaseApp::uploadStaticData()
     uploadDeviceLocal(intersectionTrinagles, 0, triangleBuffer, triangleMemory);
     uploadDeviceLocal(shadingTriangles, 0, shadingBuffer, shadingMemory);
     uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
+    uploadTextureImages();
     writeStaticComputeBindings();
 }
 
@@ -1619,6 +1980,15 @@ void ShowcaseApp::createFullscreenGraphicsPipeline()
 
 
 // ~~~~~ Destruction ~~~~~~
+
+void ShowcaseApp::destroySceneTextures()
+{
+    if (device == VK_NULL_HANDLE)
+        return;
+    for (auto& texture : gpuTextures)
+        destroyGpuTexture(device, texture);
+    gpuTextures.clear();
+}
 
 void ShowcaseApp::destroyGraphicsDescriptors()
 {

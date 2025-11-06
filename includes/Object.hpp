@@ -18,6 +18,9 @@
 #include <numeric>
 #include <map>
 #include <unordered_map>
+#include <filesystem>
+
+
 
 struct Bin
 {
@@ -162,6 +165,13 @@ struct PartitionResult {
     AABB     rightBB;
 };
 
+struct ImageRGBA8 {
+    int width;
+    int height;
+    std::vector<uint8_t> pixels;
+    std::string filePath;
+};
+
 
 class Object
 {
@@ -229,7 +239,7 @@ private:
     ~Object();
     SBVH buildSplitBoundingVolumeHierarchy();
     std::vector<MaterialGPU> buildMaterialGPU();
-    std::vector<std::string> getTextures();
+    std::vector<ImageRGBA8> getTextures();
     Material getDefaultMaterial();
     std::string getFileName();
 };

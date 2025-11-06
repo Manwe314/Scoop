@@ -239,7 +239,7 @@ struct Camera {
 struct ObjectMeshData {
     std::string name;
     SBVH bottomLevelAccelerationStructure;
-    std::vector<std::string> textures;
+    std::vector<ImageRGBA8> textures;
     std::vector<MaterialGPU> perMeshMaterials;
 };
 
