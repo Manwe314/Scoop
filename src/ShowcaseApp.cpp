@@ -338,14 +338,10 @@ void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
 {
     std::vector<ImageRGBA8> flat;
 
-    std::vector<std::vector<uint32_t>> remap(scene.meshes.size());
-    std::cout << "TEST sizes MESH: " << scene.meshes.size() << std::endl;
 
     for (size_t m = 0; m < scene.meshes.size(); m++)
     {
         auto& mesh = scene.meshes[m];
-        remap[m].resize(mesh.textures.size(), 0xFFFFFFFFu);
-        std::cout << "TEST sizes TEXTURES: " << mesh.textures.size() << std::endl;
 
         for (size_t i = 0; i < mesh.textures.size(); i++)
         {
@@ -367,7 +363,6 @@ void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
             }
             else
                 throw std::runtime_error("ShowcaseApp: Unexpected Texture ImageRGBA8 without filepath found");
-            remap[m][i] = globalIdx;
         }
     }
 
@@ -375,17 +370,19 @@ void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
     {
         auto& mesh = scene.meshes[m];
 
-        for (auto& mat : mesh.perMeshMaterials)
+        for (auto& material : mesh.perMeshMaterials)
         {
-            uint32_t local = mat.textureId.x;
-
-            if (local < remap[m].size())
-            {
-                uint32_t globalIdx = remap[m][local];
-                mat.textureId.x = (globalIdx != 0xFFFFFFFFu) ? globalIdx : 0xFFFFFFFFu;
-            }
-            else 
-                mat.textureId.x = 0xFFFFFFFFu;
+            uint textureIndex = glm::floatBitsToUint(material.textureId.x);
+            if (textureIndex == 0xFFFFFFFFu)
+                continue;
+            const ImageRGBA8& image = mesh.textures[textureIndex];
+            auto it = textureIndexMap.find(image.filePath);
+            uint32_t globalIndex;
+            if (it != textureIndexMap.end())
+                globalIndex = it->second;
+            else
+                globalIndex = 0xFFFFFFFFu;
+            material.textureId.x = glm::uintBitsToFloat(globalIndex);
         }
     }
 
@@ -607,8 +604,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
-    // std::cout << "Name: " << properties.deviceName << std::endl;
-    DumpScene(ShowcaseApp::scene);
+    // DumpScene(ShowcaseApp::scene);
     makeInstances(ShowcaseApp::scene);
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
     std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
@@ -874,7 +870,7 @@ void ShowcaseApp::uploadTextureImages()
 
     VkFormat fmt = VK_FORMAT_R8G8B8A8_SRGB;
     for (auto& image : flattened)
-        gpuTextures.push_back(createTextureFromImageRGBA8(image, device, physicalDevice, fmt, true));
+        gpuTextures.push_back(createTextureFromImageRGBA8(image, device, physicalDevice, fmt, false));
 
     if (gpuTextures.empty())
         gpuTextures.push_back(createTextureFromImageRGBA8(makeDummyPink1x1(), device, physicalDevice, fmt, false));
@@ -1003,14 +999,19 @@ void ShowcaseApp::createLogicalDevice()
         queueCreateInfos.push_back(qci);
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures{};
-    deviceFeatures.samplerAnisotropy = VK_TRUE;
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT descIdxFeat{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT };
+    descIdxFeat.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descIdxFeat.runtimeDescriptorArray                    = VK_TRUE;
+
+    VkPhysicalDeviceFeatures2 deviceFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    deviceFeatures.features.samplerAnisotropy = VK_TRUE;
+    deviceFeatures.pNext = &descIdxFeat;
 
     VkDeviceCreateInfo createInfo{ };
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos    = queueCreateInfos.data();
-    createInfo.pEnabledFeatures     = &deviceFeatures;
+    createInfo.pNext     = &deviceFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
     if (VALIDATE) {
@@ -1019,7 +1020,7 @@ void ShowcaseApp::createLogicalDevice()
     } else {
         createInfo.enabledLayerCount = 0;
     }
-    deviceFeatures.robustBufferAccess = VK_TRUE;
+    deviceFeatures.features.robustBufferAccess = VK_TRUE;
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
         throw std::runtime_error("Showcase App: failed to make logical device");
 

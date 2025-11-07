@@ -16,13 +16,13 @@ struct MollerTriangle {
     vec4 vertex_0;
     vec4 edge_vec1;
     vec4 edge_vec2;
-    vec4 normal_mat;
 };
 
 struct ShadingTriangle {
     vec4 vertexNormal0_uv;
     vec4 vertexNormal1_uv;
     vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
 };
 
 struct MaterialGPU {
@@ -70,7 +70,7 @@ struct InstanceDataGPU {
 layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
 layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
 layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
-layout(set = 0, binding = 9) uniform sampler2D tex2D[];
+layout(set = 0, binding = 9) uniform sampler2D textures2D[];
 
 // ---------- RayTracing Engine ----------
 
@@ -133,6 +133,18 @@ vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 no
     vec3 normal = w * normal0 + u * normal1 + v * normal2;
     return normalize(normal);
 }
+
+vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2)
+{
+    if (textureIndex == 0xFFFFFFFFu)
+        return vec4(1.0);
+
+    vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
+    UV.y = 1.0 - UV.y;
+    uint index = nonuniformEXT(textureIndex);
+    return textureLod(textures2D[index], UV, 0.0);
+}
+
 
 
 //temp
@@ -261,6 +273,7 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
     while (stackPointer >= 0)
     {
         float tNearLeft, tNearRight, tFarLeft, tFarRight;
+
         uvec4 meta = tlasNodes[stack[stackPointer]].meta;
         if (meta.y > 0)
         {
@@ -268,12 +281,14 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
             stackPointer--;
             return;
         }
+        TLASNodeGPU leftNode = tlasNodes[meta.z];
+        TLASNodeGPU rightNode = tlasNodes[meta.w];
 
-        vec3 left_bbMin = vec3(tlasNodes[meta.z].bbMin);
-        vec3 left_bbMax = vec3(tlasNodes[meta.z].bbMax);
+        vec3 left_bbMin = vec3(leftNode.bbMin);
+        vec3 left_bbMax = vec3(leftNode.bbMax);
 
-        vec3 right_bbMin = vec3(tlasNodes[meta.w].bbMin);
-        vec3 right_bbMax = vec3(tlasNodes[meta.w].bbMax);
+        vec3 right_bbMin = vec3(rightNode.bbMin);
+        vec3 right_bbMax = vec3(rightNode.bbMax);
 
         bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, tEnter, tExit, tNearLeft, tFarLeft);
         bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
@@ -322,13 +337,13 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
 
         float tNearLeft, tNearRight, tFarLeft, tFarRight;
 
-        uint nodeIndex = stack[stackPointer];
+        SBVHNode node = bvhNodes[stack[stackPointer]];
 
-        vec4 left_count_n_max = bvhNodes[nodeIndex].bbMax_left__left_count;
+        vec4 left_count_n_max = node.bbMax_left__left_count;
         vec3 left_bbMax       = vec3(left_count_n_max);
         uint left_count       = floatBitsToUint(left_count_n_max.w);
 
-        vec4 left_start_n_min = bvhNodes[nodeIndex].bbMin_left__left_start;
+        vec4 left_start_n_min = node.bbMin_left__left_start;
         vec3 left_bbMin       = vec3(left_start_n_min);
         uint left_start       = floatBitsToUint(left_start_n_min.w);
 
@@ -348,10 +363,11 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
             for (uint i = 0; i < left_count; i++)
             {
                 uint prim = left_start + triBase + i;
+                MollerTriangle triangle = triangles[prim];
                 if (moller_trumbore(ray, hit,
-                                    vec3(triangles[prim].vertex_0),
-                                    vec3(triangles[prim].edge_vec1),
-                                    vec3(triangles[prim].edge_vec2),
+                                    vec3(triangle.vertex_0),
+                                    vec3(triangle.edge_vec1),
+                                    vec3(triangle.edge_vec2),
                                     min_distance))
                 {
                     primIndex = prim;
@@ -366,9 +382,9 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
             continue;
         }
 
-        vec3 right_bbMax = vec3(bvhNodes[nodeIndex].bbMax_right__right_count);
+        vec3 right_bbMax = vec3(node.bbMax_right__right_count);
 
-        vec4 right_start_n_Min = bvhNodes[nodeIndex].bbMin_right__right_start;
+        vec4 right_start_n_Min = node.bbMin_right__right_start;
         vec3 right_bbMin       = vec3(right_start_n_Min);
         uint right_start       = floatBitsToUint(right_start_n_Min.w);
 
@@ -466,13 +482,28 @@ void main()
                 ray.color = vec3(1.0);
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
             {
-                vec3 normal = interpNormal(vec3(shadingTris[hit.primitiveIndex].vertexNormal0_uv),
-                                           vec3(shadingTris[hit.primitiveIndex].vertexNormal1_uv),
-                                           vec3(shadingTris[hit.primitiveIndex].vertexNormal2_uv),
-                                           hit.barrycentricUV.x, hit.barrycentricUV.y);
-                bool frontFace = dot(normal, -ray.direction) > 0.0;
-                vec3 adjustedNormal = frontFace ? normal : -normal;
-                ray.color = directionHue(normal);
+                ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];
+                vec4 vertex0_data = trinagle.vertexNormal0_uv;
+                vec4 vertex1_data = trinagle.vertexNormal1_uv;
+                vec4 vertex2_data = trinagle.vertexNormal2_uv;
+                vec4 texture_material = trinagle.texture_materialId;
+
+                vec2 vt0 = vec2(vertex0_data.w, texture_material.x);
+                vec2 vt1 = vec2(vertex1_data.w, texture_material.y);
+                vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
+
+                uint materialIndex = floatBitsToUint(texture_material.w);
+
+                uint textureIndex = floatBitsToUint(materials[materialIndex].textureId.x);
+                ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2));
+                if (ray.color == vec3(1.0))
+                {
+                    vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz,
+                                               hit.barrycentricUV.x, hit.barrycentricUV.y);
+                    bool frontFace = dot(normal, -ray.direction) > 0.0;
+                    vec3 adjustedNormal = frontFace ? normal : -normal;
+                    ray.color = directionHue(normal);
+                }
             }
 
             //recursive traversal of TLAS

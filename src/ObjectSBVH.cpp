@@ -179,7 +179,7 @@ static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<
 {
     MaterialGPU gpuMaterial{};
     const float rough = shininessToRoughness(material.shininess);
-    glm::uvec4 texture{0};
+    glm::uvec4 texture{0xFFFFFFFFu};
 
     gpuMaterial.baseColor_opacity = glm::vec4(material.albedo, glm::clamp(material.opacity, 0.0f, 1.0f));
     gpuMaterial.F0_ior_rough = glm::vec4(material.reflectance, glm::clamp(rough, 0.0f, 1.0f));
@@ -190,7 +190,7 @@ static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<
         texture[0] = textureID;
         textureID++;
     }
-    gpuMaterial.textureId = texture;
+    gpuMaterial.textureId = glm::uintBitsToFloat(texture);
 
     return gpuMaterial;
 }
@@ -505,6 +505,7 @@ ShadingTriangle Object::makeShadingTriangle(TriRef& ref)
 {
     ShadingTriangle output{};
     Face face = *ref.referance;
+    const uint32_t matId = getMaterialId(face.material);
     auto getNoraml = [&](int index) -> const glm::vec3& {
         int i = index - 1;
         if (i < 0 || i >= normals.size())
@@ -550,9 +551,10 @@ ShadingTriangle Object::makeShadingTriangle(TriRef& ref)
         vt2 = {0.0f, 0.0f, 0.0f};
     }
 
-    output.vertNormal0_uv = makeNV(vn0, glm::vec2(vt0.x, vt0.y));
-    output.vertNormal1_uv = makeNV(vn1, glm::vec2(vt1.x, vt1.y));
-    output.vertNormal2_uv = makeNV(vn2, glm::vec2(vt2.x, vt2.y));
+    output.vertNormal0_uv = glm::vec4(vn0, vt0.x);
+    output.vertNormal1_uv = glm::vec4(vn1, vt1.x);
+    output.vertNormal2_uv = glm::vec4(vn2, vt2.x);
+    output.texture_materialId = glm::vec4(vt0.y, vt1.y, vt2.y, glm::uintBitsToFloat(matId));
     return output;
 }
 
@@ -560,7 +562,7 @@ MollerTriangle Object::makeMollerTriangle(TriRef& ref)
 {
     MollerTriangle output{};
     Face face = *ref.referance;
-    const uint32_t matId = getMaterialId(face.material);
+    
 
     auto getVertex = [&](int index) -> const glm::vec3& {
         int i = index - 1;
@@ -575,7 +577,6 @@ MollerTriangle Object::makeMollerTriangle(TriRef& ref)
     output.vertex_0 = glm::vec4(v0, 0.0f);
     output.edge_vec1 = glm::vec4((v1 - v0), 0.0f);
     output.edge_vec2 = glm::vec4((v2 - v0), 0.0f);
-    output.normal_mat = glm::vec4(glm::cross((v1 - v0), (v2 - v0)), glm::uintBitsToFloat(matId));
     return output;
 }
 

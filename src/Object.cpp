@@ -115,8 +115,8 @@ static inline ImageRGBA8 loadPngToRGBA8(const std::string& path)
         throw std::runtime_error("stbi_info failed for: " + path);
     if (w <= 0 || h <= 0)
         throw std::runtime_error("Invalid image dimensions for: " + path);
-    if (w > maxWidth || h > maxHeight || (size_t(w) * size_t(h) > maxPixels))
-        throw std::runtime_error("Image exceeds 4K guard (" + std::to_string(maxWidth) + "x" + std::to_string(maxHeight) + "): " + std::to_string(w) + "x" + std::to_string(h) + " (" + path + ")");
+    // if (w > maxWidth || h > maxHeight || (size_t(w) * size_t(h) > maxPixels))
+    //     throw std::runtime_error("Image exceeds 4K guard (" + std::to_string(maxWidth) + "x" + std::to_string(maxHeight) + "): " + std::to_string(w) + "x" + std::to_string(h) + " (" + path + ")");
 
     int reqChannels = 4;
     stbi_uc* data = stbi_load(path.c_str(), &w, &h, &comp, reqChannels);

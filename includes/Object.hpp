@@ -53,17 +53,17 @@ struct alignas(16) ShadingTriangle {
     glm::vec4 vertNormal0_uv;
     glm::vec4 vertNormal1_uv;
     glm::vec4 vertNormal2_uv;
+    glm::vec4 texture_materialId;
 };
-static_assert(sizeof(ShadingTriangle) == 48);
+static_assert(sizeof(ShadingTriangle) == 64);
 
 
 struct alignas(16) MollerTriangle {
     glm::vec4 vertex_0;
     glm::vec4 edge_vec1;
     glm::vec4 edge_vec2;
-    glm::vec4 normal_mat;
 };
-static_assert(sizeof(MollerTriangle) == 64, "Moller Triangle must be 64 bytes");
+static_assert(sizeof(MollerTriangle) == 48, "Moller Triangle must be 48 bytes");
 
 struct alignas(16) BVHNode {
     glm::vec3 bbMin_left;
@@ -131,7 +131,7 @@ struct alignas(16) MaterialGPU {
     glm::vec4 baseColor_opacity;
     glm::vec4 F0_ior_rough;
     glm::vec4 emission_flags;
-    glm::uvec4 textureId;
+    glm::vec4 textureId;
 };
 static_assert(sizeof(MaterialGPU) == 64, "MaterialGPU must be 64 bytes");
 

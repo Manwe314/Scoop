@@ -227,8 +227,27 @@ bool Device::isDeviceSuitableRay(VkPhysicalDevice device) {
   VkPhysicalDeviceFeatures supportedFeatures;
   vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
 
+  bool hasDescIndexingExt = false;
+  
+  uint32_t extCount = 0;
+  vkEnumerateDeviceExtensionProperties(device, nullptr, &extCount, nullptr);
+  std::vector<VkExtensionProperties> exts(extCount);
+  vkEnumerateDeviceExtensionProperties(device, nullptr, &extCount, exts.data());
+  for (const auto& e : exts)
+      if (std::strcmp(e.extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) == 0)
+      {
+        hasDescIndexingExt = true;
+        break;
+      }
+
+  VkPhysicalDeviceDescriptorIndexingFeaturesEXT descIdxFeat{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT };
+  VkPhysicalDeviceFeatures2 feats2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &descIdxFeat };
+  vkGetPhysicalDeviceFeatures2(device, &feats2);
+  const bool needNonUniform  = descIdxFeat.shaderSampledImageArrayNonUniformIndexing == VK_TRUE ? true : false;
+  const bool needRuntimeArr  = descIdxFeat.runtimeDescriptorArray == VK_TRUE ? true : false;
+
   return indices.isCompleteRay() && extensionsSupported && swapChainAdequate &&
-         supportedFeatures.samplerAnisotropy;
+         supportedFeatures.samplerAnisotropy && needNonUniform && needRuntimeArr && hasDescIndexingExt;
 }
 
 bool Device::isDeviceSuitable(VkPhysicalDevice device) {

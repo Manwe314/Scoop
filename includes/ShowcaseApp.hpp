@@ -22,7 +22,7 @@
 
 
 #define VALIDATE true
-#define FPS false
+#define FPS true
 
 
 struct GpuTexture {
@@ -247,7 +247,7 @@ private:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkSurfaceKHR surface;
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
-    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME};
 
     FrameUpload frameUpload[SwapChain::MAX_FRAMES_IN_FLIGHT];
     VkFence computeFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};

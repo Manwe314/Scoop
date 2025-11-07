@@ -13,3 +13,677 @@ tomorrow?
     
 
 
+moller 64 bytes - lunox
+[GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms
+[CPU] avg FPS: 191.965 avg MS: 5.209
+[GPU] compute: 3.808 ms, graphics: 0.282 ms, combined: 4.091 ms
+[CPU] avg FPS: 192.040 avg MS: 5.207
+[GPU] compute: 4.346 ms, graphics: 0.264 ms, combined: 4.609 ms
+[CPU] avg FPS: 191.934 avg MS: 5.210
+[GPU] compute: 4.738 ms, graphics: 0.302 ms, combined: 5.040 ms
+[CPU] avg FPS: 191.917 avg MS: 5.211
+[GPU] compute: 3.803 ms, graphics: 0.257 ms, combined: 4.060 ms
+[CPU] avg FPS: 191.710 avg MS: 5.216
+[GPU] compute: 4.306 ms, graphics: 0.288 ms, combined: 4.595 ms
+[CPU] avg FPS: 191.894 avg MS: 5.211
+[GPU] compute: 3.808 ms, graphics: 0.267 ms, combined: 4.075 ms
+[CPU] avg FPS: 191.973 avg MS: 5.209
+
+
+moller 64 bytes - just a girl translate 0 -50 -100
+[GPU] compute: 48.353 ms, graphics: 0.290 ms, combined: 48.644 ms
+[CPU] avg FPS: 20.268 avg MS: 49.339
+[GPU] compute: 48.297 ms, graphics: 0.322 ms, combined: 48.620 ms
+[CPU] avg FPS: 20.266 avg MS: 49.344
+[GPU] compute: 48.432 ms, graphics: 0.281 ms, combined: 48.714 ms
+[CPU] avg FPS: 20.262 avg MS: 49.354
+[GPU] compute: 49.080 ms, graphics: 0.315 ms, combined: 49.395 ms
+[CPU] avg FPS: 20.262 avg MS: 49.354
+[GPU] compute: 48.291 ms, graphics: 0.278 ms, combined: 48.569 ms
+[CPU] avg FPS: 20.260 avg MS: 49.358
+[GPU] compute: 48.682 ms, graphics: 0.324 ms, combined: 49.006 ms
+[CPU] avg FPS: 20.260 avg MS: 49.359
+
+
+moller 48 bytes - lunox
+[GPU] compute: 4.287 ms, graphics: 0.271 ms, combined: 4.558 ms
+[CPU] avg FPS: 193.786 avg MS: 5.160
+[GPU] compute: 4.256 ms, graphics: 0.296 ms, combined: 4.552 ms
+[CPU] avg FPS: 193.819 avg MS: 5.159
+[GPU] compute: 3.800 ms, graphics: 0.264 ms, combined: 4.065 ms
+[CPU] avg FPS: 193.808 avg MS: 5.160
+[GPU] compute: 3.840 ms, graphics: 0.314 ms, combined: 4.154 ms
+[CPU] avg FPS: 193.998 avg MS: 5.155
+[GPU] compute: 4.371 ms, graphics: 0.252 ms, combined: 4.623 ms
+[CPU] avg FPS: 194.279 avg MS: 5.147
+[GPU] compute: 3.807 ms, graphics: 0.307 ms, combined: 4.114 ms
+[CPU] avg FPS: 194.301 avg MS: 5.147
+
+
+moller 48 bytes - just a girl 
+[GPU] compute: 48.317 ms, graphics: 0.302 ms, combined: 48.618 ms
+[CPU] avg FPS: 20.033 avg MS: 49.919
+[GPU] compute: 48.712 ms, graphics: 0.319 ms, combined: 49.031 ms
+[CPU] avg FPS: 20.036 avg MS: 49.910
+[GPU] compute: 47.985 ms, graphics: 0.293 ms, combined: 48.278 ms
+[CPU] avg FPS: 20.034 avg MS: 49.915
+[GPU] compute: 49.053 ms, graphics: 0.333 ms, combined: 49.386 ms
+[CPU] avg FPS: 20.038 avg MS: 49.906
+[GPU] compute: 48.067 ms, graphics: 0.298 ms, combined: 48.366 ms
+[CPU] avg FPS: 20.036 avg MS: 49.911
+[GPU] compute: 49.144 ms, graphics: 0.352 ms, combined: 49.495 ms
+[CPU] avg FPS: 20.039 avg MS: 49.902
+
+
+moller 48 bytes - lunox With Texture sampling
+[GPU] compute: 4.2788 ms, graphics: 0.279115 ms, combined: 4.55792 ms
+[CPU] avg FPS: 196.709 avg MS: 5.08365
+[GPU] compute: 4.49714 ms, graphics: 0.271719 ms, combined: 4.76885 ms
+[CPU] avg FPS: 196.761 avg MS: 5.0823
+[GPU] compute: 3.79693 ms, graphics: 0.27724 ms, combined: 4.07417 ms
+[CPU] avg FPS: 197.017 avg MS: 5.0757
+[GPU] compute: 3.77615 ms, graphics: 0.275052 ms, combined: 4.0512 ms
+[CPU] avg FPS: 197.039 avg MS: 5.07513
+[GPU] compute: 3.74187 ms, graphics: 0.279271 ms, combined: 4.02115 ms
+[CPU] avg FPS: 197.357 avg MS: 5.06695
+[GPU] compute: 4.04052 ms, graphics: 0.276354 ms, combined: 4.31687 ms
+[CPU] avg FPS: 197.541 avg MS: 5.06224
+
+moller 48 bytes - lunox with texture sampling + struct retreval
+[GPU] compute: 5.54656 ms, graphics: 0.272917 ms, combined: 5.81948 ms
+[CPU] avg FPS: 202.191 avg MS: 4.94583
+[GPU] compute: 3.68089 ms, graphics: 0.269323 ms, combined: 3.95021 ms
+[CPU] avg FPS: 202.243 avg MS: 4.94455
+[GPU] compute: 3.68312 ms, graphics: 0.269427 ms, combined: 3.95255 ms
+[CPU] avg FPS: 202.213 avg MS: 4.94528
+[GPU] compute: 4.34922 ms, graphics: 0.279948 ms, combined: 4.62917 ms
+[CPU] avg FPS: 202.241 avg MS: 4.94461
+[GPU] compute: 3.68453 ms, graphics: 0.26401 ms, combined: 3.94854 ms
+[CPU] avg FPS: 202.252 avg MS: 4.94433
+[GPU] compute: 3.67797 ms, graphics: 0.283594 ms, combined: 3.96156 ms
+[CPU] avg FPS: 202.469 avg MS: 4.93902
+[GPU] compute: 5.16328 ms, graphics: 0.284479 ms, combined: 5.44776 ms
+[CPU] avg FPS: 202.204 avg MS: 4.9455
+[GPU] compute: 4.3699 ms, graphics: 0.278177 ms, combined: 4.64807 ms
+[CPU] avg FPS: 202.119 avg MS: 4.94759
+[GPU] compute: 3.95385 ms, graphics: 0.272187 ms, combined: 4.22604 ms
+[CPU] avg FPS: 202.506 avg MS: 4.93812
+
+
+moller 48 bytes - just a girl with texture CHECK + struct retrival
+[GPU] compute: 50.6249 ms, graphics: 0.305208 ms, combined: 50.9301 ms
+[CPU] avg FPS: 19.4466 avg MS: 51.4228
+[GPU] compute: 50.2675 ms, graphics: 0.326198 ms, combined: 50.5937 ms
+[CPU] avg FPS: 19.4461 avg MS: 51.4241
+[GPU] compute: 49.944 ms, graphics: 0.300052 ms, combined: 50.2441 ms
+[CPU] avg FPS: 19.4433 avg MS: 51.4315
+[GPU] compute: 51.0345 ms, graphics: 0.353906 ms, combined: 51.3884 ms
+[CPU] avg FPS: 19.4452 avg MS: 51.4265
+[GPU] compute: 49.9785 ms, graphics: 0.301927 ms, combined: 50.2805 ms
+[CPU] avg FPS: 19.4461 avg MS: 51.4241
+[GPU] compute: 50.4696 ms, graphics: 0.324062 ms, combined: 50.7937 ms
+[CPU] avg FPS: 19.4422 avg MS: 51.4344
+[GPU] compute: 50.7889 ms, graphics: 0.308437 ms, combined: 51.0973 ms
+[CPU] avg FPS: 19.4414 avg MS: 51.4365
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+// ------ Cpu side passed Objects -------
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D outImage;
+
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 vertex_0;
+    vec4 edge_vec1;
+    vec4 edge_vec2;
+};
+
+struct ShadingTriangle {
+    vec4 vertexNormal0_uv;
+    vec4 vertexNormal1_uv;
+    vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
+};
+
+struct MaterialGPU {
+    vec4 baseColor_opacity;
+    vec4 F0_ior_rough;
+    vec4 emission_flags;
+    vec4 textureId;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 2, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 3, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 4, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+
+layout(set = 0, binding = 5, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  _pad;
+} Params;
+
+struct TLASNodeGPU {
+    vec4  bbMin;           
+    vec4  bbMax;          
+    uvec4 meta;            // x=first, y=count, z=left, w=right
+};
+
+struct InstanceDataGPU {
+    vec4 modelToWorld0;
+    vec4 modelToWorld1;
+    vec4 modelToWorld2;
+
+    vec4 worldToModel0;
+    vec4 worldToModel1;
+    vec4 worldToModel2;
+
+    vec4 aabbMin;
+    vec4 aabbMax;
+
+    uvec4 bases01; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases23; // x=textureBase, y=sbvhRoot
+};
+
+layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
+layout(set = 0, binding = 9) uniform sampler2D textures2D[];
+
+// ---------- RayTracing Engine ----------
+
+
+//~~~~~~~~~~~~~ comp specific data structs ~~~~~~~~~~~~~
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+    vec3 color;
+};
+
+struct Hit {
+    float dist_to_hit; //in world space
+    uint instanceIndex;
+    uint primitiveIndex;
+    vec2 barrycentricUV;
+};
+
+//~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
+
+float rand(const in uvec2 pixel)
+{
+    float time = Params.camPos_time.w;
+    return fract(sin(dot(pixel + time, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+void swap(inout float a, inout float b)
+{
+    float temp = a;
+    a = b;
+    b = temp;
+}
+
+vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, point) + row0.w,
+                dot(row1.xyz, point) + row1.w,
+                dot(row2.xyz, point) + row2.w);
+}
+
+vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, direction),
+                dot(row1.xyz, direction),
+                dot(row2.xyz, direction));
+}
+
+Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    Ray newRay;
+    newRay.color = ray.color;
+    newRay.origin = affineTransformPoint(ray.origin, row0, row1, row2); 
+    newRay.direction = affineTransformDirection(ray.direction, row0, row1, row2);
+    return newRay;
+}
+
+vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 normal2, const in float u, const in float v)
+{
+    float w = 1.0 - u - v;
+    vec3 normal = w * normal0 + u * normal1 + v * normal2;
+    return normalize(normal);
+}
+
+vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2)
+{
+    if (textureIndex == 0xFFFFFFFFu)
+        return vec4(1.0);
+
+    vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
+    UV.y = 1.0 - UV.y;
+    uint index = nonuniformEXT(textureIndex);
+    return textureLod(textures2D[index], UV, 0.0);
+}
+
+
+
+//temp
+vec3 hsv2rgb(vec3 c) { // compact HSV->RGB
+    vec3 p = abs(fract(c.x + vec3(0,2,4)/6.0)*6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p-1.0,0.0,1.0), c.y);
+}
+vec3 directionHue(vec3 n) {
+    n = normalize(n);
+    float az = atan(n.z, n.x);                 // [-pi,pi]
+    float el = asin(clamp(n.y, -1.0, 1.0));    // [-pi/2,pi/2]
+    float H = (az / (2.0*3.14159265)) + 0.5;   // [0,1]
+    float S = 0.7;
+    float V = 0.5 + 0.5 * (el/(0.5*3.14159265)); // brighter when pointing up
+    return hsv2rgb(vec3(H,S,V));
+}
+
+//~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
+Ray generateRay(const in uvec2 pixel)
+{
+    vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
+    UV.y = 1 - UV.y;
+
+    vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
+
+    vec4 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
+    vec4 farPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
+
+    vec3 point0 = nearPoint.xyz / nearPoint.w;
+    vec3 point1 = farPoint.xyz / farPoint.w;
+
+    Ray ray;
+    ray.origin = Params.camPos_time.xyz;
+    ray.direction = normalize(point1 - point0);
+    ray.color = vec3(0.0);
+    return ray;
+}
+
+bool intersectingAABB(const in Ray ray, const in vec3 bbMin, const in vec3 bbMax, const in float tMin, const in float tMax, inout float tEnter, inout float tExit)
+{
+    //ray forula for point P along the ray at some distance t from origin:
+    // P(t) = O + t * D where O is Origin vec3 and D is Normalized vec3 Direction. 
+    float t0 = tMin;
+    float t1 = tMax;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        float originI = ray.origin[axis];
+        float directionI = ray.direction[axis];
+        float minBoxA = bbMin[axis];
+        float maxBoxA = bbMax[axis];
+
+        if (abs(directionI) <= 1e-8)
+        {
+            if (originI < minBoxA || originI > maxBoxA)
+                return false;
+
+        }
+        else
+        {
+            float inverseDirectionI = 1.0 / directionI;
+            float tNearA = (minBoxA - originI) * inverseDirectionI;
+            float tFarA = (maxBoxA - originI) * inverseDirectionI;
+            if (tNearA > tFarA)
+                swap(tNearA, tFarA);
+            
+            t0 = tNearA > t0 ? tNearA : t0;
+            t1 = tFarA < t1 ? tFarA : t1;
+            if (t1 < t0)
+                return false;
+        }
+    }
+    tEnter = t0;
+    tExit = t1;
+    return (tExit >= tMin) && (tEnter <= tMax);
+}
+
+bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, const in vec3 edge_1, const in vec3 edge_2, inout float min_distance)
+{
+    //algorithm final form:
+    /*
+       | t |                     | Q . edge2 |
+       | u | = 1 / (P . edge1) * |   P . T   |
+       | v |                     |   Q . D   |
+    */
+    //where:
+    /*
+        D - Nromalized ray direction
+        P = D X edge2
+        Q = T X edge1
+        T = O - vertex0
+        O - ray Origin
+    */
+    vec3 P = cross(ray.direction, edge_2);
+    float det = dot(P, edge_1);
+
+    if (abs(det) <= 1e-8)
+        return false;
+    
+    float inverse_det = 1 / det;
+    vec3 T = ray.origin - vertex_0;
+
+    float u = dot(T, P) * inverse_det;
+    if (u < 0.0 || u > 1.0)
+        return false;
+    
+    vec3 Q = cross(T, edge_1);
+    float v = dot(ray.direction, Q) * inverse_det;
+    if (v < 0.0 || (v + u) > 1.0)
+        return false;
+    float t = dot(edge_2, Q) * inverse_det;
+    if (t < 1e-8)
+        return false;
+    if (t < min_distance)
+    {
+        min_distance = t;
+        hit.barrycentricUV.x = u;
+        hit.barrycentricUV.y = v;
+        return true;
+    }
+    return false;
+}
+
+void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout int stackPointer, const in float tEnter, const in float tExit)
+{
+    while (stackPointer >= 0)
+    {
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+        uvec4 meta = tlasNodes[stack[stackPointer]].meta;
+        if (meta.y > 0)
+        {
+            hit.instanceIndex = instanceIndices[meta.x];
+            stackPointer--;
+            return;
+        }
+
+        vec3 left_bbMin = vec3(tlasNodes[meta.z].bbMin);
+        vec3 left_bbMax = vec3(tlasNodes[meta.z].bbMax);
+
+        vec3 right_bbMin = vec3(tlasNodes[meta.w].bbMin);
+        vec3 right_bbMax = vec3(tlasNodes[meta.w].bbMax);
+
+        bool hitLeft = intersectingAABB(ray, left_bbMin, left_bbMax, tEnter, tExit, tNearLeft, tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
+
+        if (hitLeft && hitRight)
+        {
+            if (tNearLeft > tNearRight)
+            {
+                stack[stackPointer] = meta.z;
+                stackPointer++;
+                stack[stackPointer] = meta.w;
+            }
+            else
+            {
+                stack[stackPointer] = meta.w;
+                stackPointer++;
+                stack[stackPointer] = meta.z;
+            }
+        }
+        else if (hitLeft)
+            stack[stackPointer] = meta.z;
+        else if (hitRight)
+            stack[stackPointer] = meta.w;
+        else
+            stackPointer--;
+    }
+    hit.instanceIndex = 0xFFFFFFFFu;
+}
+
+
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax, inout float closestT)
+{
+    float tEnter, tExit;
+    if (!intersectingAABB(ray, bbMin, bbMax, 1e-6, closestT, tEnter, tExit))
+        return;
+
+    const float ORDER_EPS = 1e-6;
+
+    uint stack[64];
+    int  stackPointer = 0;
+    stack[stackPointer] = nodeOffset;
+
+
+    while (stackPointer >= 0)
+    {
+
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+
+        uint nodeIndex = stack[stackPointer];
+
+        vec4 left_count_n_max = bvhNodes[nodeIndex].bbMax_left__left_count;
+        vec3 left_bbMax       = vec3(left_count_n_max);
+        uint left_count       = floatBitsToUint(left_count_n_max.w);
+
+        vec4 left_start_n_min = bvhNodes[nodeIndex].bbMin_left__left_start;
+        vec3 left_bbMin       = vec3(left_start_n_min);
+        uint left_start       = floatBitsToUint(left_start_n_min.w);
+
+        if (left_count != 0xFFFFFFFFu)
+        {
+            float tNearLeaf, tFarLeaf;
+            bool leafHit = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, closestT, tNearLeaf, tFarLeaf);
+            if (!leafHit || tNearLeaf >= closestT)
+            {
+                stackPointer--;
+                continue;
+            }
+
+            float min_distance = closestT;
+            uint  primIndex    = 0xFFFFFFFFu;
+
+            for (uint i = 0; i < left_count; i++)
+            {
+                uint prim = left_start + triBase + i;
+                if (moller_trumbore(ray, hit,
+                                    vec3(triangles[prim].vertex_0),
+                                    vec3(triangles[prim].edge_vec1),
+                                    vec3(triangles[prim].edge_vec2),
+                                    min_distance))
+                {
+                    primIndex = prim;
+                }
+            }
+            if (primIndex != 0xFFFFFFFFu)
+            {
+                closestT = min_distance;
+                hit.primitiveIndex = primIndex;
+            }
+            stackPointer--;
+            continue;
+        }
+
+        vec3 right_bbMax = vec3(bvhNodes[nodeIndex].bbMax_right__right_count);
+
+        vec4 right_start_n_Min = bvhNodes[nodeIndex].bbMin_right__right_start;
+        vec3 right_bbMin       = vec3(right_start_n_Min);
+        uint right_start       = floatBitsToUint(right_start_n_Min.w);
+
+
+        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  1e-6, closestT, tNearLeft,  tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, closestT, tNearRight, tFarRight);
+
+        if (!hitLeft && !hitRight)
+        {
+            stackPointer--;
+            continue;
+        }
+
+        if (hitLeft && hitRight)
+        {
+            bool leftIsNear = (abs(tNearLeft - tNearRight) > ORDER_EPS) ? (tNearLeft < tNearRight) : (left_start < right_start);
+
+            uint nearIdx = leftIsNear ? (left_start  + nodeOffset) : (right_start + nodeOffset);
+            uint farIdx  = leftIsNear ? (right_start + nodeOffset) : (left_start  + nodeOffset);
+
+            stack[stackPointer] = farIdx;
+            stackPointer++;
+            stack[stackPointer] = nearIdx;
+        }
+        else if (hitLeft)
+        {
+            stack[stackPointer] = left_start + nodeOffset;
+        }
+        else
+        {
+            stack[stackPointer] = right_start + nodeOffset;
+        }
+    }
+}
+
+
+
+// ~~~~~~~~~~~~~ main ~~~~~~~~~~~~~
+
+void main()
+{
+    //early pixel gate && get pixel XY.
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
+        return;
+
+    bool viewBB = Params._pad == 69 ? true : false;
+    
+    //Init TLAS with root node to begin everything
+    uint TLASStack[30];
+    int TLASStackPointer = 0;
+    if (Params.rootIndex >= tlasNodes.length())
+        TLASStack[TLASStackPointer] = tlasNodes.length() - 1;
+    else
+        TLASStack[TLASStackPointer] = Params.rootIndex;
+        
+    float tEnter, tExit;
+
+    //make the main ray.
+    Ray ray = generateRay(pixel);
+    //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
+    if (intersectingAABB(ray, vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMin), vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMax), 1e-8, 1e30, tEnter, tExit))
+    {
+        //russian rulette termination float
+        float terminate = 0.0;
+        Hit hit = Hit(1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+        //main work loop.
+        while (true)
+        {
+            //record TLAS closest child hit. 
+            traverseTLAS(ray, hit,TLASStack, TLASStackPointer, tEnter, tExit);
+            if (hit.instanceIndex == 0xFFFFFFFFu)
+            {
+                ray.color = vec3(1.0);
+                break;
+            }
+            else if (viewBB)
+            {
+                ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
+                break;
+            }
+            while (hit.instanceIndex != 0xFFFFFFFFu)
+            {
+
+                Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+                float closestT = 1e30;
+                traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax), closestT);
+                if (hit.primitiveIndex != 0xFFFFFFFFu)
+                    break;
+                traverseTLAS(ray, hit, TLASStack, TLASStackPointer, tEnter, tExit);
+            }
+            if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+                ray.color = vec3(1.0);
+            else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+                ray.color = vec3(1.0);
+            else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
+            {
+                vec4 vertex0_data = shadingTris[hit.primitiveIndex].vertexNormal0_uv;
+                vec4 vertex1_data = shadingTris[hit.primitiveIndex].vertexNormal1_uv;
+                vec4 vertex2_data = shadingTris[hit.primitiveIndex].vertexNormal2_uv;
+                vec4 texture_material = shadingTris[hit.primitiveIndex].texture_materialId;
+
+                vec2 vt0 = vec2(vertex0_data.w, texture_material.x);
+                vec2 vt1 = vec2(vertex1_data.w, texture_material.y);
+                vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
+
+                uint materialIndex = floatBitsToUint(texture_material.w);
+
+                uint textureIndex = floatBitsToUint(materials[materialIndex].textureId.x);
+                ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2));
+                if (ray.color == vec3(1.0))
+                {
+                    vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz,
+                                               hit.barrycentricUV.x, hit.barrycentricUV.y);
+                    bool frontFace = dot(normal, -ray.direction) > 0.0;
+                    vec3 adjustedNormal = frontFace ? normal : -normal;
+                    ray.color = directionHue(normal);
+                }
+            }
+
+            //recursive traversal of TLAS
+            // miss logic or BLAS hit
+            // recursive traversal of BLAS
+            // miss logic or trinagle hit
+            // task based sampling over OMEGA hemisphere
+            // update Ray color based on sampling output
+
+
+            // update Ray origin and direction based on 
+            if (terminate < 1.0)
+                break;
+            else
+                break;
+        }
+    }
+    else
+        ray.color = vec3(1.0);
+
+    
+    imageStore(outImage, ivec2(pixel), vec4(ray.color, 1.0));
+}
