@@ -339,8 +339,9 @@ void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
     std::vector<ImageRGBA8> flat;
 
 
-    for (size_t m = 0; m < scene.meshes.size(); m++)
+    for (auto& object : scene.objects)
     {
+        uint32_t m = object.meshID;
         auto& mesh = scene.meshes[m];
 
         for (size_t i = 0; i < mesh.textures.size(); i++)
@@ -366,8 +367,9 @@ void ShowcaseApp::FlattenSceneTexturesAndRemapMaterials()
         }
     }
 
-    for (size_t m = 0; m < scene.meshes.size(); m++)
+    for (auto& object : scene.objects)
     {
+        uint32_t m = object.meshID;
         auto& mesh = scene.meshes[m];
 
         for (auto& material : mesh.perMeshMaterials)
@@ -596,6 +598,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createOffscreenTargets(); // on resizing will need to call this again
     createComputeDescriptors();
     createComputePipeline();
+    DumpScene(ShowcaseApp::scene);
     createRenderPass();
     createFramebuffers();
     createGraphicsDescriptors();
@@ -604,7 +607,6 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
-    // DumpScene(ShowcaseApp::scene);
     makeInstances(ShowcaseApp::scene);
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
     std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
@@ -890,6 +892,7 @@ void ShowcaseApp::uploadTextureImages()
         di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         infos.push_back(di);
     }
+    std::cout << "LE SIZE OF INFOS:  " << static_cast<uint32_t>(infos.size()) << std::endl;
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {

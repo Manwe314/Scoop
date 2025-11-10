@@ -22,7 +22,7 @@
 
 
 #define VALIDATE true
-#define FPS true
+#define FPS false
 
 
 struct GpuTexture {

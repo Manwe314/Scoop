@@ -143,6 +143,7 @@ class UiApp
                     self->HandleButtonInteraction(id, pd);
             }
         }
+        void resetUiApp();
         
         
     private:

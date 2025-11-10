@@ -89,6 +89,11 @@ struct Hit {
     vec2 barrycentricUV;
 };
 
+struct TlasTraverse {
+    uint instanceId;
+    float tNear;
+};
+
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
 
 float rand(const in uvec2 pixel)
@@ -141,9 +146,26 @@ vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 v
 
     vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
     UV.y = 1.0 - UV.y;
-    uint index = nonuniformEXT(textureIndex);
-    return textureLod(textures2D[index], UV, 0.0);
+    // uint index = nonuniformEXT(textureIndex);
+    return textureLod(textures2D[textureIndex], UV, 0.0);
 }
+
+
+void sortTLASLeafHits(inout TlasTraverse leaves[30], int count)
+{
+    for (int i = 1; i < count; i++)
+    {
+        TlasTraverse key = leaves[i];
+        int j = i - 1;
+        while (j >= 0 && leaves[j].tNear > key.tNear)
+        {
+            leaves[j + 1] = leaves[j];
+            j--;
+        }
+        leaves[j + 1] = key;
+    }
+}
+
 
 
 
@@ -268,8 +290,14 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     return false;
 }
 
-void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout int stackPointer, const in float tEnter, const in float tExit)
+void traverseTLAS(const in Ray ray, inout Hit hit , const in uint root, inout TlasTraverse instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
 {
+    uint stack[30];
+    int stackPointer = 0;
+    stack[stackPointer] = root;
+    outPutPointer = 0;
+        
+
     while (stackPointer >= 0)
     {
         float tNearLeft, tNearRight, tFarLeft, tFarRight;
@@ -277,9 +305,22 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
         uvec4 meta = tlasNodes[stack[stackPointer]].meta;
         if (meta.y > 0)
         {
-            hit.instanceIndex = instanceIndices[meta.x];
+            uint instanceI = instanceIndices[meta.x];
+            Ray modelRay = affineTransformRay(ray, instances[instanceI].worldToModel0, instances[instanceI].worldToModel1, instances[instanceI].worldToModel2);
+            vec3 bbmin = vec3(instances[instanceI].aabbMin);
+            vec3 bbmax = vec3(instances[instanceI].aabbMax);
+            float tNear, tFar;
+            if (intersectingAABB(modelRay, bbmin, bbmax, tEnter, tExit, tNear, tFar)) {
+                if (outPutPointer < 30)
+                {
+                    instancesOut[outPutPointer].instanceId = instanceI;
+                    instancesOut[outPutPointer].tNear = tNear;
+                    outPutPointer++;
+                }
+            }
+        
             stackPointer--;
-            return;
+            continue;
         }
         TLASNodeGPU leftNode = tlasNodes[meta.z];
         TLASNodeGPU rightNode = tlasNodes[meta.w];
@@ -319,12 +360,8 @@ void traverseTLAS(const in Ray ray, inout Hit hit , inout uint stack[30], inout 
 }
 
 
-void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, const in vec3 bbMin, const in vec3 bbMax, inout float closestT)
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, inout float closestT)
 {
-    float tEnter, tExit;
-    if (!intersectingAABB(ray, bbMin, bbMax, 1e-6, closestT, tEnter, tExit))
-        return;
-
     const float ORDER_EPS = 1e-6;
 
     uint stack[64];
@@ -433,20 +470,17 @@ void main()
 
     bool viewBB = Params._pad == 69 ? true : false;
     
-    //Init TLAS with root node to begin everything
-    uint TLASStack[30];
-    int TLASStackPointer = 0;
-    if (Params.rootIndex >= tlasNodes.length())
-        TLASStack[TLASStackPointer] = tlasNodes.length() - 1;
-    else
-        TLASStack[TLASStackPointer] = Params.rootIndex;
-        
+    uint rootId = Params.rootIndex;
+    TlasTraverse TLASInstanceLeafIDs[30];
+
+    
+    
     float tEnter, tExit;
 
     //make the main ray.
     Ray ray = generateRay(pixel);
     //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
-    if (intersectingAABB(ray, vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMin), vec3(tlasNodes[TLASStack[TLASStackPointer]].bbMax), 1e-8, 1e30, tEnter, tExit))
+    if (intersectingAABB(ray, vec3(tlasNodes[rootId].bbMin), vec3(tlasNodes[rootId].bbMax), 1e-8, 1e30, tEnter, tExit))
     {
         //russian rulette termination float
         float terminate = 0.0;
@@ -454,27 +488,25 @@ void main()
         //main work loop.
         while (true)
         {
-            //record TLAS closest child hit. 
-            traverseTLAS(ray, hit,TLASStack, TLASStackPointer, tEnter, tExit);
-            if (hit.instanceIndex == 0xFFFFFFFFu)
+            int leafCount = 0;
+            traverseTLAS(ray, hit, rootId, TLASInstanceLeafIDs, tEnter, tExit, leafCount);
+            sortTLASLeafHits(TLASInstanceLeafIDs, leafCount);
+            float closestT = 1e30;
+            for (int i = 0; i < leafCount; i++)
             {
-                ray.color = vec3(1.0);
-                break;
-            }
-            else if (viewBB)
-            {
-                ray.color = vec3(0.6, 0.0, 0.2 * hit.instanceIndex);
-                break;
-            }
-            while (hit.instanceIndex != 0xFFFFFFFFu)
-            {
+                uint instanceId = TLASInstanceLeafIDs[i].instanceId;
+                Ray modelRay = affineTransformRay(ray, instances[instanceId].worldToModel0, instances[instanceId].worldToModel1, instances[instanceId].worldToModel2);
 
-                Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
-                float closestT = 1e30;
-                traverseBLAS(modelRay, hit, instances[hit.instanceIndex].bases01.x, instances[hit.instanceIndex].bases01.y, vec3(instances[hit.instanceIndex].aabbMin), vec3(instances[hit.instanceIndex].aabbMax), closestT);
-                if (hit.primitiveIndex != 0xFFFFFFFFu)
+                traverseBLAS(modelRay, hit,
+                    instances[instanceId].bases01.x,
+                    instances[instanceId].bases01.y,
+                    closestT
+                );
+
+                if (hit.primitiveIndex != 0xFFFFFFFFu) {
+                    hit.instanceIndex = instanceId;
                     break;
-                traverseTLAS(ray, hit, TLASStack, TLASStackPointer, tEnter, tExit);
+                }
             }
             if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
                 ray.color = vec3(1.0);
@@ -493,6 +525,8 @@ void main()
                 vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
 
                 uint materialIndex = floatBitsToUint(texture_material.w);
+                materialIndex += instances[hit.instanceIndex].bases01.w;
+
 
                 uint textureIndex = floatBitsToUint(materials[materialIndex].textureId.x);
                 ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2));

@@ -275,13 +275,50 @@ static inline void printCamera(std::ostream& os, const Camera& c) {
        << "  farPlane  : " << c.farPlane  << "\n";
 }
 
-static inline void printMesh(std::ostream& os, const ObjectMeshData& m, size_t idx) {
+static inline void printTexture(std::ostream& os, const ImageRGBA8& tex, size_t idx)
+{
+    os << "        [" << idx << "] "
+       << "Path: \"" << tex.filePath << "\" "
+       << "(" << tex.width << "x" << tex.height << ")\n";
+}
+
+static inline void printMaterial(std::ostream& os, const MaterialGPU& mat, size_t idx)
+{
+    os << "        [" << idx << "] "
+       << "baseColor_opacity: (" << mat.baseColor_opacity.x << ", "
+                                << mat.baseColor_opacity.y << ", "
+                                << mat.baseColor_opacity.z << ", "
+                                << mat.baseColor_opacity.w << ")\n";
+    os << "           F0_ior_rough: (" << mat.F0_ior_rough.x << ", "
+                                     << mat.F0_ior_rough.y << ", "
+                                     << mat.F0_ior_rough.z << ", "
+                                     << mat.F0_ior_rough.w << ")\n";
+    os << "           emission_flags: (" << mat.emission_flags.x << ", "
+                                       << mat.emission_flags.y << ", "
+                                       << mat.emission_flags.z << ", "
+                                       << mat.emission_flags.w << ")\n";
+    os << "           textureId: (" << glm::floatBitsToUint(mat.textureId.x) << ", "
+                                  << mat.textureId.y << ", "
+                                  << mat.textureId.z << ", "
+                                  << mat.textureId.w << ")\n";
+}
+
+
+static inline void printMesh(std::ostream& os, const ObjectMeshData& m, size_t idx)
+{
     os << "  [" << idx << "] Mesh: \"" << m.name << "\"\n";
     os << "     SBVH nodes: " << m.bottomLevelAccelerationStructure.nodes.size() << "\n";
     printAABB(os, m.bottomLevelAccelerationStructure.outerBoundingBox);
+
     os << "     textures : " << m.textures.size() << "\n";
+    for (size_t i = 0; i < m.textures.size(); ++i)
+        printTexture(os, m.textures[i], i);
+
     os << "     materials: " << m.perMeshMaterials.size() << "\n";
+    for (size_t i = 0; i < m.perMeshMaterials.size(); ++i)
+        printMaterial(os, m.perMeshMaterials[i], i);
 }
+
 
 static inline void printSceneObject(std::ostream& os, const SceneObject& o, size_t idx) {
     os << "  [" << idx << "] SceneObject\n";

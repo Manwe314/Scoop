@@ -190,7 +190,7 @@ static inline MaterialGPU packMaterialGPU(const Material& material, std::vector<
         texture[0] = textureID;
         textureID++;
     }
-    gpuMaterial.textureId = glm::uintBitsToFloat(texture);
+    gpuMaterial.textureId.x = glm::uintBitsToFloat(texture.x);
 
     return gpuMaterial;
 }
@@ -276,6 +276,7 @@ std::vector<MaterialGPU> Object::buildMaterialGPU()
     {
         auto it = materials.find(name);
         const Material& src = (it != materials.end()) ? it->second : defaultMat;
+        std::cout << "for obj: " << objFilePath << std::endl;
         out[id] = packMaterialGPU(src, textrues, textureId);
     }
     return out;
