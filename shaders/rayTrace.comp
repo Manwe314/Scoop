@@ -94,6 +94,15 @@ struct TlasTraverse {
     float tNear;
 };
 
+struct Footprint {
+    float lod;
+    float major;
+    float minor;
+    vec2  dudx_dudy;
+    vec2  dvdx_dvdy;
+    vec2  majorDir;
+};
+
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
 
 float rand(const in uvec2 pixel)
@@ -139,17 +148,6 @@ vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 no
     return normalize(normal);
 }
 
-vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2)
-{
-    if (textureIndex == 0xFFFFFFFFu)
-        return vec4(1.0);
-
-    vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
-    UV.y = 1.0 - UV.y;
-    // uint index = nonuniformEXT(textureIndex);
-    return textureLod(textures2D[textureIndex], UV, 0.0);
-}
-
 
 void sortTLASLeafHits(inout TlasTraverse leaves[30], int count)
 {
@@ -165,9 +163,6 @@ void sortTLASLeafHits(inout TlasTraverse leaves[30], int count)
         leaves[j + 1] = key;
     }
 }
-
-
-
 
 //temp
 vec3 hsv2rgb(vec3 c) { // compact HSV->RGB
@@ -185,6 +180,139 @@ vec3 directionHue(vec3 n) {
 }
 
 //~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
+
+
+
+Footprint computeFootprintPrimaryModel(const in Ray ray, const in Ray rayDX, const in Ray rayDY, const in float tHit, const in vec3 p0, const in vec3 e1, const in vec3 e2, const in vec2 uv0, const in vec2 uv1, const in vec2 uv2,const in ivec2 texSize, const in vec3 planeNormal)
+{
+    Footprint footPrint;
+
+    vec3 dOdx = rayDX.origin - ray.origin;
+    vec3 dDdx = rayDX.direction - ray.direction;
+    vec3 dOdy = rayDY.origin - ray.origin;
+    vec3 dDdy = rayDY.direction - ray.direction;
+
+    float normalDOTdirection = dot(planeNormal, ray.direction);
+    if (abs(normalDOTdirection) < 1e-10)
+    {
+        footPrint.lod = 0.0;
+        footPrint.major = footPrint.minor = 0.0;
+        footPrint.dudx_dudy = vec2(0.0);
+        footPrint.dvdx_dvdy = vec2(0.0);
+        footPrint.majorDir  = vec2(1.0, 0.0);
+        return footPrint;
+    }
+
+    float dtdx = -(dot(planeNormal, dOdx) + tHit * dot(planeNormal, dDdx)) / normalDOTdirection;
+    float dtdy = -(dot(planeNormal, dOdy) + tHit * dot(planeNormal, dDdy)) / normalDOTdirection;
+
+    vec3 dPdx = dOdx + dtdx * ray.direction + tHit * dDdx;
+    vec3 dPdy = dOdy + dtdy * ray.direction + tHit * dDdy;
+
+    vec2 duv1 = uv1 - uv0;
+    vec2 duv2 = uv2 - uv0;
+    float detUV = duv1.x * duv2.y - duv1.y * duv2.x;
+
+    vec3 dpdu, dpdv;
+    if (abs(detUV) > 1e-12)
+    {
+        float invDet = 1.0 / detUV;
+        dpdu = ( duv2.y * e1 - duv1.y * e2) * invDet;
+        dpdv = (-duv2.x * e1 + duv1.x * e2) * invDet;
+    }
+    else
+    {
+        vec3 T = normalize(e1);
+        vec3 B = normalize(cross(planeNormal, T));
+        dpdu = T;
+        dpdv = B;
+    }
+
+    float A00 = dot(dpdu, dpdu);
+    float A01 = dot(dpdu, dpdv);
+    float A11 = dot(dpdv, dpdv);
+    float detA = A00 * A11 - A01 * A01;
+
+    vec2 dudx_dvdx = vec2(0.0);
+    vec2 dudy_dvdy = vec2(0.0);
+    if (abs(detA) > 1e-18)
+    {
+        float invA = 1.0 / detA;
+        float Bx0 = dot(dpdu, dPdx);
+        float Bx1 = dot(dpdv, dPdx);
+        float By0 = dot(dpdu, dPdy);
+        float By1 = dot(dpdv, dPdy);
+
+        dudx_dvdx = vec2((A11*Bx0 - A01*Bx1) * invA, (-A01*Bx0 + A00*Bx1) * invA);
+        dudy_dvdy = vec2((A11*By0 - A01*By1) * invA, (-A01*By0 + A00*By1) * invA);
+    }
+
+    vec2 sx = dudx_dvdx * vec2(texSize);
+    vec2 sy = dudy_dvdy * vec2(texSize);
+
+    float a = dot(sx, sx);
+    float b = dot(sx, sy);
+    float c = dot(sy, sy);
+    float tr = a + c;
+    float disc = max(0.0, tr*tr - 4.0 * (a*c - b*b));
+    float sqrtDisc = sqrt(disc);
+    float lambdaMax = 0.5 * (tr + sqrtDisc);
+    float lambdaMin = 0.5 * (tr - sqrtDisc);
+
+    footPrint.minor = sqrt(max(lambdaMin, 1e-20));
+    footPrint.major = sqrt(max(lambdaMax, 1e-20));
+    footPrint.lod   = 0.5 * log2(max(lambdaMax, 1e-20));
+
+    vec2 ev;
+    if (abs(b) > 1e-12)
+        ev = normalize(vec2(lambdaMax - c, b));
+    else
+        ev = (a >= c) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+
+    vec2 J_major = ev.x * sx + ev.y * sy;
+    vec2 majorDirUV = normalize(J_major / vec2(texSize));
+    if (any(isnan(majorDirUV)))
+        majorDirUV = vec2(1.0, 0.0);
+
+    footPrint.dudx_dudy = vec2(dudx_dvdx.x, dudy_dvdy.x);
+    footPrint.dvdx_dvdy = vec2(dudx_dvdx.y, dudy_dvdy.y);
+    footPrint.majorDir  = majorDirUV;
+    footPrint.lod = clamp(footPrint.lod, 0.0, 8.0);
+    footPrint.minor = max(footPrint.minor, 1e-2);
+    footPrint.major = max(footPrint.major, 1e-2);
+
+
+    return footPrint;
+}
+
+vec4 sampleAnisoMajor(const in uint textureIndex,const in vec2 UV, const in Footprint footPrint)
+{
+    uint tIdx = nonuniformEXT(textureIndex);
+    ivec2 texSize0 = textureSize(textures2D[tIdx], 0);
+
+    float aniso = max(footPrint.major / max(footPrint.minor, 1e-6), 1.0);
+    int K = int(clamp(floor(aniso), 1.0, 4.0));
+
+    vec2 stepUV = footPrint.majorDir * (footPrint.major / float(K)) / vec2(texSize0);
+
+    float lodMinor = 0.5 * log2(max(footPrint.minor * footPrint.minor, 1e-20));
+
+    vec4 acc = vec4(0.0);
+    float wsum = 0.0;
+
+    for (int i = -K; i <= K; i++)
+    {
+        float t = float(i) / float(K == 0 ? 1 : K);
+        float w = exp(-2.0 * t * t);
+        acc += w * textureLod(textures2D[tIdx], UV + float(i) * stepUV, lodMinor);
+        wsum += w;
+    }
+    if (wsum > 0.0)
+        acc /= wsum;
+
+    return acc;
+}
+
 Ray generateRay(const in uvec2 pixel)
 {
     vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
@@ -278,11 +406,12 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     if (v < 0.0 || (v + u) > 1.0)
         return false;
     float t = dot(edge_2, Q) * inverse_det;
-    if (t < 1e-8)
+    if (t < 1e-4)
         return false;
     if (t < min_distance)
     {
         min_distance = t;
+        hit.dist_to_hit = t;
         hit.barrycentricUV.x = u;
         hit.barrycentricUV.y = v;
         return true;
@@ -310,11 +439,18 @@ void traverseTLAS(const in Ray ray, inout Hit hit , const in uint root, inout Tl
             vec3 bbmin = vec3(instances[instanceI].aabbMin);
             vec3 bbmax = vec3(instances[instanceI].aabbMax);
             float tNear, tFar;
-            if (intersectingAABB(modelRay, bbmin, bbmax, tEnter, tExit, tNear, tFar)) {
+            if (intersectingAABB(modelRay, bbmin, bbmax, tEnter, tExit, tNear, tFar))
+            {
+                vec3 pModel = modelRay.origin + tNear * modelRay.direction;
+                vec3 pWorld = affineTransformPoint(pModel,
+                                instances[instanceI].modelToWorld0,
+                                instances[instanceI].modelToWorld1,
+                                instances[instanceI].modelToWorld2);
+                float tNearWorld = dot(pWorld - ray.origin, normalize(ray.direction));
                 if (outPutPointer < 30)
                 {
                     instancesOut[outPutPointer].instanceId = instanceI;
-                    instancesOut[outPutPointer].tNear = tNear;
+                    instancesOut[outPutPointer].tNear = tNearWorld;
                     outPutPointer++;
                 }
             }
@@ -457,6 +593,36 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
     }
 }
 
+vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2, const in Ray ray, const in uvec2 pixel, const in vec3 normal)
+{
+    if (textureIndex == 0xFFFFFFFFu)
+        return vec4(1.0);
+
+    vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
+    UV.y = 1.0 - UV.y;
+
+    uint IDX = nonuniformEXT(textureIndex);
+
+    Ray rayDX = generateRay(pixel + uvec2(1, 0));
+    Ray rayDY = generateRay(pixel + uvec2(0, 1));
+
+    Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+    rayDX = affineTransformRay(rayDX, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+    rayDY = affineTransformRay(rayDY, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+
+    ivec2 texSize0 = textureSize(textures2D[IDX], 0);
+    
+    MollerTriangle trinagle = triangles[hit.primitiveIndex];
+
+    
+    Footprint footPrint = computeFootprintPrimaryModel(modelRay, rayDX, rayDY, hit.dist_to_hit,
+                                                vec3(trinagle.vertex_0), vec3(trinagle.edge_vec1), vec3(trinagle.edge_vec2),
+                                                vt0, vt1, vt2, texSize0, normal);
+
+
+    return sampleAnisoMajor(textureIndex, UV, footPrint);
+}
+
 
 
 // ~~~~~~~~~~~~~ main ~~~~~~~~~~~~~
@@ -527,15 +693,15 @@ void main()
                 uint materialIndex = floatBitsToUint(texture_material.w);
                 materialIndex += instances[hit.instanceIndex].bases01.w;
 
+                vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz,
+                                           hit.barrycentricUV.x, hit.barrycentricUV.y);
+                bool frontFace = dot(normal, -ray.direction) > 0.0;
+                vec3 adjustedNormal = frontFace ? normal : -normal;
 
                 uint textureIndex = floatBitsToUint(materials[materialIndex].textureId.x);
-                ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2));
+                ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel, normal));
                 if (ray.color == vec3(1.0))
                 {
-                    vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz,
-                                               hit.barrycentricUV.x, hit.barrycentricUV.y);
-                    bool frontFace = dot(normal, -ray.direction) > 0.0;
-                    vec3 adjustedNormal = frontFace ? normal : -normal;
                     ray.color = directionHue(normal);
                 }
             }

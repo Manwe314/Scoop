@@ -872,7 +872,7 @@ void ShowcaseApp::uploadTextureImages()
 
     VkFormat fmt = VK_FORMAT_R8G8B8A8_SRGB;
     for (auto& image : flattened)
-        gpuTextures.push_back(createTextureFromImageRGBA8(image, device, physicalDevice, fmt, false));
+        gpuTextures.push_back(createTextureFromImageRGBA8(image, device, physicalDevice, fmt, true));
 
     if (gpuTextures.empty())
         gpuTextures.push_back(createTextureFromImageRGBA8(makeDummyPink1x1(), device, physicalDevice, fmt, false));
@@ -892,7 +892,6 @@ void ShowcaseApp::uploadTextureImages()
         di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         infos.push_back(di);
     }
-    std::cout << "LE SIZE OF INFOS:  " << static_cast<uint32_t>(infos.size()) << std::endl;
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
@@ -1027,19 +1026,19 @@ void ShowcaseApp::createLogicalDevice()
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
         throw std::runtime_error("Showcase App: failed to make logical device");
 
-    vkGetDeviceQueue(device, gfxFam, /*index*/0, &graphicsQueue);
+    vkGetDeviceQueue(device, gfxFam, 0, &graphicsQueue);
 
     if (presentSharesGraphics)
         presentQueue = graphicsQueue;
     else
-        vkGetDeviceQueue(device, prsFam, /*index*/0, &presentQueue);
+        vkGetDeviceQueue(device, prsFam, 0, &presentQueue);
 
-    vkGetDeviceQueue(device, cmpFam, /*index*/0, &computeQueue);
+    vkGetDeviceQueue(device, cmpFam, 0, &computeQueue);
 
     if (transferIsDistinct)
-        vkGetDeviceQueue(device, xferFam, /*index*/0, &transferQueue);
+        vkGetDeviceQueue(device, xferFam, 0, &transferQueue);
     else if (canSplitComputeXfer && requested[cmpFam] >= 2)
-        vkGetDeviceQueue(device, cmpFam, /*index*/1, &transferQueue);
+        vkGetDeviceQueue(device, cmpFam, 1, &transferQueue);
     else
         transferQueue = computeQueue;
 
