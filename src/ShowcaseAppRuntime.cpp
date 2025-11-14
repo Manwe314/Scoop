@@ -374,10 +374,10 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     else
     {
         imageBarrier(cmd, offscreenImage[i],
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-            graphicsFamily, computeFamily);
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
     }
 
     if (hasDedicatedTransfer && computeFamily != transferFamily)
@@ -388,7 +388,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         {
             if (!b) return;
             VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.srcAccessMask = 0;
             bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             bb.srcQueueFamilyIndex = transferFamily;
             bb.dstQueueFamilyIndex = computeFamily;
@@ -447,10 +447,12 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
 
     imageBarrier(cmd, offscreenImage[i],
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        computeFamily, graphicsFamily);
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+
+
 
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, qpCmpEnd(i));
     
@@ -468,7 +470,6 @@ void ShowcaseApp::recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImage
 
     vkCmdResetQueryPool(cmd, queryPool, qpGfxBegin(frameIndex), 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,    queryPool, qpGfxBegin(frameIndex));
-
     
     VkClearValue clear{};
     clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };

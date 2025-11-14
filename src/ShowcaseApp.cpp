@@ -1439,8 +1439,39 @@ void ShowcaseApp::createOffscreenTargets()
         createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         createInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        
+        uint32_t fams[2] = { graphicsFamily, computeFamily };
+        uint32_t unique[2];
+        uint32_t uniqueCount = 0;
+
+        for (uint32_t j = 0; j < 2; ++j)
+        {
+            uint32_t f = fams[j];
+            bool seen = false;
+            for (uint32_t k = 0; k < uniqueCount; ++k)
+            {
+                if (unique[k] == f) { seen = true; break; }
+            }
+            if (!seen)
+                unique[uniqueCount++] = f;
+        }
+
+        if (uniqueCount > 1)
+        {
+            createInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = uniqueCount;
+            createInfo.pQueueFamilyIndices   = unique;
+        }
+        else
+        {
+            createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            createInfo.queueFamilyIndexCount = 0;
+            createInfo.pQueueFamilyIndices   = nullptr;
+        }
+        
+        
+        
 
         if (vkCreateImage(device, &createInfo, nullptr, &offscreenImage[i]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to create offscreen image!");

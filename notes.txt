@@ -172,8 +172,73 @@ moller 48 bytes - just a girl (0 -50 -100) w/ updated TLAS / BLAS traversal
 [CPU] avg FPS: 19.154 avg MS: 52.209
 
 
+m48 model + full ray differential sampling w/amd dGPU & sharing mode exclusive
+[GPU] compute: 31.910 ms, graphics: 0.250 ms, combined: 32.161 ms
+[CPU] avg FPS: 35.315 avg MS: 28.317
+[GPU] compute: 31.896 ms, graphics: 0.250 ms, combined: 32.146 ms
+[CPU] avg FPS: 35.277 avg MS: 28.347
+[GPU] compute: 31.909 ms, graphics: 0.251 ms, combined: 32.160 ms
+[CPU] avg FPS: 35.249 avg MS: 28.370
+[GPU] compute: 31.909 ms, graphics: 0.250 ms, combined: 32.159 ms
+[CPU] avg FPS: 35.211 avg MS: 28.400
+[GPU] compute: 31.612 ms, graphics: 0.248 ms, combined: 31.860 ms
+[CPU] avg FPS: 35.157 avg MS: 28.444
+[GPU] compute: 31.611 ms, graphics: 0.250 ms, combined: 31.862 ms
+[CPU] avg FPS: 35.102 avg MS: 28.488
+[GPU] compute: 31.910 ms, graphics: 0.250 ms, combined: 32.159 ms
+[CPU] avg FPS: 35.022 avg MS: 28.554
 
 
+m48 model + full ray differential sampling w/ iGPU & sharing mode exclusive
+[GPU] compute: 115.994 ms, graphics: 0.323 ms, combined: 116.317 ms
+[CPU] avg FPS: 7.853 avg MS: 127.333
+[GPU] compute: 116.882 ms, graphics: 0.357 ms, combined: 117.239 ms
+[CPU] avg FPS: 7.864 avg MS: 127.155
+[GPU] compute: 118.866 ms, graphics: 0.345 ms, combined: 119.211 ms
+[CPU] avg FPS: 7.872 avg MS: 127.032
+[GPU] compute: 116.887 ms, graphics: 0.382 ms, combined: 117.269 ms
+[CPU] avg FPS: 7.879 avg MS: 126.926
+[GPU] compute: 119.024 ms, graphics: 0.336 ms, combined: 119.360 ms
+[CPU] avg FPS: 7.886 avg MS: 126.810
+[GPU] compute: 117.654 ms, graphics: 0.347 ms, combined: 118.001 ms
+[CPU] avg FPS: 7.893 avg MS: 126.687
+[GPU] compute: 117.220 ms, graphics: 0.332 ms, combined: 117.552 ms
+[CPU] avg FPS: 7.901 avg MS: 126.559
+[GPU] compute: 116.980 ms, graphics: 0.343 ms, combined: 117.323 ms
+[CPU] avg FPS: 7.910 avg MS: 126.422
+
+m48 model + full ray differential sampling w/ iGPU & sharing mode concurent
+[GPU] compute: 131.044 ms, graphics: 0.326 ms, combined: 131.369 ms
+[CPU] avg FPS: 8.443 avg MS: 118.435
+[GPU] compute: 134.424 ms, graphics: 0.369 ms, combined: 134.793 ms
+[CPU] avg FPS: 8.395 avg MS: 119.122
+[GPU] compute: 134.047 ms, graphics: 0.339 ms, combined: 134.386 ms
+[CPU] avg FPS: 8.346 avg MS: 119.817
+[GPU] compute: 135.099 ms, graphics: 0.331 ms, combined: 135.429 ms
+[CPU] avg FPS: 8.299 avg MS: 120.501
+[GPU] compute: 133.651 ms, graphics: 0.330 ms, combined: 133.981 ms
+[CPU] avg FPS: 8.253 avg MS: 121.168
+[GPU] compute: 131.869 ms, graphics: 0.313 ms, combined: 132.183 ms
+[CPU] avg FPS: 8.208 avg MS: 121.835
+[GPU] compute: 131.897 ms, graphics: 0.331 ms, combined: 132.227 ms
+[CPU] avg FPS: 8.163 avg MS: 122.497
+[GPU] compute: 131.867 ms, graphics: 0.321 ms, combined: 132.187 ms
+[CPU] avg FPS: 8.117 avg MS: 123.191
+
+
+m48 model + full ray differential sampling w/ amd dGPU & sharing mode concurent
+[GPU] compute: 24.813 ms, graphics: 0.250 ms, combined: 25.062 ms
+[CPU] avg FPS: 37.681 avg MS: 26.539
+[GPU] compute: 24.813 ms, graphics: 0.250 ms, combined: 25.063 ms
+[CPU] avg FPS: 37.710 avg MS: 26.518
+[GPU] compute: 24.807 ms, graphics: 0.249 ms, combined: 25.057 ms
+[CPU] avg FPS: 37.744 avg MS: 26.494
+[GPU] compute: 24.811 ms, graphics: 0.249 ms, combined: 25.060 ms
+[CPU] avg FPS: 37.780 avg MS: 26.469
+[GPU] compute: 25.011 ms, graphics: 0.248 ms, combined: 25.260 ms
+[CPU] avg FPS: 37.824 avg MS: 26.438
+[GPU] compute: 24.816 ms, graphics: 0.249 ms, combined: 25.065 ms
+[CPU] avg FPS: 37.868 avg MS: 26.407
 
 
 
