@@ -1,7 +1,18 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
 
+
+
 // --------- helpers -----------
+
+constexpr uint32_t FLAG_B            = 1u << 31;
+constexpr uint32_t FLAG_INSTANCE_SEL = 1u << 30;
+constexpr uint32_t B_INTERP_SHIFT    = 20;
+constexpr uint32_t B_INTERP_BITS     = 10;
+constexpr uint32_t B_INTERP_MAX      = (1u << B_INTERP_BITS) - 1u;
+constexpr uint32_t B_INTERP_MASK     = B_INTERP_MAX << B_INTERP_SHIFT;
+constexpr uint32_t MASK_INSTANCE_IDX = 0xFu; 
+
 static inline uint32_t qpBase(uint32_t fi) { return fi * 4u; }
 static inline uint32_t qpGfxBegin(uint32_t fi){ return qpBase(fi) + 0; }
 static inline uint32_t qpGfxEnd  (uint32_t fi){ return qpBase(fi) + 1; }
@@ -197,7 +208,7 @@ inline ParamsGPU makeParamsForVulkan(
                 float      fovY_deg  = 60.0f,
                 float      zNear     = 0.1f,
                 float      zFar      = 2000.0f, 
-                bool       bbview    = false)
+                uint32_t flags = 0)
 {
     const float aspect = float(extent.width) / float(std::max(1u, extent.height));
 
@@ -215,7 +226,7 @@ inline ParamsGPU makeParamsForVulkan(
     p.camPos_time = glm::vec4(camPos, time);
     p.imageSize   = glm::uvec2(extent.width, extent.height);
     p.rootIndex   = rootIndex;
-    p._pad0       = bbview ? 69 : 0;
+    p.flags       = flags;
     return p;
 }
 
@@ -611,7 +622,7 @@ void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
 
 void ShowcaseApp::update(float dt)
 {
-    const float speed = 0.1f;
+    const float speed = 5.0f;
     glm::vec3 U, V, W;
     scene.camera.basis(U, V, W);
 
@@ -628,9 +639,7 @@ void ShowcaseApp::update(float dt)
     if (glfwGetKey(window.handle(), GLFW_KEY_S) == GLFW_PRESS) move -= fwd;
     if (glfwGetKey(window.handle(), GLFW_KEY_A) == GLFW_PRESS) move -= right;
     if (glfwGetKey(window.handle(), GLFW_KEY_D) == GLFW_PRESS) move += right;
-    if (glfwGetKey(window.handle(), GLFW_KEY_B) == GLFW_PRESS) bbView = bbView ? false : true;
 
-    // vertical stays consistent: space up, shift down
     if (glfwGetKey(window.handle(), GLFW_KEY_SPACE) == GLFW_PRESS)       move += worldUp;
     if (glfwGetKey(window.handle(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(window.handle(), GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) move -= worldUp;
@@ -640,6 +649,137 @@ void ShowcaseApp::update(float dt)
         move = glm::normalize(move) * (speed * dt);
         scene.camera.position += move;
         scene.camera.target   += move;
+    }
+
+
+    if (selectedInstance >= 0 && selectedInstance < static_cast<int>(scene.objects.size()))
+    {
+        float objectGeneralSpeed = scene.objects[selectedInstance].animation.SpeedScalar;
+        if (objectGeneralSpeed == 0.0f)
+            objectGeneralSpeed = 1.0f;
+        glm::vec3 objMove(0.0f);
+
+        if (glfwGetKey(window.handle(), GLFW_KEY_F) == GLFW_PRESS)
+            objMove -= right;
+        if (glfwGetKey(window.handle(), GLFW_KEY_G) == GLFW_PRESS)
+            objMove += right;
+        if (glfwGetKey(window.handle(), GLFW_KEY_H) == GLFW_PRESS)
+            objMove += worldUp;
+        if (glfwGetKey(window.handle(), GLFW_KEY_J) == GLFW_PRESS)
+            objMove -= worldUp;
+        if (glfwGetKey(window.handle(), GLFW_KEY_K) == GLFW_PRESS)
+            objMove += fwd;
+        if (glfwGetKey(window.handle(), GLFW_KEY_L) == GLFW_PRESS)
+            objMove -= fwd;
+
+        if (glm::length(objMove) > 0.0f)
+        {
+            objMove = glm::normalize(objMove) * (objectGeneralSpeed * dt);
+            scene.objects[selectedInstance].transform.translate += objMove;
+        }
+        const float rotSpeed = 45.0f * objectGeneralSpeed; // degrees per second (tweak as you like)
+
+        Transform& tr = scene.objects[selectedInstance].transform;
+
+        if (glfwGetKey(window.handle(), GLFW_KEY_T) == GLFW_PRESS)
+            tr.rotation.x += rotSpeed * dt;
+        if (glfwGetKey(window.handle(), GLFW_KEY_Y) == GLFW_PRESS)
+            tr.rotation.x -= rotSpeed * dt;
+        if (glfwGetKey(window.handle(), GLFW_KEY_U) == GLFW_PRESS)
+            tr.rotation.y += rotSpeed * dt;
+        if (glfwGetKey(window.handle(), GLFW_KEY_I) == GLFW_PRESS)
+            tr.rotation.y -= rotSpeed * dt;
+        if (glfwGetKey(window.handle(), GLFW_KEY_O) == GLFW_PRESS)
+            tr.rotation.z += rotSpeed * dt;
+        if (glfwGetKey(window.handle(), GLFW_KEY_P) == GLFW_PRESS)
+            tr.rotation.z -= rotSpeed * dt;
+        auto wrapDeg = [](float a)
+        {
+            a = std::fmod(a, 360.0f);
+            if (a < 0.0f)
+                a += 360.0f;
+            return a;
+        };
+
+        tr.rotation.x = wrapDeg(tr.rotation.x);
+        tr.rotation.y = wrapDeg(tr.rotation.y);
+        tr.rotation.z = wrapDeg(tr.rotation.z);
+    }
+
+    static bool prevB     = false;
+    static bool prevRight = false;
+    static bool prevLeft  = false;
+    static bool prevEsc   = false;
+
+    int bState     = glfwGetKey(window.handle(), GLFW_KEY_B);
+    int rightState = glfwGetKey(window.handle(), GLFW_KEY_PERIOD);
+    int leftState  = glfwGetKey(window.handle(), GLFW_KEY_COMMA);
+    int escState   = glfwGetKey(window.handle(), GLFW_KEY_ESCAPE);
+
+    bool bPressed     = (bState     == GLFW_PRESS && !prevB);
+    bool rightPressed = (rightState == GLFW_PRESS && !prevRight);
+    bool leftPressed  = (leftState  == GLFW_PRESS && !prevLeft);
+    bool escPressed   = (escState   == GLFW_PRESS && !prevEsc);
+
+    prevB     = (bState     == GLFW_PRESS);
+    prevRight = (rightState == GLFW_PRESS);
+    prevLeft  = (leftState  == GLFW_PRESS);
+    prevEsc   = (escState   == GLFW_PRESS);
+
+    if (!bTransitionActive && bPressed)
+    {
+        viewFaces = !viewFaces;
+
+        bTransitionActive = true;
+        bInterpTime       = 0.0f;
+    }
+
+    bInterpInt = 0;
+
+    if (bTransitionActive)
+    {
+        bInterpTime += dt;
+
+        float t = bInterpTime / bTransitionDuration;
+        if (t >= 1.0f)
+        {
+            t = 1.0f;
+            bTransitionActive = false;
+        }
+        else
+        {
+            t = glm::clamp(t, 0.0f, 1.0f);
+            bInterpInt = static_cast<uint32_t>(t * B_INTERP_MAX + 0.5f);
+            if (bInterpInt == 0)
+                bInterpInt = 1;
+        }
+    }
+
+    if (selectedInstance >= 0)
+        if (selectedInstance >= int(topLevelAS.instances.size()) || selectedInstance >= 16)
+            selectedInstance = -1;
+
+    if (escPressed)
+        selectedInstance = -1;
+
+    if (rightPressed)
+    {
+        if (topLevelAS.instances.empty())
+            selectedInstance = -1;
+        else if (selectedInstance < 0)
+            selectedInstance = 0;
+        else if (selectedInstance + 1 < int(topLevelAS.instances.size()) && selectedInstance + 1 < 16)
+            ++selectedInstance;
+        else if (selectedInstance + 1 >= int(topLevelAS.instances.size()))
+            selectedInstance = -1;
+    }
+
+    if (leftPressed)
+    {
+        if (selectedInstance > 0)
+            --selectedInstance;
+        else if (selectedInstance == 0)
+            selectedInstance = -1;
     }
 }
 
@@ -651,6 +791,8 @@ void ShowcaseApp::run()
 
     using clock = std::chrono::high_resolution_clock;
 
+    auto prevTime = clock::now();
+
     double fps = 0.0;
     double avgMs = 0.0;
     const int history = 100;
@@ -661,7 +803,11 @@ void ShowcaseApp::run()
     {
         auto t0 = clock::now();
         glfwPollEvents();
-        update(1.0f);
+        float dt = std::chrono::duration<float>(t0 - prevTime).count();
+        prevTime = t0;
+        if (dt > 0.1f)
+            dt = 0.1f;
+        update(dt);
 
         if (window.wasWindowResized())
             recreateSwapchain();
@@ -737,19 +883,31 @@ void ShowcaseApp::run()
         if (vkQueueSubmit(uploadQ, 1, &up, frameUpload[currentFrame].uploadFence) != VK_SUCCESS)
             throw std::runtime_error("Showcase App: failed to subbmit TLAS upload");
 
+        uint32_t flags = 0;
 
-        //temp
+        if (viewFaces)
+            flags |= FLAG_B;
+
+        if (selectedInstance >= 0)
+        {
+            flags |= FLAG_INSTANCE_SEL;
+            uint32_t idx = static_cast<uint32_t>(selectedInstance) & MASK_INSTANCE_IDX;
+            flags |= idx;
+        }
+        if (bInterpInt > 0)
+            flags |= (bInterpInt << B_INTERP_SHIFT) & B_INTERP_MASK;
+        
         ParamsGPU params = makeParamsForVulkan(
                             swapChainExtent,
                             /*rootIndex*/ topLevelAS.root,       
-                            /*time*/ 0.0f,
+                            /*time*/ dt,
                             /*camPos*/ scene.camera.position,
                             /*camTarget*/ scene.camera.target,
                             /*up*/ scene.camera.up,
                             /*fov*/ scene.camera.vfovDeg,
                             /*near*/ scene.camera.nearPlane,
                             /*far*/ scene.camera.farPlane,
-                            bbView
+                            flags
                         );
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);
@@ -820,9 +978,7 @@ void ShowcaseApp::run()
         
         if (FPS)
         {
-            auto t1 = clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    
+            double ms = double(dt) * 1000.0;
             samples[cursor++ % history] = ms;
             double sum = 0.0; for (double s : samples) sum += s;
             avgMs = sum / history;

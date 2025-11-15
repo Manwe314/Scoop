@@ -42,7 +42,7 @@ layout(set = 0, binding = 5, std430) readonly buffer ParamsBuf {
     vec4  camPos_time;
     uvec2 imageSize;
     uint  rootIndex;
-    uint  _pad;
+    uint  flags;
 } Params;
 
 struct TLASNodeGPU {
@@ -89,10 +89,11 @@ struct Hit {
     vec2 barrycentricUV;
 };
 
-struct TlasTraverse {
-    uint instanceId;
-    float tNear;
-};
+const uint FLAG_B            = 1u << 31;
+const uint FLAG_INSTANCE_SEL = 1u << 30;
+const uint B_INTERP_SHIFT    = 20u;
+const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
+const uint MASK_INSTANCE_IDX = 0xFu;
 
 
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
@@ -140,21 +141,6 @@ vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 no
     return normalize(normal);
 }
 
-
-void sortTLASLeafHits(inout TlasTraverse leaves[30], int count)
-{
-    for (int i = 1; i < count; i++)
-    {
-        TlasTraverse key = leaves[i];
-        int j = i - 1;
-        while (j >= 0 && leaves[j].tNear > key.tNear)
-        {
-            leaves[j + 1] = leaves[j];
-            j--;
-        }
-        leaves[j + 1] = key;
-    }
-}
 
 float intersectPlane(const in Ray ray, const in vec3 P0, const in vec3 N)
 {
@@ -338,7 +324,7 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     return false;
 }
 
-void traverseTLAS(const in Ray ray, inout Hit hit , const in uint root, inout TlasTraverse instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
+void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
 {
     uint stack[30];
     int stackPointer = 0;
@@ -368,8 +354,7 @@ void traverseTLAS(const in Ray ray, inout Hit hit , const in uint root, inout Tl
                 float tNearWorld = dot(pWorld - ray.origin, normalize(ray.direction));
                 if (outPutPointer < 30)
                 {
-                    instancesOut[outPutPointer].instanceId = instanceI;
-                    instancesOut[outPutPointer].tNear = tNearWorld;
+                    instancesOut[outPutPointer] = instanceI;
                     outPutPointer++;
                 }
             }
@@ -411,11 +396,10 @@ void traverseTLAS(const in Ray ray, inout Hit hit , const in uint root, inout Tl
         else
             stackPointer--;
     }
-    hit.instanceIndex = 0xFFFFFFFFu;
 }
 
 
-void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, inout float closestT)
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, inout float closestT, const in float modelToWorldScale, const in float modelToWorldScaleInverse)
 {
     const float ORDER_EPS = 1e-6;
 
@@ -442,14 +426,14 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
         if (left_count != 0xFFFFFFFFu)
         {
             float tNearLeaf, tFarLeaf;
-            bool leafHit = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, closestT, tNearLeaf, tFarLeaf);
-            if (!leafHit || tNearLeaf >= closestT)
+            bool leafHit = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, closestT * modelToWorldScaleInverse, tNearLeaf, tFarLeaf);
+            if (!leafHit || tNearLeaf * modelToWorldScale >= closestT)
             {
                 stackPointer--;
                 continue;
             }
 
-            float min_distance = closestT;
+            float min_distance = closestT * modelToWorldScaleInverse;
             uint  primIndex    = 0xFFFFFFFFu;
 
             for (uint i = 0; i < left_count; i++)
@@ -467,7 +451,7 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
             }
             if (primIndex != 0xFFFFFFFFu)
             {
-                closestT = min_distance;
+                closestT = min_distance * modelToWorldScale;
                 hit.primitiveIndex = primIndex;
             }
             stackPointer--;
@@ -481,8 +465,8 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
         uint right_start       = floatBitsToUint(right_start_n_Min.w);
 
 
-        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  1e-6, closestT, tNearLeft,  tFarLeft);
-        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, closestT, tNearRight, tFarRight);
+        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  1e-6, closestT * modelToWorldScaleInverse, tNearLeft,  tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, closestT * modelToWorldScaleInverse, tNearRight, tFarRight);
 
         if (!hitLeft && !hitRight)
         {
@@ -512,7 +496,7 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
     }
 }
 
-vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2, const in Ray ray, const in uvec2 pixel, const in vec3 normal)
+vec4 getTextureSample(const in uint textureIndex, inout Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2, const in Ray ray, const in uvec2 pixel)
 {
     if (textureIndex == 0xFFFFFFFFu)
         return vec4(1.0);
@@ -550,12 +534,17 @@ void main()
     if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
         return;
 
-    bool viewBB = Params._pad == 69 ? true : false;
     
     uint rootId = Params.rootIndex;
-    TlasTraverse TLASInstanceLeafIDs[30];
+    uint TLASInstanceLeafIDs[30];
 
+    bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
+    uint selectedIdx      = Params.flags & MASK_INSTANCE_IDX;
+    bool bPressedFlag     = (Params.flags & FLAG_B) != 0u;
     
+    uint  bInterpRaw      = (Params.flags & B_INTERP_MASK) >> B_INTERP_SHIFT;
+    bool  bTransitionPlaying = (bInterpRaw != 0u);
+    float bInterp         = float(bInterpRaw) / float(0x3FFu);
     
     float tEnter, tExit;
 
@@ -571,32 +560,31 @@ void main()
         while (true)
         {
             int leafCount = 0;
-            traverseTLAS(ray, hit, rootId, TLASInstanceLeafIDs, tEnter, tExit, leafCount);
-            sortTLASLeafHits(TLASInstanceLeafIDs, leafCount);
+            traverseTLAS(ray, rootId, TLASInstanceLeafIDs, tEnter, tExit, leafCount);
             float closestT = 1e30;
             for (int i = 0; i < leafCount; i++)
             {
-                uint instanceId = TLASInstanceLeafIDs[i].instanceId;
+                uint instanceId = TLASInstanceLeafIDs[i];
                 Ray modelRay = affineTransformRay(ray, instances[instanceId].worldToModel0, instances[instanceId].worldToModel1, instances[instanceId].worldToModel2);
+                vec3 worldDir = affineTransformDirection(modelRay.direction, instances[instanceId].modelToWorld0, instances[instanceId].modelToWorld1, instances[instanceId].modelToWorld2);
+
+                float modelToWorldScale = length(worldDir);
+                float modelToWorldScaleInverse = 1.0 / modelToWorldScale;
+                float previousClosestT = closestT;
             
                 traverseBLAS(modelRay, hit,
                     instances[instanceId].bases01.x,
                     instances[instanceId].bases01.y,
-                    closestT
+                    closestT, modelToWorldScale, modelToWorldScaleInverse
                 );
 
-                if (hit.primitiveIndex != 0xFFFFFFFFu) {
+                if (hit.primitiveIndex != 0xFFFFFFFFu && closestT < previousClosestT)
+                {
                     hit.instanceIndex = instanceId;
-                    break;
                 }
             }
             if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
                 ray.color = vec3(1.0);
-            else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
-            {
-                
-                ray.color = vec3(1.0);
-            }
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
             {
                 ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];
@@ -618,11 +606,20 @@ void main()
                 vec3 adjustedNormal = frontFace ? normal : -normal;
 
                 uint textureIndex = floatBitsToUint(materials[materialIndex].textureId.x);
-                ray.color = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel, normal));
-                if (ray.color == vec3(1.0))
-                {
-                    ray.color = directionHue(normal);
-                }
+                vec3 normalColor  = directionHue(normal);
+                vec3 textureColor = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel));
+                if (textureIndex == 0xFFFFFFFFu)
+                    textureColor = normalColor;
+                
+                float targetBlend = bPressedFlag ? 1.0 : 0.0;
+                float blend;
+
+                if (bTransitionPlaying)
+                    blend = mix(1.0 - targetBlend, targetBlend, bInterp);
+                else
+                    blend = targetBlend;
+
+                ray.color = mix(textureColor, normalColor, blend);
             }
 
             //recursive traversal of TLAS
@@ -632,7 +629,8 @@ void main()
             // task based sampling over OMEGA hemisphere
             // update Ray color based on sampling output
 
-
+            if (instanceSelected && hit.instanceIndex == selectedIdx)
+                ray.color = mix(ray.color, vec3(1.0, 1.0, 0.0), 0.4);
             // update Ray origin and direction based on 
             if (terminate < 1.0)
                 break;
@@ -643,6 +641,6 @@ void main()
     else
         ray.color = vec3(1.0);
 
-    
+       
     imageStore(outImage, ivec2(pixel), vec4(ray.color, 1.0));
 }

@@ -79,7 +79,7 @@ struct alignas(16) ParamsGPU {
     glm::vec4 camPos_time;
     glm::uvec2 imageSize;
     uint32_t   rootIndex;
-    uint32_t   _pad0;
+    uint32_t   flags;
 };
 
 void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src, VkBuffer dst, VkDeviceSize size);
@@ -272,7 +272,12 @@ private:
     
     void onChar(uint32_t cp);
     void onKey (int key, int action, int mods);
-    bool bbView = false;
+    bool viewFaces = false;
+    int selectedInstance = -1;
+    bool bTransitionActive = false;
+    float bInterpTime = 0.0f;
+    float bTransitionDuration = 1.5f;
+    uint32_t bInterpInt = 0;
 
     
     void makeInstances(Scene& scene);
@@ -338,7 +343,7 @@ private:
         p.camPos_time = glm::vec4(camPos, time);
         p.imageSize   = glm::uvec2(width, height);
         p.rootIndex   = rootIndex;
-        p._pad0       = 0;
+        p.flags       = 0;
         return p;
     }
 
