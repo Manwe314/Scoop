@@ -236,7 +236,6 @@ vec4 computeTextureDifferential(const in Ray ray, const in Ray rayDX, const in R
 Ray generateRay(const in uvec2 pixel)
 {
     vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
-    UV.y = 1 - UV.y;
 
     vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
 
@@ -579,7 +578,7 @@ void main()
             {
                 uint instanceId = TLASInstanceLeafIDs[i].instanceId;
                 Ray modelRay = affineTransformRay(ray, instances[instanceId].worldToModel0, instances[instanceId].worldToModel1, instances[instanceId].worldToModel2);
-
+            
                 traverseBLAS(modelRay, hit,
                     instances[instanceId].bases01.x,
                     instances[instanceId].bases01.y,
@@ -594,7 +593,10 @@ void main()
             if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
                 ray.color = vec3(1.0);
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+            {
+                
                 ray.color = vec3(1.0);
+            }
             else if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
             {
                 ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];

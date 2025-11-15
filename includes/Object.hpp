@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Utils.hpp"
+#include "Matrix.hpp"
 
 #include <iostream>
 #include <vector>

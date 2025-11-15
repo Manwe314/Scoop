@@ -122,16 +122,16 @@ inline InstanceDataGPU packInstance(const InstanceData& data, AABB modelBB)
 {
     InstanceDataGPU out{};
 
-    const glm::mat4 M = affineToMat4(data.modelToWorld);
-    const glm::mat4 W = affineToMat4(data.worldToModel);
+    const Mat4 M = affineToMat4(data.modelToWorld);
+    const Mat4 W = affineToMat4(data.worldToModel);
 
-    out.modelToWorld[0] = glm::vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
-    out.modelToWorld[1] = glm::vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
-    out.modelToWorld[2] = glm::vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+    out.modelToWorld[0] = glm::vec4(M.x[0], M.y[0], M.z[0], M.w[0]);
+    out.modelToWorld[1] = glm::vec4(M.x[1], M.y[1], M.z[1], M.w[1]);
+    out.modelToWorld[2] = glm::vec4(M.x[2], M.y[2], M.z[2], M.w[2]);
 
-    out.worldToModel[0] = glm::vec4(W[0][0], W[1][0], W[2][0], W[3][0]);
-    out.worldToModel[1] = glm::vec4(W[0][1], W[1][1], W[2][1], W[3][1]);
-    out.worldToModel[2] = glm::vec4(W[0][2], W[1][2], W[2][2], W[3][2]);
+    out.worldToModel[0] = glm::vec4(W.x[0], W.y[0], W.z[0], W.w[0]);
+    out.worldToModel[1] = glm::vec4(W.x[1], W.y[1], W.z[1], W.w[1]);
+    out.worldToModel[2] = glm::vec4(W.x[2], W.y[2], W.z[2], W.w[2]);
 
     out.aabbMin = glm::vec4(modelBB.min, 0.0f);
     out.aabbMax = glm::vec4(modelBB.max, 0.0f);
@@ -139,6 +139,84 @@ inline InstanceDataGPU packInstance(const InstanceData& data, AABB modelBB)
     out.bases0 = glm::uvec4(data.nodeBase, data.triBase, data.shadeTriBase, data.materialBase);
     out.bases1 = glm::uvec4(data.textureBase, 0u, 0u, 0u);
     return out;
+}
+
+
+inline Mat4 LookAtRH(const glm::vec3& eye,
+                     const glm::vec3& center,
+                     const glm::vec3& up)
+{
+    const glm::vec3 f = glm::normalize(center - eye);
+    const glm::vec3 s = glm::normalize(glm::cross(f, up));
+    const glm::vec3 u = glm::cross(s, f);
+
+    Mat4 Result(1.0f);
+
+    Result[0][0] = s.x;
+    Result[1][0] = s.y;
+    Result[2][0] = s.z;
+    Result[3][0] = -glm::dot(s, eye);
+
+    Result[0][1] = u.x;
+    Result[1][1] = u.y;
+    Result[2][1] = u.z;
+    Result[3][1] = -glm::dot(u, eye);
+
+    Result[0][2] = -f.x;
+    Result[1][2] = -f.y;
+    Result[2][2] = -f.z;
+    Result[3][2] =  glm::dot(f, eye);
+
+    return Result;
+}
+
+
+inline Mat4 PerspectiveRH_ZO(float fovY, float aspect, float zNear, float zFar)
+{
+    const float tanHalfFovy = std::tan(fovY * 0.5f);
+
+    Mat4 Result(0.0f);
+
+    Result[0][0] = 1.0f / (aspect * tanHalfFovy);
+    Result[1][1] = 1.0f / (tanHalfFovy);
+    Result[2][2] = zFar / (zNear - zFar);
+    Result[2][3] = -1.0f;
+    Result[3][2] = -(zFar * zNear) / (zFar - zNear);
+    return Result;
+}
+
+
+
+inline ParamsGPU makeParamsForVulkan(
+                VkExtent2D extent,
+                uint32_t   rootIndex,
+                float      time,
+                glm::vec3  camPos,
+                glm::vec3  camTarget = glm::vec3(0.0f, 0.0f, 0.0f),
+                glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
+                float      fovY_deg  = 60.0f,
+                float      zNear     = 0.1f,
+                float      zFar      = 2000.0f, 
+                bool       bbview    = false)
+{
+    const float aspect = float(extent.width) / float(std::max(1u, extent.height));
+
+    Mat4 view = LookAtRH(camPos, camTarget, camUp);
+
+    Mat4 proj = PerspectiveRH_ZO(glm::radians(fovY_deg), aspect, zNear, zFar);
+
+    proj[1][1] *= -1.0f;
+    Mat4 viewProj    = proj * view;
+    Mat4 viewProjInv;
+    inverse(viewProj, viewProjInv);
+
+    ParamsGPU p{};
+    p.viewProjInv = viewProjInv;
+    p.camPos_time = glm::vec4(camPos, time);
+    p.imageSize   = glm::uvec2(extent.width, extent.height);
+    p.rootIndex   = rootIndex;
+    p._pad0       = bbview ? 69 : 0;
+    return p;
 }
 
 void ShowcaseApp::ensureBufferCapacity(
@@ -511,47 +589,7 @@ void ShowcaseApp::destroyCommandPoolAndBuffers()
     }
 }
 
-//temp
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>   // for lookAt, perspective
-#include <glm/gtc/type_ptr.hpp>
 
-// Right-handed camera, depth 0..1 (Vulkan)
-inline ParamsGPU makeParamsForVulkan(
-    VkExtent2D extent,
-    uint32_t   rootIndex,
-    float      time,
-    glm::vec3  camPos,
-    glm::vec3  camTarget = glm::vec3(0.0f, 0.0f, 0.0f),
-    glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
-    float      fovY_deg  = 60.0f,
-    float      zNear     = 0.1f,
-    float      zFar      = 2000.0f, 
-    bool bbview          = false)
-{
-    const float aspect = float(extent.width) / float(std::max(1u, extent.height));
-
-    // RH view looking from camPos to camTarget
-    glm::mat4 view = glm::lookAtRH(camPos, camTarget, camUp);
-
-    // RH projection with depth in [0..1]
-    // If you have GLM 0.9.9+: use glm::perspectiveRH_ZO; otherwise glm::perspective does ZO thanks to GLM_FORCE_DEPTH_ZERO_TO_ONE.
-    glm::mat4 proj = glm::perspective(glm::radians(fovY_deg), aspect, zNear, zFar);
-
-    // glm::mat4 M = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),  glm::vec3(0,1,0));
-    // Vulkan: no automatic Y flip here; your fullscreen pass uses vUV from 0..1 so this is fine.
-    glm::mat4 viewProj     = proj * view;
-    glm::mat4 viewProjInv  = glm::inverse(viewProj);
-
-    ParamsGPU p{};
-    p.viewProjInv = viewProjInv;
-    p.camPos_time = glm::vec4(camPos, time);
-    p.imageSize   = glm::uvec2(extent.width, extent.height);
-    p.rootIndex   = rootIndex;
-    p._pad0       = bbview ? 69 : 0;
-    return p;
-}
-//temp
 
 void ShowcaseApp::frameTLASPrepare(uint32_t frameIndex)
 {

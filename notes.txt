@@ -23,7 +23,7 @@ https://en.wikipedia.org/wiki/Wavefront_.obj_file
 https://en.wikipedia.org/wiki/Affine_transformation
 https://en.wikipedia.org/wiki/Mipmap
 https://graphics.stanford.edu/papers/trd/trd_jpg.pdf
-
+https://www.youtube.com/playlist?list=PLmIqTlJ6KsE2yXzeq02hqCDpOdtj6n6A9
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms

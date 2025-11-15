@@ -75,7 +75,7 @@ struct QueueFamiliyIndies
 };
 
 struct alignas(16) ParamsGPU {
-    glm::mat4 viewProjInv;
+    Mat4 viewProjInv;
     glm::vec4 camPos_time;
     glm::uvec2 imageSize;
     uint32_t   rootIndex;
@@ -334,7 +334,7 @@ private:
     inline ParamsGPU makeDefaultParams(uint32_t width = 1, uint32_t height = 1, uint32_t rootIndex = 0, float time = 0.0f, const glm::vec3& camPos = glm::vec3(0.0f))
     {
         ParamsGPU p{};
-        p.viewProjInv = glm::mat4(1.0f);
+        p.viewProjInv = Mat4(1.0f);
         p.camPos_time = glm::vec4(camPos, time);
         p.imageSize   = glm::uvec2(width, height);
         p.rootIndex   = rootIndex;

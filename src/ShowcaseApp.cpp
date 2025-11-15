@@ -598,7 +598,6 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createOffscreenTargets(); // on resizing will need to call this again
     createComputeDescriptors();
     createComputePipeline();
-    DumpScene(ShowcaseApp::scene);
     createRenderPass();
     createFramebuffers();
     createGraphicsDescriptors();
@@ -610,6 +609,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     makeInstances(ShowcaseApp::scene);
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
     std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
+    // DumpScene(ShowcaseApp::scene);
 }
 
 ShowcaseApp::~ShowcaseApp()

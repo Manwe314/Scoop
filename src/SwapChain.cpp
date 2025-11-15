@@ -47,7 +47,7 @@ SwapChain::~SwapChain() {
   vkDestroyRenderPass(device.device(), renderPass, nullptr);
   
   for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i) {
-    vkDestroySemaphore(device.device(), renderFinishedSemaphores[i], nullptr); // <- per-image ✅
+    vkDestroySemaphore(device.device(), renderFinishedSemaphores[i], nullptr);
   }
   
   for (size_t i = 0; i < imageAvailableSemaphores.size(); ++i) {

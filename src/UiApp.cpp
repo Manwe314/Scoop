@@ -223,7 +223,7 @@ bool UiApp::isInput(Clay_ElementId elementId)
 }
 
 struct SimplePushConstantData {
-    glm::mat4 uProj;
+    Mat4 uProj;
 };
 
 struct RectangleItem {
@@ -532,7 +532,7 @@ void UiApp::recordCommandBuffer(int imageIndex)
     ui->bind(commandBuffers[imageIndex]);
 
     SimplePushConstantData push_constant{};
-    push_constant.uProj = glm::ortho(
+    push_constant.uProj = ortho(
         0.0f, (float)swapChain->getSwapChainExtent().width,
         0.0f, (float)swapChain->getSwapChainExtent().height
     );
@@ -610,8 +610,8 @@ void UiApp::recordCommandBuffer(int imageIndex)
                 pipeline->bind(commandBuffers[imageIndex]);
             
                 SimplePushConstantData pc{};
-                pc.uProj = glm::ortho(0.0f, (float)swapChain->getSwapChainExtent().width,
-                                      0.0f, (float)swapChain->getSwapChainExtent().height);
+                pc.uProj = ortho(0.0f, (float)swapChain->getSwapChainExtent().width,
+                                 0.0f, (float)swapChain->getSwapChainExtent().height);
                 vkCmdPushConstants(commandBuffers[imageIndex], pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                 
