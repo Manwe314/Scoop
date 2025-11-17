@@ -391,7 +391,8 @@ void Object::parseFace(std::vector<std::string> tokens)
         for (const auto& tok : tokens)
             parse_one(tok);
 
-        std::vector<glm::vec3> poly3D; poly3D.reserve(m);
+        std::vector<glm::vec3> poly3D;
+        poly3D.reserve(m);
         for (int i = 0; i < m; ++i)
         {
             int idx = vIdx[i];
@@ -403,11 +404,17 @@ void Object::parseFace(std::vector<std::string> tokens)
 
         std::vector<glm::vec2> poly2D;
         PlaneBasis basis;
-        if (!projectPolygonTo2D(poly3D, poly2D, &basis))
+        if (!projectPolygonTo2D(poly3D, poly2D, &basis, false))
             throw std::runtime_error("Failed to project polygon for ear clipping at line - " + std::to_string(reading_line));
 
         std::vector<int> mapToOrig(m);
         std::iota(mapToOrig.begin(), mapToOrig.end(), 0);
+        
+        // double A = polygonArea2D(poly2D);
+        // if (A < -EPSILON) {
+        //     std::reverse(poly2D.begin(), poly2D.end());
+        //     std::reverse(mapToOrig.begin(), mapToOrig.end());
+        // }
 
         auto make_face_from_orig = [&](int aOrig, int bOrig, int cOrig)
         {
@@ -538,7 +545,6 @@ void Object::loadMaterials()
             parseMaterialLine(tokens, type, filePath);
         }
     }
-    std::cout << "Loaded Materials" << std::endl;
 }
 
 void Object::parseMaterialLine(std::vector<std::string> tokens, int type, std::string filePath)
@@ -699,7 +705,6 @@ void Object::addNormals()
                     vertexData[n].adjacentNormal.push_back({&face, normal});
                 }
             }
-    std::cout << "vertex data all found moving on to adding normals!" << std::endl;
     for (int data = 0; data < vertexData.size(); data++)
     {
         std::map<uint32_t, glm::vec3> shadingGroupNormal;

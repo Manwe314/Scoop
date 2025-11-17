@@ -1,6 +1,8 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
 
+constexpr bool SimpleRayTrace = false;
+
 // ~~~~~ helpers ~~~~~~
 
 static ImageRGBA8 makeDummyPink1x1()
@@ -190,7 +192,6 @@ void ShowcaseApp::onChar(uint32_t cp)
         scene.camera.target.y += 0.1;
     }
     
-    std::cout << "camera pos " << scene.camera.position.x << " " << scene.camera.position.y << " " << scene.camera.position.z << std::endl;
     
 }
 
@@ -608,7 +609,6 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     initLookAnglesFromCamera();
     makeInstances(ShowcaseApp::scene);
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
-    std::cout << "transfer is dedicated: " <<  ind.hasDedicatedTransfer << " has seperate transfer: " << ind.hasSeparateTransfer << " can split families: " << ind.canSplitComputeXfer << std::endl;
     // DumpScene(ShowcaseApp::scene);
 }
 
@@ -1752,8 +1752,17 @@ void ShowcaseApp::createComputePipeline()
 
     if (vkCreatePipelineLayout(device, &layoutCreateInfo, nullptr, &computePipelineLayout) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute pipeline layout!");
+    
+    
 
-    auto code = Pipeline::readFile("build/shaders/rayTrace.comp.spv");
+    auto code = [&] {
+        if constexpr (SimpleRayTrace)
+            return Pipeline::readFile("build/shaders/rayTraceSimple.comp.spv");
+        else
+            return Pipeline::readFile("build/shaders/rayTrace.comp.spv");
+    }();
+
+
     VkShaderModule shader = createShaderModule(code);
 
     VkPipelineShaderStageCreateInfo stage{};

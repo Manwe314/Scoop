@@ -312,6 +312,7 @@ static inline void printMesh(std::ostream& os, const ObjectMeshData& m, size_t i
     os << "  [" << idx << "] Mesh: \"" << m.name << "\"\n";
     os << "     SBVH nodes: " << m.bottomLevelAccelerationStructure.nodes.size() << "\n";
     printAABB(os, m.bottomLevelAccelerationStructure.outerBoundingBox);
+    
 
     os << "     textures : " << m.textures.size() << "\n";
     for (size_t i = 0; i < m.textures.size(); ++i)

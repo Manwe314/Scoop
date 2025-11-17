@@ -87,15 +87,35 @@ static PartitionResult partitionSpatialWithDup(std::vector<TriRef>& referances, 
             leftRef.boundingBox = clipAABBToHalfspace(boundingBox, axis, planePos, true);
             rightRef.boundingBox = clipAABBToHalfspace(boundingBox, axis, planePos, false);
 
-            if (hasPositiveExtent(leftRef.boundingBox))
+            bool leftOk  = hasPositiveExtent(leftRef.boundingBox);
+            bool rightOk = hasPositiveExtent(rightRef.boundingBox);
+
+            if (!leftOk && !rightOk)
             {
-                leftTmp.push_back(leftRef);
-                mergeInto(leftBB, leftRef.boundingBox);
+                float minA = boundingBox.min[axis];
+                float maxA = boundingBox.max[axis];
+                float center = 0.5f * (minA + maxA);
+            
+                if (center <= planePos) {
+                    leftTmp.push_back(ref);
+                    mergeInto(leftBB, boundingBox);
+                } else {
+                    rightTmp.push_back(ref);
+                    mergeInto(rightBB, boundingBox);
+                }
             }
-            if (hasPositiveExtent(rightRef.boundingBox))
+            else
             {
-                rightTmp.push_back(rightRef);
-                mergeInto(rightBB, rightRef.boundingBox);
+                if (leftOk)
+                {
+                    leftTmp.push_back(leftRef);
+                    mergeInto(leftBB, leftRef.boundingBox);
+                }
+                if (rightOk)
+                {
+                    rightTmp.push_back(rightRef);
+                    mergeInto(rightBB, rightRef.boundingBox);
+                }
             }
         }
     }
@@ -136,10 +156,7 @@ static inline bool shouldBeLeaf(uint32_t count, int depth, const AABB& centroidB
 
 static inline bool isLeafNode(BVHNode& node)
 {
-    if (node.left_count == 0xFFFFFFFFu || node.right_count == 0xFFFFFFFFu)
-        return false;
-    else
-        return true;
+    return node.left_count != 0xFFFFFFFFu && node.right_count == 0;
 }
 
 static inline void getFacePositions(const Face* f, const std::vector<glm::vec3>& vertices, glm::vec3& v0, glm::vec3& v1, glm::vec3& v2)
@@ -276,7 +293,6 @@ std::vector<MaterialGPU> Object::buildMaterialGPU()
     {
         auto it = materials.find(name);
         const Material& src = (it != materials.end()) ? it->second : defaultMat;
-        std::cout << "for obj: " << objFilePath << std::endl;
         out[id] = packMaterialGPU(src, textrues, textureId);
     }
     return out;
@@ -286,6 +302,20 @@ std::vector<MaterialGPU> Object::buildMaterialGPU()
 SBVH Object::buildSplitBoundingVolumeHierarchy()
 {
     std::vector<TriRef> referances = getRefArray();
+    // int size = 1;
+    // for (auto& ref : referances)
+    // {
+    //     std::array<int, 3> verts = ref.referance->vertices;
+    //     std::cout << "Face: " << size << '\n';
+
+    //     for (int i = 0; i < 3; i++)
+    //     {
+    //         int idx = verts[i] - 1;
+    //         glm::vec3 v = vertices[idx];
+    //         std::cout << "Vertex[" << i << "]: " << v.x << " " << v.y << " " << v.z << '\n';
+    //     }
+    //     size++;
+    // }
     
     BuildState state{};
     state.refs = std::move(referances);
@@ -401,11 +431,13 @@ SBVH Object::buildSplitBoundingVolumeHierarchy()
         {
             partition = partitionSpatialWithDup(state.refs, task.first, task.count, chosen->axis, chosen->pos);
             right_start = partition.rightStart;
+            assert(partition.leftCount + partition.rightCount >= task.count);
         }
         else
         {
             partition = partitionObjectSplit(state.refs, task.first, task.count, chosen->axis, chosen->pos);
             right_start = partition.rightStart;
+            assert(partition.leftCount + partition.rightCount == task.count);
         }
 
         if (partition.leftCount == 0 || partition.rightCount == 0)

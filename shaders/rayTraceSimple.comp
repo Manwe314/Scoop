@@ -150,18 +150,20 @@ float intersectPlane(const in Ray ray, const in vec3 P0, const in vec3 N)
     return dot(P0 - ray.origin, N) / denom;
 }
 
-//temp
-vec3 hsv2rgb(vec3 c) { // compact HSV->RGB
+
+vec3 hsv2rgb(vec3 c)
+{
     vec3 p = abs(fract(c.x + vec3(0,2,4)/6.0)*6.0 - 3.0);
     return c.z * mix(vec3(1.0), clamp(p-1.0,0.0,1.0), c.y);
 }
-vec3 directionHue(vec3 n) {
+vec3 directionHue(vec3 n)
+{
     n = normalize(n);
-    float az = atan(n.z, n.x);                 // [-pi,pi]
-    float el = asin(clamp(n.y, -1.0, 1.0));    // [-pi/2,pi/2]
-    float H = (az / (2.0*3.14159265)) + 0.5;   // [0,1]
+    float az = atan(n.z, n.x);
+    float el = asin(clamp(n.y, -1.0, 1.0));
+    float H = (az / (2.0*3.14159265)) + 0.5;
     float S = 0.7;
-    float V = 0.5 + 0.5 * (el/(0.5*3.14159265)); // brighter when pointing up
+    float V = 0.5 + 0.5 * (el/(0.5*3.14159265));
     return hsv2rgb(vec3(H,S,V));
 }
 
@@ -554,8 +556,6 @@ void main()
     //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
     if (intersectingAABB(ray, vec3(tlasNodes[rootId].bbMin), vec3(tlasNodes[rootId].bbMax), 1e-8, 1e30, tEnter, tExit))
     {
-        //russian rulette termination float
-        float terminate = 0.0;
         Hit hit = Hit(1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
         //main work loop.
         while (true)
@@ -623,20 +623,9 @@ void main()
                 ray.color = mix(textureColor, normalColor, blend);
             }
 
-            //recursive traversal of TLAS
-            // miss logic or BLAS hit
-            // recursive traversal of BLAS
-            // miss logic or trinagle hit
-            // task based sampling over OMEGA hemisphere
-            // update Ray color based on sampling output
-
             if (instanceSelected && hit.instanceIndex == selectedIdx)
                 ray.color = mix(ray.color, vec3(1.0, 1.0, 0.0), 0.4);
-            // update Ray origin and direction based on 
-            if (terminate < 1.0)
-                break;
-            else
-                break;
+            break;
         }
     }
     else

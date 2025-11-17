@@ -345,15 +345,6 @@ void UiApp::onKey(int key, int action, int )
     }
 }
 
-// void UiApp::resetUiApp()
-// {
-//     for (auto& mesh : state.scene.meshes)
-//     {
-
-//     }
-
-// }
-
 void UiApp::createTextPipelineLayout()
 {
     VkDescriptorSetLayout set0 = text->getDescriptorSetLayout();
