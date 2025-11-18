@@ -62,7 +62,7 @@ file(GLOB SHADERS
 set(SPIRV_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
 
-add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O3)
 add_link_options(-fsanitize=address)
 
 

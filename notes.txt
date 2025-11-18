@@ -23,6 +23,12 @@ https://en.wikipedia.org/wiki/Affine_transformation
 https://en.wikipedia.org/wiki/Mipmap
 https://graphics.stanford.edu/papers/trd/trd_jpg.pdf
 https://www.youtube.com/playlist?list=PLmIqTlJ6KsE2yXzeq02hqCDpOdtj6n6A9
+https://graphics.stanford.edu/courses/cs348b-18-spring-content/lectures/12_reflection2/12_reflection2_slides.pdf
+https://graphics.stanford.edu/courses/cs348b-03/papers/veach-chapter9.pdf
+https://medium.com/@uwa4d/physically-based-rendering-more-accurate-microsurface-distribution-function-ggx-3968fc09fa48
+https://graphicscompendium.com/gamedev/15-pbr
+https://arxiv.org/pdf/2306.05044
+
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms
@@ -238,4 +244,83 @@ m48 model + full ray differential sampling w/ amd dGPU & sharing mode concurent
 [CPU] avg FPS: 37.824 avg MS: 26.438
 [GPU] compute: 24.816 ms, graphics: 0.249 ms, combined: 25.065 ms
 [CPU] avg FPS: 37.868 avg MS: 26.407
+
+
+m48 final Simple comp shader w/ iGPU lunox
+[GPU] compute: 3.63167 ms, graphics: 0.270885 ms, combined: 3.90255 ms
+[CPU] avg FPS: 240.653 avg MS: 4.15535
+[GPU] compute: 3.14255 ms, graphics: 0.268177 ms, combined: 3.41073 ms
+[CPU] avg FPS: 241.203 avg MS: 4.14589
+[GPU] compute: 3.14812 ms, graphics: 0.271302 ms, combined: 3.41943 ms
+[CPU] avg FPS: 241.218 avg MS: 4.14562
+[GPU] compute: 3.68297 ms, graphics: 0.264844 ms, combined: 3.94781 ms
+[CPU] avg FPS: 241.34 avg MS: 4.14353
+[GPU] compute: 3.69625 ms, graphics: 0.27901 ms, combined: 3.97526 ms
+[CPU] avg FPS: 241.125 avg MS: 4.14723
+[GPU] compute: 3.99234 ms, graphics: 0.276354 ms, combined: 4.2687 ms
+[CPU] avg FPS: 240.699 avg MS: 4.15457
+[GPU] compute: 3.15073 ms, graphics: 0.272031 ms, combined: 3.42276 ms
+[CPU] avg FPS: 240.701 avg MS: 4.15453
+[GPU] compute: 4.04167 ms, graphics: 0.271562 ms, combined: 4.31323 ms
+[CPU] avg FPS: 240.553 avg MS: 4.15709
+
+m48 final Simple comp shader w/ iGPu just a girl
+[GPU] compute: 73.4875 ms, graphics: 0.376042 ms, combined: 73.8635 ms
+[CPU] avg FPS: 16.2435 avg MS: 61.563
+[GPU] compute: 72.4809 ms, graphics: 0.453073 ms, combined: 72.934 ms
+[CPU] avg FPS: 16.1443 avg MS: 61.9414
+[GPU] compute: 73.6702 ms, graphics: 0.39526 ms, combined: 74.0654 ms
+[CPU] avg FPS: 16.0447 avg MS: 62.3258
+[GPU] compute: 71.0971 ms, graphics: 0.325 ms, combined: 71.4221 ms
+[CPU] avg FPS: 15.9504 avg MS: 62.6945
+[GPU] compute: 71.0134 ms, graphics: 0.316406 ms, combined: 71.3298 ms
+[CPU] avg FPS: 15.8579 avg MS: 63.0601
+[GPU] compute: 70.7717 ms, graphics: 0.31349 ms, combined: 71.0852 ms
+[CPU] avg FPS: 15.7674 avg MS: 63.4218
+[GPU] compute: 71.2671 ms, graphics: 0.302552 ms, combined: 71.5697 ms
+[CPU] avg FPS: 15.6769 avg MS: 63.7881
+[GPU] compute: 71.2867 ms, graphics: 0.306771 ms, combined: 71.5934 ms
+[CPU] avg FPS: 15.5868 avg MS: 64.157
+[GPU] compute: 72.1598 ms, graphics: 0.31474 ms, combined: 72.4746 ms
+[CPU] avg FPS: 15.4965 avg MS: 64.5307
+
+m48 final Simple comp shader w/ iGPU & O3 lunox
+[GPU] compute: 4.60693 ms, graphics: 0.293698 ms, combined: 4.90062 ms
+[CPU] avg FPS: 241.587 avg MS: 4.13929
+[GPU] compute: 3.14943 ms, graphics: 0.273125 ms, combined: 3.42255 ms
+[CPU] avg FPS: 241.543 avg MS: 4.14005
+[GPU] compute: 3.14365 ms, graphics: 0.274687 ms, combined: 3.41833 ms
+[CPU] avg FPS: 241.535 avg MS: 4.14019
+[GPU] compute: 3.66807 ms, graphics: 0.26901 ms, combined: 3.93708 ms
+[CPU] avg FPS: 241.706 avg MS: 4.13726
+[GPU] compute: 3.75979 ms, graphics: 0.271354 ms, combined: 4.03115 ms
+[CPU] avg FPS: 241.544 avg MS: 4.14003
+[GPU] compute: 3.14594 ms, graphics: 0.271458 ms, combined: 3.4174 ms
+[CPU] avg FPS: 241.527 avg MS: 4.14033
+[GPU] compute: 3.14443 ms, graphics: 0.27224 ms, combined: 3.41667 ms
+[CPU] avg FPS: 241.577 avg MS: 4.13947
+[GPU] compute: 3.78745 ms, graphics: 0.291771 ms, combined: 4.07922 ms
+[CPU] avg FPS: 241.24 avg MS: 4.14525
+
+
+m48 final Simple comp shader w/ iGpu & O3 just a girl
+[GPU] compute: 70.7747 ms, graphics: 0.325937 ms, combined: 71.1006 ms
+[CPU] avg FPS: 13.9133 avg MS: 71.8736
+[GPU] compute: 70.9957 ms, graphics: 0.29474 ms, combined: 71.2905 ms
+[CPU] avg FPS: 13.9133 avg MS: 71.8736
+[GPU] compute: 71.0902 ms, graphics: 0.324115 ms, combined: 71.4143 ms
+[CPU] avg FPS: 13.9127 avg MS: 71.8767
+[GPU] compute: 70.8108 ms, graphics: 0.31401 ms, combined: 71.1248 ms
+[CPU] avg FPS: 13.9132 avg MS: 71.8743
+[GPU] compute: 70.9621 ms, graphics: 0.320312 ms, combined: 71.2824 ms
+[CPU] avg FPS: 13.9129 avg MS: 71.8756
+[GPU] compute: 70.858 ms, graphics: 0.301354 ms, combined: 71.1593 ms
+[CPU] avg FPS: 13.9128 avg MS: 71.8764
+[GPU] compute: 71.2709 ms, graphics: 0.320365 ms, combined: 71.5913 ms
+[CPU] avg FPS: 13.9122 avg MS: 71.8792
+[GPU] compute: 70.796 ms, graphics: 0.29349 ms, combined: 71.0895 ms
+[CPU] avg FPS: 13.9126 avg MS: 71.8772
+[GPU] compute: 71.2023 ms, graphics: 0.329635 ms, combined: 71.5319 ms
+[CPU] avg FPS: 13.9123 avg MS: 71.8788
+
 

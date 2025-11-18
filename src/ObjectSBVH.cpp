@@ -185,7 +185,8 @@ static inline float shininessToRoughness(float shininess)
     return glm::clamp(roughness, 0.0f, 1.0f);
 }
 
-static inline uint32_t makeFlags(const Material& m) {
+static inline uint32_t makeFlags(const Material& m)
+{
     uint32_t f = 0u;
     if (m.opacity >= 0.999f)
         f |= 0x1u;
