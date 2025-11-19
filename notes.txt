@@ -4,9 +4,16 @@ errors:
 to-add later:
     unspliting in SBVH construction;
     add a tab on Ui App for key binding + general stats? at index -2?
+    add inverse transpose of linnear part for normal transform model->world
 
 tomorrow?
-    RayTracing
+    eval BRDF
+    per pixel loop total
+
+for read me:
+    what i wouldve upgraded.
+    mtl files use K phong data not P PBR data.
+
 
     
 
