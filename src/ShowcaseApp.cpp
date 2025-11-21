@@ -608,6 +608,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
     makeInstances(ShowcaseApp::scene);
+    makeEmissionTriangles();
     QueueFamiliyIndies ind = findQueueFamilies(gpu);
     // DumpScene(ShowcaseApp::scene);
 }
@@ -794,6 +795,7 @@ void ShowcaseApp::makeInstances(Scene& scene)
     std::vector<uint32_t> nodeBases(size, 0u);
     std::vector<uint32_t> triBases(size, 0u);
     std::vector<uint32_t> shadeTriBases(size, 0u);
+    std::vector<uint32_t> shadeTriCounts(size, 0u);
     std::vector<uint32_t> materialBases(size, 0u);
     std::vector<uint32_t> textureBases(size, 0u);
 
@@ -819,6 +821,7 @@ void ShowcaseApp::makeInstances(Scene& scene)
         runningShaderSize = static_cast<uint32_t>(mesh.bottomLevelAccelerationStructure.triangles.shadingTriangles.size());
         runningMatSize = static_cast<uint32_t>(mesh.perMeshMaterials.size());
         runningTextureSize = static_cast<uint32_t>(mesh.textures.size());
+        shadeTriCounts[i] = runningShaderSize;
         i++;
     }
     SBVHNodes.reserve(nodeBases[i - 1] + runningNodeSize);
@@ -860,9 +863,126 @@ void ShowcaseApp::makeInstances(Scene& scene)
         inst.nodeBase = nodeBases[object.meshID];
         inst.triBase = triBases[object.meshID];
         inst.shadeTriBase = shadeTriBases[object.meshID];
+        inst.shadeTriCount = shadeTriCounts[object.meshID];
         inst.materialBase = materialBases[object.meshID];
         inst.textureBase = textureBases[object.meshID];
         instances.push_back(inst);
+    }
+}
+
+inline bool isEmissive(glm::vec4 emission)
+{
+    if (emission.x <= 1e-3f && emission.y <= 1e-3f && emission.z <= 1e-3f)
+        return false;
+    return true;
+}
+
+
+void ShowcaseApp::makeEmissionTriangles()
+{
+    std::vector<float> power;
+    for (int size = 0; size < instances.size(); size++)
+    {
+        auto& instance = instances[size];
+        for (uint32_t i = 0; i < instance.shadeTriCount; i++)
+        {
+            uint32_t matIndex = glm::floatBitsToUint(shadingTriangles[instance.shadeTriBase + i].texture_materialId.w);
+            glm::vec4 emission = materials[instance.materialBase + matIndex].emission_flags;
+            if (!isEmissive(emission))
+                continue;
+            EmisiveTriangle eTri{};
+            eTri.instanceIndex = static_cast<uint32_t>(size);
+            eTri.materialIndex = instance.materialBase + matIndex;
+            eTri.primitiveIndex = instance.shadeTriBase + i;
+
+            emissiveTrinagles.push_back(eTri);
+
+            auto& mollerTri = intersectionTrinagles[instance.triBase + i];
+            float area = 0.5 * glm::length(glm::cross(affineTransformDirection(instance.modelToWorld,glm::vec3(mollerTri.edge_vec1)), affineTransformDirection(instance.modelToWorld,glm::vec3(mollerTri.edge_vec2))));
+            float lum = 0.2126*emission.r + 0.7152*emission.g + 0.0722*emission.b;
+            float w = lum * area;
+            power.push_back(std::max(w, 1e-8f)); 
+        }
+    }
+    if (emissiveTrinagles.empty())
+    {
+        throw std::runtime_error("ShowCaseApp: No emissive trinagles means you'll see nothing");
+    }
+    emissiveTrinagles[0].padding = static_cast<uint>(emissiveTrinagles.size());
+
+    const size_t N = power.size();
+    lightPdf.clear();
+    lightProb.clear();
+    lightAlias.clear();
+
+    if (N == 0)
+        return;
+
+    lightPdf.resize(N);
+    lightProb.resize(N);
+    lightAlias.resize(N);
+
+    float totalPower = 0.0f;
+    for (float w : power)
+        totalPower += w;
+
+    if (totalPower <= 0.0f)
+    {
+        float uniformPdf = 1.0f / float(N);
+        for (size_t i = 0; i < N; ++i) {
+            lightPdf[i]   = uniformPdf;
+            lightProb[i]  = 1.0f;
+            lightAlias[i] = static_cast<uint32_t>(i);
+        }
+        return;
+    }
+
+    std::vector<float> scaled(N);
+    for (size_t i = 0; i < N; i++)
+    {
+        float p = power[i] / totalPower;
+        lightPdf[i] = p;
+        scaled[i] = p * float(N);
+    }
+
+    std::vector<uint32_t> small;
+    std::vector<uint32_t> large;
+    small.reserve(N);
+    large.reserve(N);
+
+    for (uint32_t i = 0; i < N; ++i) {
+        if (scaled[i] <= 1.0f)
+            small.push_back(i);
+        else
+            large.push_back(i);
+    }
+
+    while (!small.empty() && !large.empty())
+    {
+        uint32_t j = small.back();
+        small.pop_back();
+        uint32_t k = large.back();
+        large.pop_back();
+
+        lightProb[j]  = scaled[j];
+        lightAlias[j] = k;
+        scaled[k] = (scaled[k] + scaled[j]) - 1.0f;
+        if (scaled[k] <= 1.0f)
+            small.push_back(k);
+        else
+            large.push_back(k);
+    }
+
+    for (uint32_t i : large)
+    {
+        lightProb[i]  = 1.0f;
+        lightAlias[i] = i;
+    }
+
+    for (uint32_t i : small)
+    {
+        lightProb[i]  = 1.0f;
+        lightAlias[i] = i;
     }
 }
 
@@ -1583,7 +1703,19 @@ void ShowcaseApp::createComputeDescriptors()
     b9.descriptorCount = std::max(1u, static_cast<uint32_t>(flattened.size()));
     b9.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    std::array<VkDescriptorSetLayoutBinding, 10> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9};
+    VkDescriptorSetLayoutBinding b10 = b1;
+    b10.binding = 10;
+
+    VkDescriptorSetLayoutBinding b11 = b1;
+    b11.binding = 11;
+
+    VkDescriptorSetLayoutBinding b12 = b1;
+    b12.binding = 12;
+
+    VkDescriptorSetLayoutBinding b13 = b1;
+    b13.binding = 13;
+
+    std::array<VkDescriptorSetLayoutBinding, 14> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13};
 
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1599,7 +1731,7 @@ void ShowcaseApp::createComputeDescriptors()
         
     VkDescriptorPoolSize poolSizeBuf{};
     poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizeBuf.descriptorCount = 8 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizeBuf.descriptorCount = 12 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     VkDescriptorPoolSize poolSizeTex{};
     poolSizeTex.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1662,6 +1794,10 @@ void ShowcaseApp::writeStaticComputeBindings()
         VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo eTriInfo{ emissiveTriangleBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo lightProbInfo{ lightProbBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo lightPdfInfo{ lightPdfBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo lightAliasInfo{ lightAliasBuffer, 0, VK_WHOLE_SIZE };
 
         VkWriteDescriptorSet w1{};
         w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1695,7 +1831,39 @@ void ShowcaseApp::writeStaticComputeBindings()
         w4.descriptorCount = 1;
         w4.pBufferInfo = &matInfo;
 
-        std::array<VkWriteDescriptorSet, 4> writes = {w1, w2, w3, w4};
+        VkWriteDescriptorSet w10{};
+        w10.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w10.dstSet = computeSets[i];
+        w10.dstBinding = 10;
+        w10.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w10.descriptorCount = 1;
+        w10.pBufferInfo = &eTriInfo;
+
+        VkWriteDescriptorSet w11{};
+        w11.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w11.dstSet = computeSets[i];
+        w11.dstBinding = 11;
+        w11.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w11.descriptorCount = 1;
+        w11.pBufferInfo = &lightProbInfo;
+
+        VkWriteDescriptorSet w12{};
+        w12.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w12.dstSet = computeSets[i];
+        w12.dstBinding = 12;
+        w12.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w12.descriptorCount = 1;
+        w12.pBufferInfo = &lightPdfInfo;
+
+        VkWriteDescriptorSet w13{};
+        w13.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w13.dstSet = computeSets[i];
+        w13.dstBinding = 13;
+        w13.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w13.descriptorCount = 1;
+        w13.pBufferInfo = &lightAliasInfo;
+
+        std::array<VkWriteDescriptorSet, 8> writes = {w1, w2, w3, w4, w10, w11, w12, w13};
         vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 }
@@ -1706,6 +1874,10 @@ void ShowcaseApp::uploadStaticData()
     uploadDeviceLocal(intersectionTrinagles, 0, triangleBuffer, triangleMemory);
     uploadDeviceLocal(shadingTriangles, 0, shadingBuffer, shadingMemory);
     uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
+    uploadDeviceLocal(emissiveTrinagles, 0, emissiveTriangleBuffer, emissiveTriangleMemory);
+    uploadDeviceLocal(lightProb, 0, lightProbBuffer, lightProbMemory);
+    uploadDeviceLocal(lightPdf, 0, lightPdfBuffer, lightPdfMemory);
+    uploadDeviceLocal(lightAlias, 0, lightAliasBuffer, lightAliasMemory);
     uploadTextureImages();
     writeStaticComputeBindings();
 }
@@ -2118,5 +2290,25 @@ void ShowcaseApp::destorySSBOdata()
         vkDestroyBuffer(device, materialBuffer, nullptr);
     if (materialMemory)
         vkFreeMemory(device, materialMemory, nullptr);
+    
+    if (emissiveTriangleBuffer)
+        vkDestroyBuffer(device, emissiveTriangleBuffer, nullptr);
+    if (emissiveTriangleMemory)
+        vkFreeMemory(device, emissiveTriangleMemory, nullptr);
+
+    if (lightProbBuffer)
+        vkDestroyBuffer(device, lightProbBuffer, nullptr);
+    if (lightProbMemory)
+        vkFreeMemory(device, lightProbMemory, nullptr);
+
+    if (lightPdfBuffer)
+        vkDestroyBuffer(device, lightPdfBuffer, nullptr);
+    if (lightPdfMemory)
+        vkFreeMemory(device, lightPdfMemory, nullptr);
+
+    if (lightAliasBuffer)
+        vkDestroyBuffer(device, lightAliasBuffer, nullptr);
+    if (lightAliasMemory)
+        vkFreeMemory(device, lightAliasMemory, nullptr);
 
 }

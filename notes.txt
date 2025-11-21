@@ -20,6 +20,7 @@ for read me:
 
 sources:
 
+https://cadxfem.org/inf/Fast%20MinimumStorage%20RayTriangle%20Intersection.pdf
 https://www.nvidia.in/docs/IO/77714/sbvh.pdf
 https://nils-olovsson.se/articles/ear_clipping_triangulation/#citation-chazelle1991
 https://raytracing.github.io/books/RayTracingInOneWeekend.html#rays,asimplecamera,andbackground
@@ -35,7 +36,11 @@ https://graphics.stanford.edu/courses/cs348b-03/papers/veach-chapter9.pdf
 https://medium.com/@uwa4d/physically-based-rendering-more-accurate-microsurface-distribution-function-ggx-3968fc09fa48
 https://graphicscompendium.com/gamedev/15-pbr
 https://arxiv.org/pdf/2306.05044
-
+https://amindforeverprogramming.blogspot.com/2013/07/random-floats-in-glsl-330.html
+https://shi-yan.github.io/webgpuunleashed/Basics/mipmapping_and_anisotropic_filtering.html
+https://www.pbr-book.org/4ed/Shapes/Triangle_Meshes
+https://en.wikipedia.org/wiki/Alias_method
+https://dl.acm.org/doi/pdf/10.1145/218380.218500
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms

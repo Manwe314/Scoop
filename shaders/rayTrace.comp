@@ -67,19 +67,29 @@ struct InstanceDataGPU {
     uvec4 bases23; // x=textureBase, y=sbvhRoot
 };
 
+struct EmisiveTrinagle {
+    uint primitiveIndex;
+    uint instanceIndex;
+    uint materialIndex;
+    uint padding;
+};
+
 layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
 layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
 layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
 layout(set = 0, binding = 9) uniform sampler2D textures2D[];
+layout(set = 0, binding = 10, std430) readonly buffer EmissiveTriBuf {EmisiveTrinagle emissiveTrinagles[]; };
+layout(set = 0, binding = 11, std430) readonly buffer LightProb { float lightProbability[]; };
+layout(set = 0, binding = 12, std430) readonly buffer LightPdf { float lightPDF[]; };
+layout(set = 0, binding = 13, std430) readonly buffer LightAli { uint LightAlias[]; };
 
 // ---------- RayTracing Engine ----------
 
 
-//~~~~~~~~~~~~~ comp specific data structs ~~~~~~~~~~~~~
+//~~~~~~~~~~~~~ comp specific data structs & constants ~~~~~~~~~~~~~
 struct Ray {
     vec3 origin;
     vec3 direction;
-    vec3 color;
 };
 
 struct Hit {
@@ -95,6 +105,13 @@ const uint FLAG_INSTANCE_SEL = 1u << 30;
 const uint B_INTERP_SHIFT    = 20u;
 const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
 const uint MASK_INSTANCE_IDX = 0xFu;
+const float PI      = 3.14159265358979323846;
+const float INV_PI  = 0.31830988618379067154;
+const vec3 sunDir = normalize(vec3(0.5, 0.5, 0.0));
+const float sunAngularRadius = 0.2;
+const float sunCosAngle = cos(sunAngularRadius);
+const vec3 skyColor = vec3(0.0);
+const vec3 sunColor = vec3(20.0, 20.0, 18.0);
 
 
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
@@ -117,9 +134,21 @@ uint xorshift(inout uint state)
     return state;
 }
 
+float floatConstruct(uint state)
+{
+    const uint ieeeMantissa = 0x007FFFFFu;
+    const uint ieeeOne      = 0x3F800000u;
+
+    state &= ieeeMantissa;
+    state |= ieeeOne;
+
+    float  f = uintBitsToFloat(state);
+    return f - 1.0;
+}
+
 float rand(inout uint state)
 {
-    return float(xorshift(state)) * 2.3283064365386963e-10;
+    return floatConstruct(wang_hash(xorshift(state)));
 }
 
 void swap(inout float a, inout float b)
@@ -128,6 +157,27 @@ void swap(inout float a, inout float b)
     a = b;
     b = temp;
 }
+
+float safeSqrt(float x) {
+    return sqrt(max(x, 0.0));
+}
+
+float angleBetween(vec3 a, vec3 b) {
+    return acos(clamp(dot(a, b), -1.0, 1.0));
+}
+
+vec3 gramSchmidt(vec3 v, vec3 n) {
+    return normalize(v - n * dot(v, n));
+}
+
+float differenceOfProducts(float a, float b, float c, float d) {
+    return a * b - c * d;
+}
+
+float sumOfProducts(float a, float b, float c, float d) {
+    return a * b + c * d;
+}
+
 
 vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
 {
@@ -146,7 +196,6 @@ vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const
 Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
 {
     Ray newRay;
-    newRay.color = ray.color;
     newRay.origin = affineTransformPoint(ray.origin, row0, row1, row2); 
     newRay.direction = affineTransformDirection(ray.direction, row0, row1, row2);
     return newRay;
@@ -168,7 +217,7 @@ float intersectPlane(const in Ray ray, const in vec3 P0, const in vec3 N)
     return dot(P0 - ray.origin, N) / denom;
 }
 
-vec3 fresnel_Schlick(const in float cosTheta,const in vec3 F0)
+vec3 fresnel_Schlick(const in float cosTheta, const in vec3 F0)
 {
     return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 }
@@ -201,7 +250,7 @@ void buildOrthonormalBasis(const in vec3 normal, out vec3 T1, out vec3 T2)
 
 vec3 SampleVndf_Hemisphere(const in vec2 rand,const in vec3 incoming_dir)
 {
-    float phi = 2.0f * M_PI * rand.x;
+    float phi = 2.0f * PI * rand.x;
     float z = fma((1.0f - rand.y), (1.0f + incoming_dir.z), -incoming_dir.z);
     float sinTheta = sqrt(clamp(1.0f - z * z, 0.0f, 1.0f));
     float x = sinTheta * cos(phi);
@@ -220,23 +269,31 @@ vec3 SampleVndf_GGX(const in vec2 rand, const in vec3 incoming_dir, const in vec
 }
 
 //temp
-vec3 hsv2rgb(vec3 c) { // compact HSV->RGB
+vec3 hsv2rgb(vec3 c) {
     vec3 p = abs(fract(c.x + vec3(0,2,4)/6.0)*6.0 - 3.0);
     return c.z * mix(vec3(1.0), clamp(p-1.0,0.0,1.0), c.y);
 }
 vec3 directionHue(vec3 n) {
     n = normalize(n);
-    float az = atan(n.z, n.x);                 // [-pi,pi]
-    float el = asin(clamp(n.y, -1.0, 1.0));    // [-pi/2,pi/2]
-    float H = (az / (2.0*3.14159265)) + 0.5;   // [0,1]
+    float az = atan(n.z, n.x);
+    float el = asin(clamp(n.y, -1.0, 1.0));
+    float H = (az / (2.0*3.14159265)) + 0.5;
     float S = 0.7;
-    float V = 0.5 + 0.5 * (el/(0.5*3.14159265)); // brighter when pointing up
+    float V = 0.5 + 0.5 * (el/(0.5*3.14159265));
     return hsv2rgb(vec3(H,S,V));
 }
 
 //~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
 
+vec3 evalSunEnvironment(vec3 dir)
+{
+    float cosTheta = dot(normalize(dir), sunDir);
 
+    if (cosTheta > sunCosAngle)
+        return sunColor;
+    else
+        return skyColor;
+}
 
 vec4 computeTextureDifferential(const in Ray ray, const in Ray rayDX, const in Ray rayDY, const in float tHit, const in vec3 v0, const in vec3 e1, const in vec3 e2, const in vec2 uv0, const in vec2 uv1, const in vec2 uv2)
 {
@@ -304,7 +361,25 @@ Ray generateRay(const in uvec2 pixel)
     Ray ray;
     ray.origin = Params.camPos_time.xyz;
     ray.direction = normalize(point1 - point0);
-    ray.color = vec3(0.0);
+    return ray;
+}
+
+Ray generateRayJittered(uvec2 pixel, vec2 jitter)
+{
+    vec2 pixelSample = vec2(pixel) + jitter;
+
+    vec2 UV = pixelSample / vec2(Params.imageSize);
+    vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
+
+    vec4 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
+    vec4 farPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
+
+    vec3 point0 = nearPoint.xyz / nearPoint.w;
+    vec3 point1 = farPoint.xyz / farPoint.w;
+
+    Ray ray;
+    ray.origin = Params.camPos_time.xyz;
+    ray.direction = normalize(point1 - point0);
     return ray;
 }
 
@@ -620,7 +695,7 @@ void trace(const in Ray ray, inout Hit hit)
             if (hit.primitiveIndex != 0xFFFFFFFFu && closestT < previousClosestT)
             {
                 hit.instanceIndex = instanceId;
-                hit.world_dist_to_hit = closestT
+                hit.world_dist_to_hit = closestT;
             }
         }
     }
@@ -633,12 +708,12 @@ float getGGXPDF(const in vec3 normal, const in vec3 outgoing_dir, const in float
 {
     float Ndotw_o = dot(normal, outgoing_dir);
     float Ndotw_i = dot(normal, candidate_wi);
-    if (Ndotw_o <= 0.0 || Ndotw_i <= 0.0)
+    if (Ndotw_o <= 1e-6 || Ndotw_i <= 1e-6)
         return 0.0;
 
     vec3 H = normalize(candidate_wi + outgoing_dir);
     float NdotH = max(dot(normal, H), 0.0);
-    float w_odotH = max(dot(wo, H), 0.0);
+    float w_odotH = max(dot(outgoing_dir, H), 0.0);
 
     float alpha = roughness * roughness;
 
@@ -652,12 +727,12 @@ float getGGXPDF(const in vec3 normal, const in vec3 outgoing_dir, const in float
     return pdf_wi;
 }
 
-void sampleGGX(const in vec3 normal,const in vec3 outgoing_dir, const int float roughness, const in float rand1, const in float rand2, out vec3 incoming_dir, out float PDF)
+void sampleGGX(const in vec3 normal,const in vec3 outgoing_dir, const in float roughness, const in float rand1, const in float rand2, out vec3 incoming_dir, out float PDF)
 {
     PDF = 0.0;
 
     float NdotV = dot(normal, outgoing_dir);
-    if (NdotV <= 0.0)
+    if (NdotV <= 1e-6)
         return;
 
     vec3 T, T2;
@@ -684,7 +759,7 @@ void sampleGGX(const in vec3 normal,const in vec3 outgoing_dir, const int float 
 float getDiffusePDF(const in vec3 normal, const in vec3 candidate_wi)
 {
     float cosine = dot(normal, candidate_wi);
-    return (cosine > 0.0) ? (cosine / PI) : 0.0;
+    return (cosine > 0.0) ? (cosine * INV_PI) : 0.0;
 }
 
 void sampleDiffuse(const in vec3 normal,const in float rand1, const in float rand2 ,out vec3 incoming_dir, out float PDF)
@@ -697,25 +772,43 @@ void sampleDiffuse(const in vec3 normal,const in float rand1, const in float ran
     float y   = r * sin(phi);
     float z   = sqrt(1.0 - rand2);
 
-    vec3 local_direction = vec3(x, y, z)
+    vec3 local_direction = vec3(x, y, z);
 
-    vec3 T1, T2;
+    vec3 T1;
+    vec3 T2;
     buildOrthonormalBasis(normal, T1, T2);
 
-    incoming_dir = normalize(localDir.x * T + localDir.y * T2 + localDir.z * normal);
+    incoming_dir = normalize(local_direction.x * T1 + local_direction.y * T2 + local_direction.z * normal);
 
-    PDF = getDiffusePDF(normal, w_i);
+    PDF = getDiffusePDF(normal, incoming_dir);
 }
 
-vec3 evaluateBRDF(const in vec3 normal, const in vec3 incoming_dir)
+vec3 evaluateBRDF(const in vec3 normal, const in vec3 incoming_dir, const in vec3 outgoing_dir, const in vec3 baseColor, const in vec3 F0, const in float roughness)
 {
-    // we need the f value. its f of diffuse + f of specular. 
+    // we need the f value. its f of diffuse + f of specular.
+    float Ndotw_i = dot(normal, incoming_dir);
+    float Ndotw_o = dot(normal, outgoing_dir);
+    if (Ndotw_i <= 1e-6|| Ndotw_o <= 1e-6)
+        return vec3(0.0);
 
     //we calculate f of difuse simple lambertian term
-    vec3 f_diffuse = vec3(0.0);
+    vec3 f_diffuse = baseColor * INV_PI;
 
     //we now calculate f of specular GGX
-    vec3 f_specular = vec3(0.1);
+    vec3 H = normalize(incoming_dir + outgoing_dir);
+    float NdotH = max(dot(normal, H), 0.0);
+    float w_odotH = max(dot(outgoing_dir, H), 0.0);
+
+    float alpha = roughness * roughness;
+
+    float D   = GGX_D(NdotH, alpha);
+    float G1v = GGX_G1(Ndotw_o, alpha);
+    float G1l = GGX_G1(Ndotw_i, alpha);
+    float G   = G1v * G1l;
+
+    vec3 F = fresnel_Schlick(w_odotH, F0);
+
+    vec3 f_specular = (D * G * F) / max(4.0 * Ndotw_i * Ndotw_o, 1e-6);
 
     //thats it
     return f_diffuse + f_specular;
@@ -732,7 +825,7 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
 
     // make sure normal and outgoing direction are on the same side.
     float cosineTheta = dot(normal, outgoing_dir);
-    if (cosineTheta <= 0.0)
+    if (cosineTheta <= 1e-6)
         return;
 
     // pick 2 weights such that they add to 1 to pick from diffuse or GGX
@@ -746,14 +839,14 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
     if (randLobe < specular_weight)
     {
         //if we are sampling specular (GGX):
-        sampleGGX(normal, candidate_wi, s_pdf);
+        sampleGGX(normal, outgoing_dir, roughness, rand1, rand2 ,candidate_wi, s_pdf);
         d_pdf = getDiffusePDF(normal,candidate_wi);
     }
     else
     {
         //if we are sampling diffuse (Lambert):
         sampleDiffuse(normal,rand1, rand2, candidate_wi, d_pdf);
-        s_pdf = getGGXPDF(candidate_wi);
+        s_pdf = getGGXPDF(normal, outgoing_dir, roughness, candidate_wi);
     }
 
     //now we can combine the PDF's with the weights used to pick sampling strategy.
@@ -763,8 +856,8 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
     if (pdf <= 0.0)
         return;
     incoming_dir = candidate_wi;
-    BRDF_value = evaluateBRDF(normal, candidate_wi);
-    PDF = pdf;
+    BRDF_value = evaluateBRDF(normal, candidate_wi, outgoing_dir, baseColor, F0, roughness);
+    BRDF_PDF = pdf;
 }
 
 void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
@@ -785,7 +878,7 @@ void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
     float BRDF_PDF;
 
     // this will need the material data and random values
-    BRDF(normal, w_i_BRDF, BRDF_value, BRDF_PDF);
+    BRDF(normal, outgoing_dir, baseColor, F0, roughness, randLobe, rand1, rand2, w_i_BRDF, BRDF_value, BRDF_PDF);
     
     if (BRDF_PDF <= 0.0)
         return;
@@ -795,66 +888,405 @@ void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
     BSDF_PDF = BRDF_PDF;
 }
 
-vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throughput, inout uint rngState)
+uint sampleLightIndex(inout uint rngState, out float pdfLight)
+{
+    uint N = emissiveTrinagles[0].padding;
+    if (N == 0u) {
+        pdfLight = 0.0;
+        return 0xFFFFFFFFu;
+    }
+
+    float u1 = rand(rngState);
+    float u2 = rand(rngState);
+
+    uint k = uint(u1 * float(N));
+    if (k >= N) k = N - 1u;
+
+    float q = lightProbability[k];
+    uint  a = LightAlias[k];
+
+    uint idx = (u2 < q) ? k : a;
+
+    pdfLight = lightPDF[idx];
+    return idx;
+}
+
+bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
+                              vec3 refP, vec2 u, 
+                              out vec3 out_w, out float out_pdf)
+{
+    // Directions to vertices (unit)
+    vec3 a = normalize(v0 - refP);
+    vec3 b = normalize(v1 - refP);
+    vec3 c = normalize(v2 - refP);
+
+    if (length(a) == 0.0 || length(b) == 0.0 || length(c) == 0.0)
+        return false;
+
+    // Edge plane normals
+    vec3 n_ab = cross(a, b);
+    vec3 n_bc = cross(b, c);
+    vec3 n_ca = cross(c, a);
+
+    if (dot(n_ab, n_ab) == 0.0 ||
+        dot(n_bc, n_bc) == 0.0 ||
+        dot(n_ca, n_ca) == 0.0)
+        return false;
+
+    n_ab = normalize(n_ab);
+    n_bc = normalize(n_bc);
+    n_ca = normalize(n_ca);
+
+    // Interior angles of spherical triangle
+    float alpha = angleBetween(n_ab, -n_ca);
+    float beta  = angleBetween(n_bc, -n_ab);
+    float gamma = angleBetween(n_ca, -n_bc);
+
+    // Spherical area A = (alpha+beta+gamma) - PI
+    float A_pi  = alpha + beta + gamma;
+    float A     = A_pi - PI;
+    if (A <= 0.0) return false;
+
+    // Uniform in solid angle => pdf = 1 / A
+    out_pdf = 1.0 / A;
+
+    // Sample partial area A' linearly between 0 and A
+    float Ap = u.x * A;
+    float Ap_pi = Ap + PI; // A' + PI
+
+    // Now compute B' at vertex corresponding to 'a' (pbrt-style)
+    float cosAlpha = cos(alpha);
+    float sinAlpha = sin(alpha);
+
+    float sinAp   = sin(Ap_pi);
+    float cosAp   = cos(Ap_pi);
+
+    float sinPhi = sinAp * cosAlpha - cosAp * sinAlpha;
+    float cosPhi = cosAp * cosAlpha + sinAp * sinAlpha;
+
+    float k1 = cosPhi + cosAlpha;
+    float cos_c = dot(a, b); // side length opposite vertex c
+    float k2 = sinPhi - sinAlpha * cos_c;
+
+    float num   = k2 + differenceOfProducts(k2, cosPhi, k1, sinPhi) * cosAlpha;
+    float denom = (sumOfProducts(k2, sinPhi, k1, cosPhi)) * sinAlpha;
+
+    if (abs(denom) < 1e-8)
+        return false;
+
+    float cosBp = num / denom;
+    cosBp = clamp(cosBp, -1.0, 1.0);
+    float sinBp = safeSqrt(1.0 - cosBp * cosBp);
+
+    // New third vertex C' along arc AC
+    vec3 c_ortho = gramSchmidt(c, a);
+    vec3 cp = cosBp * a + sinBp * normalize(c_ortho);
+
+    // Sample direction along arc from b to c'
+    float dot_bc = dot(b, cp);
+    float cosTheta = 1.0 - u.y * (1.0 - dot_bc);
+    cosTheta = clamp(cosTheta, -1.0, 1.0);
+    float sinTheta = safeSqrt(1.0 - cosTheta * cosTheta);
+
+    vec3 axis = gramSchmidt(cp, b);
+    vec3 w = cosTheta * b + sinTheta * normalize(axis);
+
+    out_w = normalize(w);
+    return true;
+}
+
+bool sampleLightDirection(
+    vec3 P,                // shading point (world)
+    inout uint rngState,
+    out vec3 wi,           // direction to light
+    out vec3 Le,           // emitted radiance of that triangle
+    out float pdfDir,      // pdf in solid angle (for MIS/denominator)
+    out uint lightIdxOut)  // index into emissiveTrinagles[]
+{
+    pdfDir = 0.0;
+    wi = vec3(0.0);
+    Le = vec3(0.0);
+    lightIdxOut = 0xFFFFFFFFu;
+
+    float pdfLight;
+    uint lightIdx = sampleLightIndex(rngState, pdfLight);
+    if (lightIdx == 0xFFFFFFFFu || pdfLight <= 0.0)
+        return false;
+
+    EmisiveTrinagle L = emissiveTrinagles[lightIdx];
+
+    uint primIdx     = L.primitiveIndex;
+    uint instIdx     = L.instanceIndex;
+    uint materialIdx = L.materialIndex;
+
+    MollerTriangle  tri  = triangles[primIdx];
+
+    // Model-space triangle vertices
+    vec3 v0_model = vec3(tri.vertex_0);
+    vec3 v1_model = v0_model + vec3(tri.edge_vec1);
+    vec3 v2_model = v0_model + vec3(tri.edge_vec2);
+
+    // World-space triangle vertices
+    vec3 v0_world = affineTransformPoint(v0_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v1_world = affineTransformPoint(v1_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v2_world = affineTransformPoint(v2_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+
+    // Arvo spherical triangle sampling
+    vec2 u = vec2(rand(rngState), rand(rngState));
+    float pdfSolidAngle;
+    if (!sampleSphericalTriangle(v0_world, v1_world, v2_world,
+                                 P, u, wi, pdfSolidAngle))
+        return false;
+
+    if (pdfSolidAngle <= 0.0)
+        return false;
+
+    pdfDir = pdfLight * pdfSolidAngle;
+    if (pdfDir <= 0.0)
+        return false;
+
+    Le = materials[materialIdx].emission_flags.xyz;
+    lightIdxOut = lightIdx;
+    return true;
+}
+
+bool isLightVisible(
+    vec3 P,
+    vec3 wi,
+    uint expectedInstance,
+    uint expectedPrimitive)
+{
+    Ray shadowRay;
+    shadowRay.origin    = P + 1e-4 * wi;
+    shadowRay.direction = wi;
+
+    Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+    trace(shadowRay, shadowHit);
+
+    // If nothing hit, or something else hit first -> occluded or missed
+    if (shadowHit.instanceIndex == 0xFFFFFFFFu)
+        return false;
+
+    if (shadowHit.instanceIndex == expectedInstance &&
+        shadowHit.primitiveIndex == expectedPrimitive)
+        return true;
+
+    return false;
+}
+
+vec3 lightSample( vec3 hitPoint, vec3 normal, vec3 outgoing_dir, inout uint rngState,
+                  const vec3 baseColor, const vec3 F0, const float roughness)
 {
     vec3 luminance = vec3(0.0);
-    if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
-    {
-        //get material for this hit.
-        uint materialIndex = floatBitsToUint(texture_material.w);
-        materialIndex += instances[hit.instanceIndex].bases01.w;
-        MaterialGPU material = materials[materialIndex];
-        uint textureIndex = floatBitsToUint(material.textureId.x);
 
-        //shading trinagle for normal data
-        ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];
-        vec4 vertex0_data = trinagle.vertexNormal0_uv;
-        vec4 vertex1_data = trinagle.vertexNormal1_uv;
-        vec4 vertex2_data = trinagle.vertexNormal2_uv;
+    float pdfLight;
+    uint numberOfLights = emissiveTrinagles[0].padding;
+    if (numberOfLights == 0u)
+        return luminance;
 
-        //grab the intended base color
-        vec3 baseColor = material.baseColor_opacity.xyz;
-        if (textureIndex != 0xFFFFFFFFu)
-        {
-            vec4 texture_material = trinagle.texture_materialId;
+    float u1 = rand(rngState);
+    float u2 = rand(rngState);
 
-            vec2 vt0 = vec2(vertex0_data.w, texture_material.x);
-            vec2 vt1 = vec2(vertex1_data.w, texture_material.y);
-            vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
-            
-            vec3 baseColor = vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel));
-        }
+    uint k = uint(u1 * float(numberOfLights));
+    if (k >= numberOfLights)
+        k = numberOfLights - 1u;
 
-        // interpolate the normal and convert it to world space;
-        vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz, hit.barrycentricUV.x, hit.barrycentricUV.y);
-        bool frontFace = dot(normal, -ray.direction) > 0.0;
-        normal = frontFace ? normal : -normal;
-        //this needs to be swaped for inverse transpose of linnear part of the model->world matrix that needs to be calculated per instance on the cpu
-        normal = affineTransformDirection(normal, instances[hit.instanceIndex].modelToWorld0, instances[hit.instanceIndex].modelToWorld1, instances[hit.instanceIndex].modelToWorld2);
+    float q = lightProbability[k];
+    uint  a = LightAlias[k];
+    uint  lightIdx = (u2 < q) ? k : a;
 
-        //get luminacne for this hit.
-        luminance += throughput * material.emission_flags.xyz;
-        //get hit point in world space
-        vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
+    pdfLight = lightPDF[lightIdx];
+    if (pdfLight <= 0.0)
+        return luminance;
 
-        //sample BSDF
-        vec3 f_BSDF;
-        float pdf_wi;
-        BSDF(normal, -ray.direction, rngState, 
-             baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, material.emission_flags.xyz,
-             ray.direction, f_BSDF, pdf_wi);
-        
-        //finalise the new ray
-        ray.origin = hitPoint + 1e-6 * ray.direction;
 
-        //update the throughput
-        float cosineTheta = dot(normal. ray.direction);
-        if (pdf > 0.0 && cosineTheta > 0.0)
-            throughput *= f_BSDF * (cosineTheta / pdf_wi);
-    }
+    uint materialIdx = emissiveTrinagles[lightIdx].materialIndex;
+    uint primIdx = emissiveTrinagles[lightIdx].primitiveIndex;
+    uint instIdx = emissiveTrinagles[lightIdx].instanceIndex;
+
+    MollerTriangle  tri  = triangles[primIdx];
+
+    // Model-space triangle vertices
+    vec3 v0_model = vec3(tri.vertex_0);
+    vec3 v1_model = v0_model + vec3(tri.edge_vec1);
+    vec3 v2_model = v0_model + vec3(tri.edge_vec2);
+
+    // World-space vertices
+    vec3 v0_world = affineTransformPoint(v0_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v1_world = affineTransformPoint(v1_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v2_world = affineTransformPoint(v2_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+
+    vec2 u = vec2(rand(rngState), rand(rngState));
+    vec3 incoming_dir;
+    float pdfSolidAngle;
+    if (!sampleSphericalTriangle(v0_world, v1_world, v2_world, hitPoint, u, incoming_dir, pdfSolidAngle))
+        return luminance;
+
+    if (pdfSolidAngle <= 0.0)
+        return luminance;
+
+    float pdfDir = pdfLight * pdfSolidAngle;
+    if (pdfDir <= 0.0)
+        return luminance;
+
+    Ray shadowRay;
+    shadowRay.origin = hitPoint + 1e-4 * incoming_dir;
+    shadowRay.direction = incoming_dir;
+
+    Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+    trace(shadowRay, shadowHit);
+
+    if (shadowHit.instanceIndex != instIdx || shadowHit.primitiveIndex != primIdx)
+        return luminance;
+
+    float cosTheta = max(dot(normal, incoming_dir), 0.0);
+    if (cosTheta <= 0.0)
+        return luminance;
+
+    vec3 Le = materials[materialIdx].emission_flags.xyz;
+    vec3 f  = evaluateBRDF(normal, incoming_dir, outgoing_dir, baseColor, F0, roughness);
+
+    luminance += Le * f * (cosTheta / pdfDir);
     return luminance;
 }
 
+
+
+vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throughput, inout uint rngState, const in uvec2 pixel)
+{
+    vec3 luminance = vec3(0.0);
+
+    //shading trinagle for normal data
+    ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];
+    vec4 vertex0_data = trinagle.vertexNormal0_uv;
+    vec4 vertex1_data = trinagle.vertexNormal1_uv;
+    vec4 vertex2_data = trinagle.vertexNormal2_uv;
+
+    //get material for this hit.
+    vec4 texture_material = trinagle.texture_materialId;
+    uint materialIndex = floatBitsToUint(texture_material.w);
+    materialIndex += instances[hit.instanceIndex].bases01.w;
+    MaterialGPU material = materials[materialIndex];
+    uint textureIndex = floatBitsToUint(material.textureId.x);
+
+    
+    //grab the intended base color
+    vec3 baseColor = material.baseColor_opacity.xyz;
+    if (textureIndex != 0xFFFFFFFFu)
+    {
+        
+    
+        vec2 vt0 = vec2(vertex0_data.w, texture_material.x);
+        vec2 vt1 = vec2(vertex1_data.w, texture_material.y);
+        vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
+        
+        baseColor *= vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel));
+    }
+
+    // interpolate the normal and convert it to world space;
+    vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz, hit.barrycentricUV.x, hit.barrycentricUV.y);
+    bool frontFace = dot(normal, -ray.direction) > 0.0;
+    normal = frontFace ? normal : -normal;
+    //this needs to be swaped for inverse transpose of linnear part of the model->world matrix that needs to be calculated per instance on the cpu
+    normal = affineTransformDirection(normal, instances[hit.instanceIndex].modelToWorld0, instances[hit.instanceIndex].modelToWorld1, instances[hit.instanceIndex].modelToWorld2);
+
+    //get luminacne for this hit.
+    luminance += throughput * material.emission_flags.xyz;
+    //get hit point in world space
+    vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
+
+    vec3 Ldirect = lightSample(hitPoint,
+                               normal,
+                               -ray.direction,
+                               rngState,
+                               baseColor,
+                               material.F0_ior_rough.xyz,
+                               material.F0_ior_rough.w);
+
+    luminance += throughput * Ldirect;
+
+    // For pure NEE (no BSDF path sampling), we STOP the path here:
+    // no update to ray / throughput.
+    return luminance;
+
+    // //sample BSDF
+    // vec3 f_BSDF;
+    // float pdf_wi;
+    // BSDF(normal, -ray.direction, rngState, 
+    //      baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, material.emission_flags.xyz,
+    //      ray.direction, f_BSDF, pdf_wi);
+        
+    // //finalise the new ray
+    // ray.origin = hitPoint + 1e-5 * ray.direction;
+
+    // //update the throughput
+    // float cosineTheta = dot(normal, ray.direction);
+    // if (pdf_wi > 0.0 && cosineTheta > 0.0)
+    //     throughput *= f_BSDF * (cosineTheta / pdf_wi);
+
+    // return luminance;
+}
+
+vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
+{
+    vec3 luminacne = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+
+    const int MAX_DEPTH = 128;
+    const int MIN_DEPTH = 3;
+
+    bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
+    uint selectedIdx      = Params.flags & MASK_INSTANCE_IDX;
+
+    for (int bounce = 0; bounce < MAX_DEPTH; bounce++)
+    {
+        Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+        trace(ray, hit);
+
+        if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
+        {
+            vec3 envLe = evalSunEnvironment(ray.direction);
+            luminacne += throughput * envLe;
+            break;
+        }
+
+        if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
+        {
+            luminacne += solveRenderingEquationForHit(ray, hit, throughput, rngState, pixel);
+            if (instanceSelected && hit.instanceIndex == selectedIdx && bounce == 0)
+                luminacne = mix(luminacne, vec3(1.0, 1.0, 0.0), 0.4);
+        }
+
+        if (bounce >= MIN_DEPTH)
+        {
+            float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.0, 0.99);
+            float xi = rand(rngState);
+            if (xi > p)
+                break;
+            throughput /= p;
+        }
+    }
+
+    return luminacne;
+}
 
 
 // ~~~~~~~~~~~~~ main ~~~~~~~~~~~~~
@@ -866,41 +1298,26 @@ void main()
     if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
         return;
 
-    bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
-    uint selectedIdx      = Params.flags & MASK_INSTANCE_IDX;
+    
     bool bPressedFlag     = (Params.flags & FLAG_B) != 0u;
     
     uint  bInterpRaw      = (Params.flags & B_INTERP_MASK) >> B_INTERP_SHIFT;
     bool  bTransitionPlaying = (bInterpRaw != 0u);
     float bInterp         = float(bInterpRaw) / float(0x3FFu);
-    uint rngState = wang_hash(pixel ^ (floatBitsToUint(Params.camPos_time.w) * 1664525u));
+    uint pixelIndex = pixel.x + pixel.y * Params.imageSize.x;
+    uint rngState = wang_hash(uint(pixelIndex ^ (floatBitsToUint(Params.camPos_time.w) * 1664525u)));
     
     
 
-    //make the main ray.
-    Ray ray = generateRay(pixel);
-    //if we hit the root TLAS node i.e ANYTHING in the scene do the work, otherwise we missed everything
-
-    float terminate = 0.0;
-    Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
-    //main work loop.
-    vec3 throughput = vec3(1.0);
-    while (true)
+    vec3 color = vec3(0.0);
+    for (int SPP = 0; SPP < 3; SPP++)
     {
-        trace(ray, hit);
-
-        solveRenderingEquationForHit(ray, hit, throughput, rngState);
-        
-
-        if (instanceSelected && hit.instanceIndex == selectedIdx)
-            ray.color = mix(ray.color, vec3(1.0, 1.0, 0.0), 0.4);
-        // update Ray origin and direction based on 
-        if (terminate < 1.0)
-            break;
-        else
-            break;
+        vec2 jitter = vec2(rand(rngState), rand(rngState));
+        Ray ray = generateRayJittered(pixel, jitter);
+        color += samplePath(ray, pixel, rngState);
     }
+    color /= 4.0;
 
        
-    imageStore(outImage, ivec2(pixel), vec4(ray.color, 1.0));
+    imageStore(outImage, ivec2(pixel), vec4(color, 1.0));
 }

@@ -393,10 +393,33 @@ void Object::parseFace(std::vector<std::string> tokens)
 
         std::vector<glm::vec3> poly3D;
         poly3D.reserve(m);
+        auto resolveVertexIndex = [&](int objIndex) -> int
+        {
+            int n = static_cast<int>(vertices.size());
+            if (n == 0)
+                throw std::runtime_error("No vertices loaded yet while triangulating at line - " + std::to_string(reading_line));
+        
+            if (objIndex == 0)
+                throw std::runtime_error("OBJ index 0 is invalid at line - " + std::to_string(reading_line));
+        
+            if (objIndex > 0)
+            {
+                if (objIndex > n)
+                    throw std::runtime_error("Vertex index out of range while triangulating at line - " + std::to_string(reading_line));
+                return objIndex - 1;
+            }
+            else
+            {
+                int vi = n + objIndex;
+                if (vi < 0 || vi >= n)
+                    throw std::runtime_error("Negative vertex index out of range while triangulating at line - " + std::to_string(reading_line));
+                return vi;
+            }
+        };
+
         for (int i = 0; i < m; ++i)
         {
-            int idx = vIdx[i];
-            int vi = idx - 1;
+            int vi = resolveVertexIndex(vIdx[i]);
             if (vi < 0 || vi >= static_cast<int>(vertices.size()))
                 throw std::runtime_error("Vertex index out of range while triangulating at line - " + std::to_string(reading_line));
             poly3D.push_back(vertices[vi]);

@@ -21,6 +21,7 @@
 #include <initializer_list>
 
 
+
 #define VALIDATE true
 #define FPS true
 
@@ -33,6 +34,13 @@ struct GpuTexture {
     uint32_t       height       = 0;
     uint32_t       mipLevels    = 1;
     VkFormat       format       = VK_FORMAT_UNDEFINED;
+};
+
+struct EmisiveTriangle {
+    uint primitiveIndex;
+    uint instanceIndex;
+    uint materialIndex;
+    uint padding;
 };
 
 
@@ -93,6 +101,7 @@ struct InstanceData {
     uint32_t nodeBase = 0;
     uint32_t triBase = 0;
     uint32_t shadeTriBase = 0;
+    uint32_t shadeTriCount = 0;
     uint32_t materialBase = 0;
     uint32_t textureBase = 0;
 };
@@ -210,6 +219,22 @@ private:
     VkBuffer materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory materialMemory = VK_NULL_HANDLE;
 
+    VkBuffer emissiveTriangleBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory emissiveTriangleMemory = VK_NULL_HANDLE;
+
+    VkBuffer lightProbBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightProbMemory = VK_NULL_HANDLE;
+
+    VkBuffer lightPdfBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightPdfMemory = VK_NULL_HANDLE;
+
+    VkBuffer lightAliasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightAliasMemory = VK_NULL_HANDLE;
+
+    
+
+    
+
     VkBuffer       paramsBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     void*          paramsMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -259,6 +284,10 @@ private:
     std::vector<SBVHNode> SBVHNodes;
     std::vector<MollerTriangle> intersectionTrinagles;
     std::vector<ShadingTriangle> shadingTriangles;
+    std::vector<EmisiveTriangle> emissiveTrinagles;
+    std::vector<float> lightPdf;
+    std::vector<float> lightProb;
+    std::vector<uint32_t> lightAlias;
     std::vector<MaterialGPU> materials;
     std::map<std::string, uint32_t> textureIndexMap;
     std::vector<ImageRGBA8> flattened;
@@ -294,6 +323,7 @@ private:
     void frameTLASPrepare(uint32_t frameIndex);
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
+    void makeEmissionTriangles();
     void createLogicalDevice();
     void createSwapchain();
     void recreateSwapchain();
@@ -381,4 +411,3 @@ public:
         vkFreeMemory(device, stageMem, nullptr);
     }
 };
-

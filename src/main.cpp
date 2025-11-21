@@ -16,7 +16,8 @@
 
 
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
   std::string def;
   if (argc > 1)
     def = argv[1];
