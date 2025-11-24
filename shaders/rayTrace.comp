@@ -64,7 +64,7 @@ struct InstanceDataGPU {
     vec4 aabbMax;
 
     uvec4 bases01; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
-    uvec4 bases23; // x=textureBase, y=sbvhRoot
+    uvec4 bases23; // x=textureBase, y=sbvhRoot, w=triLightOffset
 };
 
 struct EmisiveTrinagle {
@@ -82,6 +82,7 @@ layout(set = 0, binding = 10, std430) readonly buffer EmissiveTriBuf {EmisiveTri
 layout(set = 0, binding = 11, std430) readonly buffer LightProb { float lightProbability[]; };
 layout(set = 0, binding = 12, std430) readonly buffer LightPdf { float lightPDF[]; };
 layout(set = 0, binding = 13, std430) readonly buffer LightAli { uint LightAlias[]; };
+layout(set = 0, binding = 14, std430) readonly buffer triToLightIdxBuffer { uint triToLightIdx[]; };
 
 // ---------- RayTracing Engine ----------
 
@@ -107,11 +108,6 @@ const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
 const uint MASK_INSTANCE_IDX = 0xFu;
 const float PI      = 3.14159265358979323846;
 const float INV_PI  = 0.31830988618379067154;
-const vec3 sunDir = normalize(vec3(0.5, 0.5, 0.0));
-const float sunAngularRadius = 0.2;
-const float sunCosAngle = cos(sunAngularRadius);
-const vec3 skyColor = vec3(0.0);
-const vec3 sunColor = vec3(20.0, 20.0, 18.0);
 
 
 //~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
@@ -268,6 +264,12 @@ vec3 SampleVndf_GGX(const in vec2 rand, const in vec3 incoming_dir, const in vec
     return wm;
 }
 
+uint getLightIndexFromHit(const in uint instanceIndex, const in uint primitiveIndex)
+{
+    uint localIdx = primitiveIndex - instances[instanceIndex].bases01.y;
+    return triToLightIdx[instances[instanceIndex].bases23.w + localIdx];
+}
+
 //temp
 vec3 hsv2rgb(vec3 c) {
     vec3 p = abs(fract(c.x + vec3(0,2,4)/6.0)*6.0 - 3.0);
@@ -284,16 +286,6 @@ vec3 directionHue(vec3 n) {
 }
 
 //~~~~~~~~~~~~~ core functions ~~~~~~~~~~~~~
-
-vec3 evalSunEnvironment(vec3 dir)
-{
-    float cosTheta = dot(normalize(dir), sunDir);
-
-    if (cosTheta > sunCosAngle)
-        return sunColor;
-    else
-        return skyColor;
-}
 
 vec4 computeTextureDifferential(const in Ray ray, const in Ray rayDX, const in Ray rayDY, const in float tHit, const in vec3 v0, const in vec3 e1, const in vec3 e2, const in vec2 uv0, const in vec2 uv1, const in vec2 uv2)
 {
@@ -860,6 +852,34 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
     BRDF_PDF = pdf;
 }
 
+void evaluateBRDF_and_PDF(const in vec3 normal, const in vec3 outgoing_dir, const in vec3 incoming_dir, const in vec3 baseColor, const in vec3 F0, const in float roughness,
+                          out vec3 f,
+                          out float pdf)
+{
+    f   = vec3(0.0);
+    pdf = 0.0;
+
+    float cosThetaOut = dot(normal, outgoing_dir);
+    if (cosThetaOut <= 1e-6)
+        return;
+
+    // Same lobe weights as in BRDF()
+    vec3 Fview = fresnel_Schlick(cosThetaOut, F0);
+    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 0.98);
+    float diffuse_weight  = 1.0 - specular_weight;
+
+    // Per-lobe PDFs for this specific incoming_dir
+    float s_pdf = getGGXPDF(normal, outgoing_dir, roughness, incoming_dir);
+    float d_pdf = getDiffusePDF(normal, incoming_dir);
+
+    pdf = specular_weight * s_pdf + diffuse_weight * d_pdf;
+    if (pdf <= 0.0)
+        return;
+
+    f = evaluateBRDF(normal, incoming_dir, outgoing_dir, baseColor, F0, roughness);
+}
+
+
 void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
           const in vec3 baseColor, const in vec3 F0, const in float roughness, const in vec3 emission,
           out vec3 incoming_dir, out vec3 BSDF_value, out float BSDF_PDF)
@@ -877,7 +897,6 @@ void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
     vec3 BRDF_value;
     float BRDF_PDF;
 
-    // this will need the material data and random values
     BRDF(normal, outgoing_dir, baseColor, F0, roughness, randLobe, rand1, rand2, w_i_BRDF, BRDF_value, BRDF_PDF);
     
     if (BRDF_PDF <= 0.0)
@@ -888,34 +907,46 @@ void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
     BSDF_PDF = BRDF_PDF;
 }
 
-uint sampleLightIndex(inout uint rngState, out float pdfLight)
+float sphericalTrianglePDF(vec3 v0, vec3 v1, vec3 v2, vec3 refP)
 {
-    uint N = emissiveTrinagles[0].padding;
-    if (N == 0u) {
-        pdfLight = 0.0;
-        return 0xFFFFFFFFu;
-    }
+    vec3 a = normalize(v0 - refP);
+    vec3 b = normalize(v1 - refP);
+    vec3 c = normalize(v2 - refP);
 
-    float u1 = rand(rngState);
-    float u2 = rand(rngState);
+    if (length(a) == 0.0 || length(b) == 0.0 || length(c) == 0.0)
+        return 0.0;
 
-    uint k = uint(u1 * float(N));
-    if (k >= N) k = N - 1u;
+    vec3 n_ab = cross(a, b);
+    vec3 n_bc = cross(b, c);
+    vec3 n_ca = cross(c, a);
 
-    float q = lightProbability[k];
-    uint  a = LightAlias[k];
+    if (dot(n_ab, n_ab) == 0.0 ||
+        dot(n_bc, n_bc) == 0.0 ||
+        dot(n_ca, n_ca) == 0.0)
+        return 0.0;
 
-    uint idx = (u2 < q) ? k : a;
+    n_ab = normalize(n_ab);
+    n_bc = normalize(n_bc);
+    n_ca = normalize(n_ca);
 
-    pdfLight = lightPDF[idx];
-    return idx;
+    float alpha = angleBetween(n_ab, -n_ca);
+    float beta  = angleBetween(n_bc, -n_ab);
+    float gamma = angleBetween(n_ca, -n_bc);
+
+    float A_pi  = alpha + beta + gamma;
+    float A     = A_pi - PI;
+    if (A <= 0.0)
+        return 0.0;
+
+    return 1.0 / A;
 }
+
 
 bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
                               vec3 refP, vec2 u, 
                               out vec3 out_w, out float out_pdf)
 {
-    // Directions to vertices (unit)
+    //too lazy to explain this here also LOL. the paper that describes this should be linkedin the read me sources.
     vec3 a = normalize(v0 - refP);
     vec3 b = normalize(v1 - refP);
     vec3 c = normalize(v2 - refP);
@@ -923,7 +954,6 @@ bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
     if (length(a) == 0.0 || length(b) == 0.0 || length(c) == 0.0)
         return false;
 
-    // Edge plane normals
     vec3 n_ab = cross(a, b);
     vec3 n_bc = cross(b, c);
     vec3 n_ca = cross(c, a);
@@ -937,24 +967,19 @@ bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
     n_bc = normalize(n_bc);
     n_ca = normalize(n_ca);
 
-    // Interior angles of spherical triangle
     float alpha = angleBetween(n_ab, -n_ca);
     float beta  = angleBetween(n_bc, -n_ab);
     float gamma = angleBetween(n_ca, -n_bc);
 
-    // Spherical area A = (alpha+beta+gamma) - PI
     float A_pi  = alpha + beta + gamma;
     float A     = A_pi - PI;
     if (A <= 0.0) return false;
 
-    // Uniform in solid angle => pdf = 1 / A
     out_pdf = 1.0 / A;
 
-    // Sample partial area A' linearly between 0 and A
     float Ap = u.x * A;
-    float Ap_pi = Ap + PI; // A' + PI
+    float Ap_pi = Ap + PI;
 
-    // Now compute B' at vertex corresponding to 'a' (pbrt-style)
     float cosAlpha = cos(alpha);
     float sinAlpha = sin(alpha);
 
@@ -965,7 +990,7 @@ bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
     float cosPhi = cosAp * cosAlpha + sinAp * sinAlpha;
 
     float k1 = cosPhi + cosAlpha;
-    float cos_c = dot(a, b); // side length opposite vertex c
+    float cos_c = dot(a, b);
     float k2 = sinPhi - sinAlpha * cos_c;
 
     float num   = k2 + differenceOfProducts(k2, cosPhi, k1, sinPhi) * cosAlpha;
@@ -978,11 +1003,9 @@ bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
     cosBp = clamp(cosBp, -1.0, 1.0);
     float sinBp = safeSqrt(1.0 - cosBp * cosBp);
 
-    // New third vertex C' along arc AC
     vec3 c_ortho = gramSchmidt(c, a);
     vec3 cp = cosBp * a + sinBp * normalize(c_ortho);
 
-    // Sample direction along arc from b to c'
     float dot_bc = dot(b, cp);
     float cosTheta = 1.0 - u.y * (1.0 - dot_bc);
     cosTheta = clamp(cosTheta, -1.0, 1.0);
@@ -995,38 +1018,19 @@ bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
     return true;
 }
 
-bool sampleLightDirection(
-    vec3 P,                // shading point (world)
-    inout uint rngState,
-    out vec3 wi,           // direction to light
-    out vec3 Le,           // emitted radiance of that triangle
-    out float pdfDir,      // pdf in solid angle (for MIS/denominator)
-    out uint lightIdxOut)  // index into emissiveTrinagles[]
+float lightDirectionalPDF(const in vec3 hitPoint, const in uint lightIdx)
 {
-    pdfDir = 0.0;
-    wi = vec3(0.0);
-    Le = vec3(0.0);
-    lightIdxOut = 0xFFFFFFFFu;
+    // Reconstruct the triangle, compute solid angle pdf for wi,
+    // multiply by lightPDF[lightIdx].
 
-    float pdfLight;
-    uint lightIdx = sampleLightIndex(rngState, pdfLight);
-    if (lightIdx == 0xFFFFFFFFu || pdfLight <= 0.0)
-        return false;
+    uint instIdx = emissiveTrinagles[lightIdx].instanceIndex;
+    uint primIdx = emissiveTrinagles[lightIdx].primitiveIndex;
+    MollerTriangle tri = triangles[primIdx];
 
-    EmisiveTrinagle L = emissiveTrinagles[lightIdx];
-
-    uint primIdx     = L.primitiveIndex;
-    uint instIdx     = L.instanceIndex;
-    uint materialIdx = L.materialIndex;
-
-    MollerTriangle  tri  = triangles[primIdx];
-
-    // Model-space triangle vertices
     vec3 v0_model = vec3(tri.vertex_0);
     vec3 v1_model = v0_model + vec3(tri.edge_vec1);
     vec3 v2_model = v0_model + vec3(tri.edge_vec2);
 
-    // World-space triangle vertices
     vec3 v0_world = affineTransformPoint(v0_model,
                                          instances[instIdx].modelToWorld0,
                                          instances[instIdx].modelToWorld1,
@@ -1040,58 +1044,34 @@ bool sampleLightDirection(
                                          instances[instIdx].modelToWorld1,
                                          instances[instIdx].modelToWorld2);
 
-    // Arvo spherical triangle sampling
-    vec2 u = vec2(rand(rngState), rand(rngState));
-    float pdfSolidAngle;
-    if (!sampleSphericalTriangle(v0_world, v1_world, v2_world,
-                                 P, u, wi, pdfSolidAngle))
-        return false;
+    // You need a "pdf only" variant of sampleSphericalTriangle or a helper
+    // that returns the solid-angle pdf for the *given* direction wi.
+    float pdfSolidAngle = sphericalTrianglePDF(v0_world, v1_world, v2_world, hitPoint);
 
     if (pdfSolidAngle <= 0.0)
-        return false;
+        return 0.0;
 
-    pdfDir = pdfLight * pdfSolidAngle;
-    if (pdfDir <= 0.0)
-        return false;
-
-    Le = materials[materialIdx].emission_flags.xyz;
-    lightIdxOut = lightIdx;
-    return true;
+    return lightPDF[lightIdx] * pdfSolidAngle;
 }
 
-bool isLightVisible(
-    vec3 P,
-    vec3 wi,
-    uint expectedInstance,
-    uint expectedPrimitive)
+
+
+bool lightSample(vec3 hitPoint, vec3 normal, inout uint rngState,
+                 out vec3 incoming_dir, out vec3 emission, out float pdfDir, out float cosTheta,
+                 out uint lightIdx, out uint instIdx, out uint primIdx, out uint materialIdx)
 {
-    Ray shadowRay;
-    shadowRay.origin    = P + 1e-4 * wi;
-    shadowRay.direction = wi;
+    incoming_dir = vec3(0.0);
+    emission = vec3(0.0);
+    pdfDir = 0.0;
+    cosTheta = 0.0;
+    lightIdx = 0u;
+    instIdx = 0xFFFFFFFFu;
+    primIdx = 0xFFFFFFFFu;
+    materialIdx = 0xFFFFFFFFu;
 
-    Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
-    trace(shadowRay, shadowHit);
-
-    // If nothing hit, or something else hit first -> occluded or missed
-    if (shadowHit.instanceIndex == 0xFFFFFFFFu)
-        return false;
-
-    if (shadowHit.instanceIndex == expectedInstance &&
-        shadowHit.primitiveIndex == expectedPrimitive)
-        return true;
-
-    return false;
-}
-
-vec3 lightSample( vec3 hitPoint, vec3 normal, vec3 outgoing_dir, inout uint rngState,
-                  const vec3 baseColor, const vec3 F0, const float roughness)
-{
-    vec3 luminance = vec3(0.0);
-
-    float pdfLight;
     uint numberOfLights = emissiveTrinagles[0].padding;
     if (numberOfLights == 0u)
-        return luminance;
+        return false;
 
     float u1 = rand(rngState);
     float u2 = rand(rngState);
@@ -1100,27 +1080,21 @@ vec3 lightSample( vec3 hitPoint, vec3 normal, vec3 outgoing_dir, inout uint rngS
     if (k >= numberOfLights)
         k = numberOfLights - 1u;
 
-    float q = lightProbability[k];
-    uint  a = LightAlias[k];
-    uint  lightIdx = (u2 < q) ? k : a;
+    lightIdx = (u2 < lightProbability[k]) ? k : LightAlias[k];
 
-    pdfLight = lightPDF[lightIdx];
-    if (pdfLight <= 0.0)
-        return luminance;
+    if (lightPDF[lightIdx] <= 0.0)
+        return false;
 
+    MollerTriangle tri = triangles[emissiveTrinagles[lightIdx].primitiveIndex];
 
-    uint materialIdx = emissiveTrinagles[lightIdx].materialIndex;
-    uint primIdx = emissiveTrinagles[lightIdx].primitiveIndex;
-    uint instIdx = emissiveTrinagles[lightIdx].instanceIndex;
+    primIdx    = emissiveTrinagles[lightIdx].primitiveIndex;
+    instIdx    = emissiveTrinagles[lightIdx].instanceIndex;
+    materialIdx = emissiveTrinagles[lightIdx].materialIndex;
 
-    MollerTriangle  tri  = triangles[primIdx];
-
-    // Model-space triangle vertices
     vec3 v0_model = vec3(tri.vertex_0);
     vec3 v1_model = v0_model + vec3(tri.edge_vec1);
     vec3 v2_model = v0_model + vec3(tri.edge_vec2);
 
-    // World-space vertices
     vec3 v0_world = affineTransformPoint(v0_model,
                                          instances[instIdx].modelToWorld0,
                                          instances[instIdx].modelToWorld1,
@@ -1135,37 +1109,35 @@ vec3 lightSample( vec3 hitPoint, vec3 normal, vec3 outgoing_dir, inout uint rngS
                                          instances[instIdx].modelToWorld2);
 
     vec2 u = vec2(rand(rngState), rand(rngState));
-    vec3 incoming_dir;
     float pdfSolidAngle;
+
     if (!sampleSphericalTriangle(v0_world, v1_world, v2_world, hitPoint, u, incoming_dir, pdfSolidAngle))
-        return luminance;
+        return false;
 
     if (pdfSolidAngle <= 0.0)
-        return luminance;
+        return false;
 
-    float pdfDir = pdfLight * pdfSolidAngle;
+    pdfDir = lightPDF[lightIdx] * pdfSolidAngle;
     if (pdfDir <= 0.0)
-        return luminance;
+        return false;
 
     Ray shadowRay;
-    shadowRay.origin = hitPoint + 1e-4 * incoming_dir;
+    shadowRay.origin    = hitPoint + 1e-4 * incoming_dir;
     shadowRay.direction = incoming_dir;
 
     Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
     trace(shadowRay, shadowHit);
 
     if (shadowHit.instanceIndex != instIdx || shadowHit.primitiveIndex != primIdx)
-        return luminance;
+        return false;
 
-    float cosTheta = max(dot(normal, incoming_dir), 0.0);
+    cosTheta = max(dot(normal, incoming_dir), 0.0);
     if (cosTheta <= 0.0)
-        return luminance;
+        return false;
 
-    vec3 Le = materials[materialIdx].emission_flags.xyz;
-    vec3 f  = evaluateBRDF(normal, incoming_dir, outgoing_dir, baseColor, F0, roughness);
+    emission = materials[materialIdx].emission_flags.xyz;
 
-    luminance += Le * f * (cosTheta / pdfDir);
-    return luminance;
+    return true;
 }
 
 
@@ -1213,36 +1185,91 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
     //get hit point in world space
     vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
 
-    vec3 Ldirect = lightSample(hitPoint,
-                               normal,
-                               -ray.direction,
-                               rngState,
-                               baseColor,
-                               material.F0_ior_rough.xyz,
-                               material.F0_ior_rough.w);
+ 
 
-    luminance += throughput * Ldirect;
+    vec3 L_direct = vec3(0.0);
 
-    // For pure NEE (no BSDF path sampling), we STOP the path here:
-    // no update to ray / throughput.
+    // Light sampling branch (direct lighting)
+    vec3 wi_L, Li_L;
+    float pdf_L, cosTheta_L;
+    uint lightIdx_L, instIdx_L, primIdx_L, matIdx_L;
+
+    if (lightSample(hitPoint, normal, rngState, wi_L, Li_L, pdf_L, cosTheta_L, lightIdx_L, instIdx_L, primIdx_L, matIdx_L))
+    {
+        vec3 f_L;
+        float pdf_B_L;
+        evaluateBRDF_and_PDF(normal, -ray.direction, wi_L, baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, f_L, pdf_B_L);
+        float denom = pdf_L + pdf_B_L;
+        float w_L = (denom > 0.0) ? (pdf_L / denom) : 0.0;
+        if (pdf_L > 0.0 && cosTheta_L > 0.0)
+        {
+            vec3 C_L = f_L * Li_L * cosTheta_L / pdf_L;
+            L_direct += w_L * C_L;
+        }
+    }
+
+    // BSDF sampling branch (direct lighting)
+    vec3 wi_B;
+    vec3 f_B;
+    float pdf_B;
+
+    BSDF(normal, -ray.direction, rngState,
+         baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, material.emission_flags.xyz,
+         wi_B, f_B, pdf_B);
+
+    float cosTheta_B = max(dot(normal, wi_B), 0.0);
+
+    if (pdf_B > 0.0 && cosTheta_B > 0.0)
+    {
+        // Shadow ray along BSDF sample for *direct* light (if it hits emitter)
+        Ray shadowRay;
+        shadowRay.origin    = hitPoint + 1e-4 * wi_B;
+        shadowRay.direction = wi_B;
+
+        Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+        trace(shadowRay, shadowHit);
+
+        if (shadowHit.instanceIndex != 0xFFFFFFFFu &&
+            shadowHit.primitiveIndex != 0xFFFFFFFFu)
+        {
+            // Check if this primitive is emissive and find its lightIdx
+            uint instIdx_B = shadowHit.instanceIndex;
+            uint primIdx_B = shadowHit.primitiveIndex;
+
+            // You need a way to map (instIdx_B, primIdx_B) -> lightIdx_B
+            // For example: uint lightIdx_B = primToLightIdx[primIdx_B]; or from Hit.
+            uint lightIdx_B = getLightIndexFromHit(instIdx_B, primIdx_B);
+
+            if (lightIdx_B != 0xFFFFFFFFu)
+            {
+                uint matIdx_B = emissiveTrinagles[lightIdx_B].materialIndex;
+                vec3 Li_B = materials[matIdx_B].emission_flags.xyz;
+
+                float pdf_L_B = lightDirectionalPDF(hitPoint, lightIdx_B);
+                float denom   = pdf_B + pdf_L_B;
+                float w_B     = (denom > 0.0) ? (pdf_B / denom) : 0.0;
+
+                if (pdf_B > 0.0)
+                {
+                    vec3 C_B = f_B * Li_B * cosTheta_B / pdf_B;
+                    L_direct += w_B * C_B;
+                }
+            }
+        }
+
+        // Path continuation (indirect lighting)
+        ray.origin    = hitPoint + 1e-5 * wi_B;
+        ray.direction = wi_B;
+
+        throughput *= f_B * (cosTheta_B / pdf_B);
+    }
+    else
+        throughput = vec3(0.0);
+
+    // Add direct term to luminance
+    luminance += throughput * L_direct;
+
     return luminance;
-
-    // //sample BSDF
-    // vec3 f_BSDF;
-    // float pdf_wi;
-    // BSDF(normal, -ray.direction, rngState, 
-    //      baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, material.emission_flags.xyz,
-    //      ray.direction, f_BSDF, pdf_wi);
-        
-    // //finalise the new ray
-    // ray.origin = hitPoint + 1e-5 * ray.direction;
-
-    // //update the throughput
-    // float cosineTheta = dot(normal, ray.direction);
-    // if (pdf_wi > 0.0 && cosineTheta > 0.0)
-    //     throughput *= f_BSDF * (cosineTheta / pdf_wi);
-
-    // return luminance;
 }
 
 vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
@@ -1250,7 +1277,7 @@ vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
     vec3 luminacne = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    const int MAX_DEPTH = 128;
+    const int MAX_DEPTH = 64;
     const int MIN_DEPTH = 3;
 
     bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
@@ -1262,11 +1289,7 @@ vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
         trace(ray, hit);
 
         if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
-        {
-            vec3 envLe = evalSunEnvironment(ray.direction);
-            luminacne += throughput * envLe;
             break;
-        }
 
         if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
         {
@@ -1274,6 +1297,7 @@ vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
             if (instanceSelected && hit.instanceIndex == selectedIdx && bounce == 0)
                 luminacne = mix(luminacne, vec3(1.0, 1.0, 0.0), 0.4);
         }
+
 
         if (bounce >= MIN_DEPTH)
         {
@@ -1310,7 +1334,7 @@ void main()
     
 
     vec3 color = vec3(0.0);
-    for (int SPP = 0; SPP < 3; SPP++)
+    for (int SPP = 0; SPP < 1; SPP++)
     {
         vec2 jitter = vec2(rand(rngState), rand(rngState));
         Ray ray = generateRayJittered(pixel, jitter);

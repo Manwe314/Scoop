@@ -11,6 +11,7 @@ tomorrow?
     per pixel loop total
 
 for read me:
+    warrinings
     what i wouldve upgraded.
     mtl files use K phong data not P PBR data.
 

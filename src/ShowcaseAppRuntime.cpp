@@ -148,7 +148,7 @@ inline InstanceDataGPU packInstance(const InstanceData& data, AABB modelBB)
     out.aabbMax = glm::vec4(modelBB.max, 0.0f);
 
     out.bases0 = glm::uvec4(data.nodeBase, data.triBase, data.shadeTriBase, data.materialBase);
-    out.bases1 = glm::uvec4(data.textureBase, 0u, 0u, 0u);
+    out.bases1 = glm::uvec4(data.textureBase, 0u, 0u, data.lightMapBase);
     return out;
 }
 

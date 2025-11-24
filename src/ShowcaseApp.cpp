@@ -881,11 +881,15 @@ inline bool isEmissive(glm::vec4 emission)
 void ShowcaseApp::makeEmissionTriangles()
 {
     std::vector<float> power;
+    uint32_t globalBase = 0;
     for (int size = 0; size < instances.size(); size++)
     {
         auto& instance = instances[size];
+        instance.lightMapBase = globalBase;
         for (uint32_t i = 0; i < instance.shadeTriCount; i++)
         {
+            triToLightIdx.push_back(0xFFFFFFFFu);
+            uint32_t mapIdx = globalBase + i;
             uint32_t matIndex = glm::floatBitsToUint(shadingTriangles[instance.shadeTriBase + i].texture_materialId.w);
             glm::vec4 emission = materials[instance.materialBase + matIndex].emission_flags;
             if (!isEmissive(emission))
@@ -895,7 +899,9 @@ void ShowcaseApp::makeEmissionTriangles()
             eTri.materialIndex = instance.materialBase + matIndex;
             eTri.primitiveIndex = instance.shadeTriBase + i;
 
+            uint32_t lightIdx = static_cast<uint32_t>(emissiveTrinagles.size());
             emissiveTrinagles.push_back(eTri);
+            triToLightIdx[mapIdx] = lightIdx;
 
             auto& mollerTri = intersectionTrinagles[instance.triBase + i];
             float area = 0.5 * glm::length(glm::cross(affineTransformDirection(instance.modelToWorld,glm::vec3(mollerTri.edge_vec1)), affineTransformDirection(instance.modelToWorld,glm::vec3(mollerTri.edge_vec2))));
@@ -903,6 +909,7 @@ void ShowcaseApp::makeEmissionTriangles()
             float w = lum * area;
             power.push_back(std::max(w, 1e-8f)); 
         }
+        globalBase += instance.shadeTriCount;
     }
     if (emissiveTrinagles.empty())
     {
@@ -1715,7 +1722,10 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorSetLayoutBinding b13 = b1;
     b13.binding = 13;
 
-    std::array<VkDescriptorSetLayoutBinding, 14> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13};
+    VkDescriptorSetLayoutBinding b14 = b1;
+    b14.binding = 14;
+
+    std::array<VkDescriptorSetLayoutBinding, 15> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14};
 
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1731,7 +1741,7 @@ void ShowcaseApp::createComputeDescriptors()
         
     VkDescriptorPoolSize poolSizeBuf{};
     poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizeBuf.descriptorCount = 12 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizeBuf.descriptorCount = 13 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     VkDescriptorPoolSize poolSizeTex{};
     poolSizeTex.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1798,6 +1808,7 @@ void ShowcaseApp::writeStaticComputeBindings()
         VkDescriptorBufferInfo lightProbInfo{ lightProbBuffer, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo lightPdfInfo{ lightPdfBuffer, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo lightAliasInfo{ lightAliasBuffer, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo triToLightIdxInfo{ triToLightIdxBuffer, 0, VK_WHOLE_SIZE };
 
         VkWriteDescriptorSet w1{};
         w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1863,7 +1874,15 @@ void ShowcaseApp::writeStaticComputeBindings()
         w13.descriptorCount = 1;
         w13.pBufferInfo = &lightAliasInfo;
 
-        std::array<VkWriteDescriptorSet, 8> writes = {w1, w2, w3, w4, w10, w11, w12, w13};
+        VkWriteDescriptorSet w14{};
+        w14.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w14.dstSet = computeSets[i];
+        w14.dstBinding = 14;
+        w14.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w14.descriptorCount = 1;
+        w14.pBufferInfo = &lightAliasInfo;
+
+        std::array<VkWriteDescriptorSet, 9> writes = {w1, w2, w3, w4, w10, w11, w12, w13, w14};
         vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 }
@@ -1878,6 +1897,7 @@ void ShowcaseApp::uploadStaticData()
     uploadDeviceLocal(lightProb, 0, lightProbBuffer, lightProbMemory);
     uploadDeviceLocal(lightPdf, 0, lightPdfBuffer, lightPdfMemory);
     uploadDeviceLocal(lightAlias, 0, lightAliasBuffer, lightAliasMemory);
+    uploadDeviceLocal(triToLightIdx, 0, triToLightIdxBuffer, triToLightIdxMemory);
     uploadTextureImages();
     writeStaticComputeBindings();
 }
@@ -2310,5 +2330,10 @@ void ShowcaseApp::destorySSBOdata()
         vkDestroyBuffer(device, lightAliasBuffer, nullptr);
     if (lightAliasMemory)
         vkFreeMemory(device, lightAliasMemory, nullptr);
+
+    if (triToLightIdxBuffer)
+        vkDestroyBuffer(device, triToLightIdxBuffer, nullptr);
+    if (triToLightIdxMemory)
+        vkFreeMemory(device, triToLightIdxMemory, nullptr);
 
 }

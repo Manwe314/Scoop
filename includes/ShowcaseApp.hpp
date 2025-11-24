@@ -104,6 +104,7 @@ struct InstanceData {
     uint32_t shadeTriCount = 0;
     uint32_t materialBase = 0;
     uint32_t textureBase = 0;
+    uint32_t lightMapBase = 0;
 };
 
 struct TLASNode {
@@ -142,7 +143,7 @@ struct alignas(16) InstanceDataGPU {
     glm::vec4 aabbMin; // w unused
     glm::vec4 aabbMax; // w unused
     glm::uvec4 bases0; // nodeBase, triBase, shadeTriBase, materialBase
-    glm::uvec4 bases1; // textureBase, sbvhRoot, flags, reserved
+    glm::uvec4 bases1; // textureBase, sbvhRoot, flags, lightBase
 };
 
 class ShowcaseApp
@@ -231,6 +232,10 @@ private:
     VkBuffer lightAliasBuffer = VK_NULL_HANDLE;
     VkDeviceMemory lightAliasMemory = VK_NULL_HANDLE;
 
+    VkBuffer triToLightIdxBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory triToLightIdxMemory = VK_NULL_HANDLE;
+
+
     
 
     
@@ -292,6 +297,7 @@ private:
     std::map<std::string, uint32_t> textureIndexMap;
     std::vector<ImageRGBA8> flattened;
     std::vector<GpuTexture> gpuTextures;
+    std::vector<uint32_t> triToLightIdx;
     
 
     static ShowcaseApp* s_active;
