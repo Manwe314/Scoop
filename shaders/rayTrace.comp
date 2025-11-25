@@ -147,6 +147,12 @@ float rand(inout uint state)
     return floatConstruct(wang_hash(xorshift(state)));
 }
 
+bool badFloat(float x)
+{
+    return isnan(x) || isinf(x) || x < 0.0;
+}
+
+
 void swap(inout float a, inout float b)
 {
     float temp = a;
@@ -266,7 +272,7 @@ vec3 SampleVndf_GGX(const in vec2 rand, const in vec3 incoming_dir, const in vec
 
 uint getLightIndexFromHit(const in uint instanceIndex, const in uint primitiveIndex)
 {
-    uint localIdx = primitiveIndex - instances[instanceIndex].bases01.y;
+    uint localIdx = primitiveIndex - instances[instanceIndex].bases01.z;
     return triToLightIdx[instances[instanceIndex].bases23.w + localIdx];
 }
 
@@ -690,6 +696,16 @@ void trace(const in Ray ray, inout Hit hit)
                 hit.world_dist_to_hit = closestT;
             }
         }
+        if (closestT == 1e30)
+        {
+            hit.primitiveIndex = 0xFFFFFFFFu;
+            hit.instanceIndex = 0xFFFFFFFFu;
+        }
+    }
+    else
+    {
+        hit.primitiveIndex = 0xFFFFFFFFu;
+        hit.instanceIndex = 0xFFFFFFFFu;
     }
 
 }
@@ -803,7 +819,7 @@ vec3 evaluateBRDF(const in vec3 normal, const in vec3 incoming_dir, const in vec
     vec3 f_specular = (D * G * F) / max(4.0 * Ndotw_i * Ndotw_o, 1e-6);
 
     //thats it
-    return f_diffuse + f_specular;
+    return f_diffuse;
 }
 
 void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
@@ -822,8 +838,10 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
 
     // pick 2 weights such that they add to 1 to pick from diffuse or GGX
     vec3 Fview = fresnel_Schlick(cosineTheta, F0);
-    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 0.98);
+    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
     float diffuse_weight = 1.0 - specular_weight;
+    specular_weight = 0.0;
+    diffuse_weight = 1.0;
 
     vec3 candidate_wi = vec3(0.0);
     float s_pdf = 0.0;
@@ -845,12 +863,13 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
     float pdf = specular_weight * s_pdf + diffuse_weight * d_pdf;
 
     //after some final gates we can assign the out values. for BRDF value we will call the evaluating function
-    if (pdf <= 0.0)
+    if (pdf <= 1e-4)
         return;
     incoming_dir = candidate_wi;
     BRDF_value = evaluateBRDF(normal, candidate_wi, outgoing_dir, baseColor, F0, roughness);
     BRDF_PDF = pdf;
 }
+
 
 void evaluateBRDF_and_PDF(const in vec3 normal, const in vec3 outgoing_dir, const in vec3 incoming_dir, const in vec3 baseColor, const in vec3 F0, const in float roughness,
                           out vec3 f,
@@ -865,8 +884,10 @@ void evaluateBRDF_and_PDF(const in vec3 normal, const in vec3 outgoing_dir, cons
 
     // Same lobe weights as in BRDF()
     vec3 Fview = fresnel_Schlick(cosThetaOut, F0);
-    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 0.98);
+    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
     float diffuse_weight  = 1.0 - specular_weight;
+    specular_weight = 0.0;
+    diffuse_weight = 1.0;
 
     // Per-lobe PDFs for this specific incoming_dir
     float s_pdf = getGGXPDF(normal, outgoing_dir, roughness, incoming_dir);
@@ -1142,7 +1163,7 @@ bool lightSample(vec3 hitPoint, vec3 normal, inout uint rngState,
 
 
 
-vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throughput, inout uint rngState, const in uvec2 pixel)
+vec3 solveRenderingEquation(inout Ray ray, inout Hit hit, inout vec3 throughput, inout uint rngState, const in uvec2 pixel, const in int bounce)
 {
     vec3 luminance = vec3(0.0);
 
@@ -1175,13 +1196,15 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
 
     // interpolate the normal and convert it to world space;
     vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz, hit.barrycentricUV.x, hit.barrycentricUV.y);
-    bool frontFace = dot(normal, -ray.direction) > 0.0;
-    normal = frontFace ? normal : -normal;
     //this needs to be swaped for inverse transpose of linnear part of the model->world matrix that needs to be calculated per instance on the cpu
     normal = affineTransformDirection(normal, instances[hit.instanceIndex].modelToWorld0, instances[hit.instanceIndex].modelToWorld1, instances[hit.instanceIndex].modelToWorld2);
+    normal = normalize(normal);
+    bool frontFace = dot(normal, -ray.direction) > 0.0;
+    normal = frontFace ? normal : -normal;
 
     //get luminacne for this hit.
-    luminance += throughput * material.emission_flags.xyz;
+    if (bounce == 0)
+        luminance += throughput * material.emission_flags.xyz;
     //get hit point in world space
     vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
 
@@ -1189,7 +1212,7 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
 
     vec3 L_direct = vec3(0.0);
 
-    // Light sampling branch (direct lighting)
+    //Light sampling branch (direct lighting)
     vec3 wi_L, Li_L;
     float pdf_L, cosTheta_L;
     uint lightIdx_L, instIdx_L, primIdx_L, matIdx_L;
@@ -1204,7 +1227,7 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
         if (pdf_L > 0.0 && cosTheta_L > 0.0)
         {
             vec3 C_L = f_L * Li_L * cosTheta_L / pdf_L;
-            L_direct += w_L * C_L;
+            luminance += w_L * C_L * throughput;
         }
     }
 
@@ -1219,26 +1242,23 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
 
     float cosTheta_B = max(dot(normal, wi_B), 0.0);
 
+
+    ray.origin    = hitPoint + 1e-4 * wi_B;
+    ray.direction = wi_B;
+
+    trace(ray, hit);
+
     if (pdf_B > 0.0 && cosTheta_B > 0.0)
     {
-        // Shadow ray along BSDF sample for *direct* light (if it hits emitter)
-        Ray shadowRay;
-        shadowRay.origin    = hitPoint + 1e-4 * wi_B;
-        shadowRay.direction = wi_B;
-
-        Hit shadowHit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
-        trace(shadowRay, shadowHit);
-
-        if (shadowHit.instanceIndex != 0xFFFFFFFFu &&
-            shadowHit.primitiveIndex != 0xFFFFFFFFu)
+        if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
         {
             // Check if this primitive is emissive and find its lightIdx
-            uint instIdx_B = shadowHit.instanceIndex;
-            uint primIdx_B = shadowHit.primitiveIndex;
+            uint instIdx_B = hit.instanceIndex;
+            uint primIdx_B = hit.primitiveIndex;
 
-            // You need a way to map (instIdx_B, primIdx_B) -> lightIdx_B
-            // For example: uint lightIdx_B = primToLightIdx[primIdx_B]; or from Hit.
             uint lightIdx_B = getLightIndexFromHit(instIdx_B, primIdx_B);
+            uint numberOfLights = emissiveTrinagles[0].padding;
+
 
             if (lightIdx_B != 0xFFFFFFFFu)
             {
@@ -1247,27 +1267,24 @@ vec3 solveRenderingEquationForHit(inout Ray ray, inout Hit hit, inout vec3 throu
 
                 float pdf_L_B = lightDirectionalPDF(hitPoint, lightIdx_B);
                 float denom   = pdf_B + pdf_L_B;
-                float w_B     = (denom > 0.0) ? (pdf_B / denom) : 0.0;
+                float w_B = (denom > 0.0) ? (pdf_B / denom) : 0.0;
 
                 if (pdf_B > 0.0)
                 {
                     vec3 C_B = f_B * Li_B * cosTheta_B / pdf_B;
-                    L_direct += w_B * C_B;
+                    luminance += w_B * C_B *throughput;
                 }
             }
         }
 
-        // Path continuation (indirect lighting)
-        ray.origin    = hitPoint + 1e-5 * wi_B;
-        ray.direction = wi_B;
-
         throughput *= f_B * (cosTheta_B / pdf_B);
     }
     else
+    {
+        luminance += throughput * L_direct;
         throughput = vec3(0.0);
-
-    // Add direct term to luminance
-    luminance += throughput * L_direct;
+    }
+    
 
     return luminance;
 }
@@ -1277,29 +1294,25 @@ vec3 samplePath(Ray ray, uvec2 pixel, inout uint rngState)
     vec3 luminacne = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    const int MAX_DEPTH = 64;
-    const int MIN_DEPTH = 3;
+    const int MAX_DEPTH = 2;
 
     bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
     uint selectedIdx      = Params.flags & MASK_INSTANCE_IDX;
 
+    Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+    trace(ray, hit);
     for (int bounce = 0; bounce < MAX_DEPTH; bounce++)
     {
-        Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
-        trace(ray, hit);
-
         if (hit.instanceIndex == 0xFFFFFFFFu && hit.primitiveIndex == 0xFFFFFFFFu)
             break;
-
         if (hit.instanceIndex != 0xFFFFFFFFu && hit.primitiveIndex != 0xFFFFFFFFu)
         {
-            luminacne += solveRenderingEquationForHit(ray, hit, throughput, rngState, pixel);
+            luminacne += solveRenderingEquation(ray, hit, throughput, rngState, pixel, bounce);
             if (instanceSelected && hit.instanceIndex == selectedIdx && bounce == 0)
                 luminacne = mix(luminacne, vec3(1.0, 1.0, 0.0), 0.4);
         }
 
-
-        if (bounce >= MIN_DEPTH)
+        if (bounce > 3)
         {
             float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.0, 0.99);
             float xi = rand(rngState);
@@ -1340,7 +1353,7 @@ void main()
         Ray ray = generateRayJittered(pixel, jitter);
         color += samplePath(ray, pixel, rngState);
     }
-    color /= 4.0;
+    color /= 1.0;
 
        
     imageStore(outImage, ivec2(pixel), vec4(color, 1.0));

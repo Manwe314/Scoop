@@ -895,9 +895,10 @@ void ShowcaseApp::makeEmissionTriangles()
             if (!isEmissive(emission))
                 continue;
             EmisiveTriangle eTri{};
+            eTri.primitiveIndex = instance.shadeTriBase + i;
             eTri.instanceIndex = static_cast<uint32_t>(size);
             eTri.materialIndex = instance.materialBase + matIndex;
-            eTri.primitiveIndex = instance.shadeTriBase + i;
+            eTri.padding = 69;
 
             uint32_t lightIdx = static_cast<uint32_t>(emissiveTrinagles.size());
             emissiveTrinagles.push_back(eTri);
