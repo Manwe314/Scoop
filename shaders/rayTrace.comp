@@ -1320,13 +1320,13 @@ void main()
     
 
     vec3 color = vec3(0.0);
-    for (int SPP = 0; SPP < 3; SPP++)
+    for (int SPP = 0; SPP < 1; SPP++)
     {
         vec2 jitter = vec2(rand(rngState), rand(rngState));
         Ray ray = generateRayJittered(pixel, jitter);
         color += samplePath(ray, pixel, rngState);
     }
-    color /= 3.0;
+    color /= 1.0;
 
        
     imageStore(outImage, ivec2(pixel), vec4(color, 1.0));

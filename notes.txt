@@ -43,6 +43,7 @@ https://www.pbr-book.org/4ed/Shapes/Triangle_Meshes
 https://en.wikipedia.org/wiki/Alias_method
 https://dl.acm.org/doi/pdf/10.1145/218380.218500
 https://cw.fel.cvut.cz/b241/_media/courses/b4m39rso/tutorials/multiple_importance_sampling_101.pdf
+https://research.nvidia.com/sites/default/files/pubs/2013-07_Megakernels-Considered-Harmful/laine2013hpg_paper.pdf
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms
@@ -336,6 +337,18 @@ m48 final Simple comp shader w/ iGpu & O3 just a girl
 [CPU] avg FPS: 13.9126 avg MS: 71.8772
 [GPU] compute: 71.2023 ms, graphics: 0.329635 ms, combined: 71.5319 ms
 [CPU] avg FPS: 13.9123 avg MS: 71.8788
+
+
+cornellBox Megakernel dGpu | -0.8y no full screen.
+[GPU] compute: 155.412 ms, graphics: 0.02752 ms, combined: 155.439 ms
+[GPU] compute: 155.298 ms, graphics: 0.02752 ms, combined: 155.326 ms
+[GPU] compute: 155.211 ms, graphics: 0.02764 ms, combined: 155.238 ms
+[GPU] compute: 154.884 ms, graphics: 0.02748 ms, combined: 154.912 ms
+[GPU] compute: 154.899 ms, graphics: 0.02756 ms, combined: 154.927 ms
+[GPU] compute: 155.505 ms, graphics: 0.02748 ms, combined: 155.533 ms
+[GPU] compute: 154.637 ms, graphics: 0.02748 ms, combined: 154.665 ms
+[GPU] compute: 155.044 ms, graphics: 0.02744 ms, combined: 155.072 ms
+
 
 
 
