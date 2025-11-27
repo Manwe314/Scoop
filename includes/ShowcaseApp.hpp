@@ -8,6 +8,7 @@
 #include "Object.hpp"
 #include "SceneUtils.hpp"
 #include "Utils.hpp"
+#include "WavefrontHelpers.hpp"
 
 #include <optional>
 #include <set>
@@ -23,8 +24,8 @@
 
 
 #define VALIDATE true
-#define FPS true
-
+#define FPS false
+constexpr bool SimpleRayTrace = true;
 
 struct GpuTexture {
     VkImage        image        = VK_NULL_HANDLE;
@@ -189,12 +190,25 @@ private:
     VkDeviceMemory offscreenMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkImageView    offscreenView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
-    VkDescriptorSetLayout computeSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool      computeDescPool  = VK_NULL_HANDLE;
-    VkDescriptorSet       computeSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDescriptorSetLayout computeStaticSetLayout  = VK_NULL_HANDLE;
+    VkDescriptorSetLayout computeFrameSetLayout   = VK_NULL_HANDLE;
+    VkDescriptorSetLayout computeDynamicSetLayout = VK_NULL_HANDLE;
+
+    VkDescriptorPool      computeDescPool         = VK_NULL_HANDLE;
+
+    VkDescriptorSet       computeStaticSet        = VK_NULL_HANDLE;
+    VkDescriptorSet       computeFrameSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDescriptorSet       computeDynamicSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{}; 
 
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
+
     VkPipeline       computePipeline       = VK_NULL_HANDLE;
+
+    VkPipeline rayTraceLogicPipeline     = VK_NULL_HANDLE;
+    VkPipeline rayTraceNewPathPipeline   = VK_NULL_HANDLE;
+    VkPipeline rayTraceMaterialPipeline  = VK_NULL_HANDLE;
+    VkPipeline rayTraceExtendRayPipeline = VK_NULL_HANDLE;
+    VkPipeline rayTraceShadowRayPipeline = VK_NULL_HANDLE;
 
     VkRenderPass          renderPass = VK_NULL_HANDLE;
 
@@ -235,10 +249,35 @@ private:
     VkBuffer triToLightIdxBuffer = VK_NULL_HANDLE;
     VkDeviceMemory triToLightIdxMemory = VK_NULL_HANDLE;
 
+    VkBuffer       pathHeaderBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory pathHeaderMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
-    
+    VkBuffer       rayBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory rayMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
-    
+    VkBuffer       hitIdsBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory hitIdsMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       hitDataBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory hitDataMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       radianceBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory radianceMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       bsdfSampleBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory bsdfSampleMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       lightSampleBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory lightSampleMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       shadowRayBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory shadowRayMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       shadowResultBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory shadowResultMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer       pathQueueBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory pathQueueMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkBuffer       paramsBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -330,6 +369,7 @@ private:
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
     void makeEmissionTriangles();
+    void createOrResizeWavefrontBuffers();
     void createLogicalDevice();
     void createSwapchain();
     void recreateSwapchain();
@@ -351,7 +391,7 @@ private:
     void createQueryPool();
     void destroyCommandPoolAndBuffers();
     void destroySceneTextures();
-    void destorySSBOdata();
+    void destroySSBOdata();
     void uploadStaticData();
     void createParamsBuffers();
     void writeStaticComputeBindings();
@@ -361,6 +401,9 @@ private:
     void recordGraphicsCommands(uint32_t frameIndex, uint32_t swapImageIndex);
     void createBuffer(VkDevice device, VkPhysicalDevice phys, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags memFlags, VkBuffer& outBuf, VkDeviceMemory& outMem);
     void uploadTextureImages();
+    void createWavefrontBuffers();
+    void destroyWavefrontBuffers();
+    uint32_t getMaxPaths() const;
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
     SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);

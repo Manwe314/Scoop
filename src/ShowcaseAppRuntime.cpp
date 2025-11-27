@@ -367,15 +367,31 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
         }
     }
 
-    VkDescriptorBufferInfo b6{ tlasNodesBuf[frameIndex], 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo b7{ tlasInstBuf[frameIndex],  0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo b8{ tlasIdxBuf[frameIndex],   0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b0{ tlasNodesBuf[frameIndex], 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b1{ tlasInstBuf[frameIndex],  0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b2{ tlasIdxBuf[frameIndex],   0, VK_WHOLE_SIZE };
 
     VkWriteDescriptorSet w[3]{};
-    for (int i = 0; i < 3; ++i) w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 6, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b6, nullptr };
-    w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 7, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b7, nullptr };
-    w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, computeSets[frameIndex], 8, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b8, nullptr };
+    for (int j = 0; j < 3; ++j)
+    {
+        w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[j].descriptorCount = 1;
+        w[j].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[j].dstSet          = computeFrameSets[frameIndex];
+    }
+
+    // set 1, binding 0: TLAS nodes
+    w[0].dstBinding      = 0;
+    w[0].pBufferInfo     = &b0;
+
+    // set 1, binding 1: TLAS instances
+    w[1].dstBinding      = 1;
+    w[1].pBufferInfo     = &b1;
+
+    // set 1, binding 2: TLAS indices
+    w[2].dstBinding      = 2;
+    w[2].pBufferInfo     = &b2;
+
     vkUpdateDescriptorSets(device, 3, w, 0, nullptr);
 }
 
@@ -527,13 +543,94 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     }
 
     
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeSets[i], 0, nullptr);
 
     uint32_t gx = (swapChainExtent.width  + 7)/8;
     uint32_t gy = (swapChainExtent.height + 7)/8;
-    vkCmdDispatch(cmd, gx, gy, 1);
 
+    if constexpr (SimpleRayTrace)
+    {
+        VkDescriptorSet sets[3] = {
+            computeStaticSet,
+            computeFrameSets[i],
+            computeDynamicSets[i]
+        };
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+        vkCmdBindDescriptorSets(cmd,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                computePipelineLayout,
+                                0,
+                                3,
+                                sets,
+                                0, nullptr);
+
+        vkCmdDispatch(cmd, gx, gy, 1);
+    }
+    else
+    {
+        VkDescriptorSet sets[3] = {
+            computeStaticSet,
+            computeFrameSets[i],
+            computeDynamicSets[i]
+        };
+
+        auto bindAndDispatch = [&](VkPipeline pipeline)
+        {
+            if (pipeline == VK_NULL_HANDLE)
+                return;
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+            vkCmdBindDescriptorSets(cmd,
+                                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    computePipelineLayout,
+                                    0,
+                                    3,
+                                    sets,
+                                    0, nullptr);
+            vkCmdDispatch(cmd, gx, gy, 1);
+        };
+
+        VkMemoryBarrier memBarrier{};
+        memBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        auto passBarrier = [&]()
+        {
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0,
+                                 1, &memBarrier,
+                                 0, nullptr,
+                                 0, nullptr);
+        };
+
+        // Order is somewhat arbitrary for now; real control flow
+        // will be driven by queue counters once shaders are written.
+
+        // 1) New paths (camera rays etc.)
+        bindAndDispatch(rayTraceNewPathPipeline);
+        passBarrier();
+
+        // 2) Core logic pass (e.g. compaction, queue management)
+        bindAndDispatch(rayTraceLogicPipeline);
+        passBarrier();
+
+        // 3) Material evaluation / lighting
+        bindAndDispatch(rayTraceMaterialPipeline);
+        passBarrier();
+
+        // 4) Path extension (bounce rays)
+        bindAndDispatch(rayTraceExtendRayPipeline);
+        passBarrier();
+
+        // 5) Shadow rays / visibility
+        bindAndDispatch(rayTraceShadowRayPipeline);
+        // No extra barrier needed here before we transition the image,
+        // the imageBarrier below will serve as a full sync to TRANSFER.
+    }
+    
 
     imageBarrier(cmd, offscreenImage[i],
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,

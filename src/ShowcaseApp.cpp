@@ -1,7 +1,8 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
 
-constexpr bool SimpleRayTrace = false;
+
+constexpr uint32_t NUM_PATH_QUEUES = 4;
 
 // ~~~~~ helpers ~~~~~~
 
@@ -46,6 +47,14 @@ static void destroyGpuTexture(VkDevice device, GpuTexture& tex) {
     if (tex.view)   { vkDestroyImageView(device, tex.view, nullptr);  tex.view = VK_NULL_HANDLE; }
     if (tex.image)  { vkDestroyImage(device, tex.image, nullptr);     tex.image = VK_NULL_HANDLE; }
     if (tex.memory) { vkFreeMemory(device, tex.memory, nullptr);      tex.memory = VK_NULL_HANDLE; }
+}
+
+uint32_t ShowcaseApp::getMaxPaths() const
+{
+    uint32_t w = std::max(1u, swapChainExtent.width);
+    uint32_t h = std::max(1u, swapChainExtent.height);
+
+    return w * h;
 }
 
 VkShaderModule ShowcaseApp::createShaderModule(const std::vector<char>& code)
@@ -134,6 +143,66 @@ void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src
     vkCmdCopyBuffer(cmd, src, dst, 1, &region);
     endOneTimeCmd(device, queue, pool, cmd);
 }
+
+void ShowcaseApp::createOrResizeWavefrontBuffers()
+{
+    // Simple path: do nothing, we don't need any of the wavefront SSBOs yet.
+    if constexpr (SimpleRayTrace)
+        return;
+
+    const uint32_t maxPaths = getMaxPaths();
+    const VkDeviceSize pathCount = VkDeviceSize(maxPaths);
+
+    // All these go through ensureBufferCapacity so even if maxPaths == 0 by some bug,
+    // nonZero() will enforce a minimum size (16 bytes).
+    const VkBufferUsageFlags usage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const VkMemoryPropertyFlags memFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    for (uint32_t frame = 0; frame < SwapChain::MAX_FRAMES_IN_FLIGHT; ++frame)
+    {
+        ensureBufferCapacity(pathHeaderBuf[frame], pathHeaderMem[frame],
+                             pathCount * sizeof(PathHeader),
+                             usage, memFlags);
+
+        ensureBufferCapacity(rayBuf[frame], rayMem[frame],
+                             pathCount * sizeof(Ray),
+                             usage, memFlags);
+
+        ensureBufferCapacity(hitIdsBuf[frame], hitIdsMem[frame],
+                             pathCount * sizeof(HitIds),
+                             usage, memFlags);
+
+        ensureBufferCapacity(hitDataBuf[frame], hitDataMem[frame],
+                             pathCount * sizeof(Hitdata),
+                             usage, memFlags);
+
+        ensureBufferCapacity(radianceBuf[frame], radianceMem[frame],
+                             pathCount * sizeof(RadianceState),
+                             usage, memFlags);
+
+        ensureBufferCapacity(bsdfSampleBuf[frame], bsdfSampleMem[frame],
+                             pathCount * sizeof(BsdfSample),
+                             usage, memFlags);
+
+        ensureBufferCapacity(lightSampleBuf[frame], lightSampleMem[frame],
+                             pathCount * sizeof(LightSample),
+                             usage, memFlags);
+
+        ensureBufferCapacity(shadowRayBuf[frame], shadowRayMem[frame],
+                             pathCount * sizeof(ShadowRay),
+                             usage, memFlags);
+
+        ensureBufferCapacity(shadowResultBuf[frame], shadowResultMem[frame],
+                             pathCount * sizeof(ShadowResult),
+                             usage, memFlags);
+
+        ensureBufferCapacity(pathQueueBuf[frame], pathQueueMem[frame],
+                             VkDeviceSize(NUM_PATH_QUEUES) * sizeof(PathQueue),
+                             usage, memFlags);
+    }
+}
+
 
 static int getAspectExtent(float aspect, bool isWidth)
 {
@@ -598,12 +667,14 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createSyncObjects();
     createOffscreenTargets(); // on resizing will need to call this again
     createComputeDescriptors();
+    updateComputeDescriptor();
     createComputePipeline();
     createRenderPass();
     createFramebuffers();
     createGraphicsDescriptors();
     createFullscreenGraphicsPipeline();
     createParamsBuffers();
+    createWavefrontBuffers();
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
     initLookAnglesFromCamera();
@@ -628,6 +699,18 @@ ShowcaseApp::~ShowcaseApp()
 
     if (computePipeline)
         vkDestroyPipeline(device, computePipeline, nullptr);
+
+    if (rayTraceLogicPipeline)
+        vkDestroyPipeline(device, rayTraceLogicPipeline, nullptr);
+    if (rayTraceNewPathPipeline)
+        vkDestroyPipeline(device, rayTraceNewPathPipeline, nullptr);
+    if (rayTraceMaterialPipeline)
+        vkDestroyPipeline(device, rayTraceMaterialPipeline, nullptr);
+    if (rayTraceExtendRayPipeline)
+        vkDestroyPipeline(device, rayTraceExtendRayPipeline, nullptr);
+    if (rayTraceShadowRayPipeline)
+        vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
+
     if (computePipelineLayout)
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
     
@@ -674,7 +757,8 @@ ShowcaseApp::~ShowcaseApp()
         if (computeFences[i]) vkDestroyFence(device, computeFences[i], nullptr);
         if (imageAcquiredFences[i]) vkDestroyFence(device, imageAcquiredFences[i], nullptr);
     }
-    destorySSBOdata();
+    destroyWavefrontBuffers();
+    destroySSBOdata();
 
     for (auto s : imageRenderFinished)
         vkDestroySemaphore(device, s, nullptr);
@@ -700,6 +784,59 @@ ShowcaseApp::~ShowcaseApp()
 ShowcaseApp* ShowcaseApp::s_active = nullptr;
 
 // ~~~~~ Creation ~~~~~
+
+void ShowcaseApp::createWavefrontBuffers()
+{
+    if constexpr (SimpleRayTrace)
+        return;
+
+    destroyWavefrontBuffers();
+
+    createOrResizeWavefrontBuffers();
+
+    const uint32_t     maxPaths  = getMaxPaths();
+    const VkDeviceSize pathCount = std::max<VkDeviceSize>(VkDeviceSize(1), VkDeviceSize(maxPaths));
+
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        VkDescriptorBufferInfo b0{ pathHeaderBuf[i],   0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b1{ rayBuf[i],          0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b2{ hitIdsBuf[i],       0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b3{ hitDataBuf[i],      0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b4{ radianceBuf[i],     0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b5{ bsdfSampleBuf[i],   0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b6{ lightSampleBuf[i],  0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b7{ shadowRayBuf[i],    0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b8{ shadowResultBuf[i], 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b9{ pathQueueBuf[i],    0, VK_WHOLE_SIZE };
+
+        VkWriteDescriptorSet writes[10]{};
+
+        auto initWrite = [&](VkWriteDescriptorSet& w, uint32_t binding, const VkDescriptorBufferInfo* info)
+        {
+            w = {};
+            w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet          = computeDynamicSets[i];
+            w.dstBinding      = binding;
+            w.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.descriptorCount = 1;
+            w.pBufferInfo     = info;
+        };
+
+        initWrite(writes[0], 0, &b0);
+        initWrite(writes[1], 1, &b1);
+        initWrite(writes[2], 2, &b2);
+        initWrite(writes[3], 3, &b3);
+        initWrite(writes[4], 4, &b4);
+        initWrite(writes[5], 5, &b5);
+        initWrite(writes[6], 6, &b6);
+        initWrite(writes[7], 7, &b7);
+        initWrite(writes[8], 8, &b8);
+        initWrite(writes[9], 9, &b9);
+
+        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+    }
+}
 
 void ShowcaseApp::createTextureSampler(VkPhysicalDevice phys, float requestedAniso)
 {
@@ -914,7 +1051,16 @@ void ShowcaseApp::makeEmissionTriangles()
     }
     if (emissiveTrinagles.empty())
     {
-        throw std::runtime_error("ShowCaseApp: No emissive trinagles means you'll see nothing");
+        if constexpr (!SimpleRayTrace)
+            throw std::runtime_error("ShowCaseApp: No emissive trinagles means you'll see nothing");
+        else
+        {
+            lightPdf.clear();
+            lightProb.clear();
+            lightAlias.clear();
+            triToLightIdx.clear();
+            return;
+        }
     }
     emissiveTrinagles[0].padding = static_cast<uint>(emissiveTrinagles.size());
 
@@ -1021,16 +1167,12 @@ void ShowcaseApp::uploadTextureImages()
         infos.push_back(di);
     }
 
-    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    if (computeStaticSet != VK_NULL_HANDLE)
     {
-        if (computeSets[i] == VK_NULL_HANDLE)
-            continue;
-
         VkWriteDescriptorSet w{};
         w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet          = computeSets[i];
+        w.dstSet          = computeStaticSet;
         w.dstBinding      = 9;
-        w.dstArrayElement = 0;
         w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w.descriptorCount = static_cast<uint32_t>(infos.size());
         w.pImageInfo      = infos.data();
@@ -1434,6 +1576,7 @@ void ShowcaseApp::recreateSwapchain()
     createOffscreenTargets();
 
     updateComputeDescriptor();
+    createWavefrontBuffers();
 
     if (graphicsDescPool && graphicsSetLayout)
     {
@@ -1668,111 +1811,195 @@ void ShowcaseApp::createOffscreenTargets()
 
 void ShowcaseApp::createComputeDescriptors()
 {
+    // ---------- SET 0: STATIC SCENE DATA ----------
+    // bindings:
+    //   0: sbvhNodesBuffer
+    //   1: triangleBuffer
+    //   2: shadingBuffer
+    //   3: materialBuffer
+    //   4: emissiveTriangleBuffer
+    //   5: lightProbBuffer
+    //   6: lightPdfBuffer
+    //   7: lightAliasBuffer
+    //   8: triToLightIdxBuffer
+    //   9: textures[]
 
-    VkDescriptorSetLayoutBinding b0{};
-    b0.binding = 0;
-    b0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    b0.descriptorCount = 1;
-    b0.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding set0[10]{};
 
-    VkDescriptorSetLayoutBinding b1{};
-    b1.binding = 1;
-    b1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    b1.descriptorCount = 1;
-    b1.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    auto initSet0 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding,
+                     VkDescriptorType type, uint32_t count, VkShaderStageFlags stages)
+    {
+        b = {};
+        b.binding         = binding;
+        b.descriptorType  = type;
+        b.descriptorCount = count;
+        b.stageFlags      = stages;
+    };
 
-    VkDescriptorSetLayoutBinding b2 = b1;
-    b2.binding = 2;
+    initSet0(set0[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[5], 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[6], 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[7], 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[8], 8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    VkDescriptorSetLayoutBinding b3 = b1;
-    b3.binding = 3;
+    uint32_t maxTextures = std::max(1u, static_cast<uint32_t>(flattened.size()));
+    initSet0(set0[9], 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  maxTextures, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    VkDescriptorSetLayoutBinding b4 = b1;
-    b4.binding = 4;
+    VkDescriptorSetLayoutCreateInfo staticLayoutCreateInfo{ };
+    staticLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    staticLayoutCreateInfo.bindingCount = 10;
+    staticLayoutCreateInfo.pBindings    = set0;
 
-    VkDescriptorSetLayoutBinding b5 = b1;
-    b5.binding = 5;
+    if (vkCreateDescriptorSetLayout(device, &staticLayoutCreateInfo, nullptr, &computeStaticSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute static descriptor set layout!");
 
-    VkDescriptorSetLayoutBinding b6 = {};
-    b6.binding = 6;
-    b6.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    b6.descriptorCount = 1;
-    b6.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    VkDescriptorSetLayoutBinding b7 = b6;
-    b7.binding = 7;
+    // ---------- SET 1: PER-FRAME DATA ----------
+    // bindings:
+    //   0: tlasNodesBuf[frame]
+    //   1: tlasInstBuf[frame]
+    //   2: tlasIdxBuf[frame]
+    //   3: paramsBuffer[frame]
+    //   4: offscreenImage[frame]
 
-    VkDescriptorSetLayoutBinding b8 = b6;
-    b8.binding = 8;
+    VkDescriptorSetLayoutBinding set1[5]{};
 
-    VkDescriptorSetLayoutBinding b9 = {};
-    b9.binding = 9;
-    b9.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    b9.descriptorCount = std::max(1u, static_cast<uint32_t>(flattened.size()));
-    b9.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    auto initSet1 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding,
+                     VkDescriptorType type, VkShaderStageFlags stages)
+    {
+        b = {};
+        b.binding         = binding;
+        b.descriptorType  = type;
+        b.descriptorCount = 1;
+        b.stageFlags      = stages;
+    };
 
-    VkDescriptorSetLayoutBinding b10 = b1;
-    b10.binding = 10;
+    initSet1(set1[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS nodes
+    initSet1(set1[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS instances
+    initSet1(set1[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS indices
+    initSet1(set1[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // params
+    initSet1(set1[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // offscreen image
 
-    VkDescriptorSetLayoutBinding b11 = b1;
-    b11.binding = 11;
+    VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
+    frameLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    frameLayoutCreateInfo.bindingCount = 5;
+    frameLayoutCreateInfo.pBindings    = set1;
 
-    VkDescriptorSetLayoutBinding b12 = b1;
-    b12.binding = 12;
+    if (vkCreateDescriptorSetLayout(device, &frameLayoutCreateInfo, nullptr, &computeFrameSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute frame descriptor set layout!");
 
-    VkDescriptorSetLayoutBinding b13 = b1;
-    b13.binding = 13;
 
-    VkDescriptorSetLayoutBinding b14 = b1;
-    b14.binding = 14;
+    // ---------- SET 2: DYNAMIC (WAVEFRONT) ----------
+    // bindings:
+    //   0: PathHeader[]
+    //   1: Ray[]
+    //   2: HitIds[]
+    //   3: Hitdata[]
+    //   4: RadianceState[]
+    //   5: BsdfSample[]
+    //   6: LightSample[]
+    //   7: ShadowRay[]
+    //   8: ShadowResult[]
+    //   9: PathQueue[]
 
-    std::array<VkDescriptorSetLayoutBinding, 15> bindings = {b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14};
+    VkDescriptorSetLayoutBinding d[10]{};
 
-    VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
-    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutCreateInfo.bindingCount = (uint32_t)bindings.size();
-    layoutCreateInfo.pBindings = bindings.data();
+    auto initSet2 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding)
+    {
+        b = {};
+        b.binding         = binding;
+        b.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        b.descriptorCount = 1;
+        b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+    };
 
-    if (vkCreateDescriptorSetLayout(device, &layoutCreateInfo, nullptr, &computeSetLayout) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to create compute descriptor set layout!");
+    for (uint32_t b = 0; b < 10; ++b)
+        initSet2(d[b], b);
 
-    VkDescriptorPoolSize poolSizeImg{};
-    poolSizeImg.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizeImg.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
-        
-    VkDescriptorPoolSize poolSizeBuf{};
-    poolSizeBuf.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizeBuf.descriptorCount = 13 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    VkDescriptorSetLayoutCreateInfo dynamicLayoutCreateInfo{ };
+    dynamicLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dynamicLayoutCreateInfo.bindingCount = 10;
+    dynamicLayoutCreateInfo.pBindings    = d;
 
-    VkDescriptorPoolSize poolSizeTex{};
-    poolSizeTex.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizeTex.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT * std::max(1u, static_cast<uint32_t>(flattened.size()));
-        
-    std::array<VkDescriptorPoolSize, 3> poolSizes = {poolSizeImg, poolSizeBuf, poolSizeTex};
+    if (vkCreateDescriptorSetLayout(device, &dynamicLayoutCreateInfo, nullptr, &computeDynamicSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to create compute dynamic descriptor set layout!");
 
-    VkDescriptorPoolCreateInfo poolCreateInfo{};
-    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.maxSets = SwapChain::MAX_FRAMES_IN_FLIGHT;
-    poolCreateInfo.poolSizeCount = (uint32_t)poolSizes.size();
-    poolCreateInfo.pPoolSizes = poolSizes.data();
+
+    // ---------- DESCRIPTOR POOL ----------
+    // We need:
+    //  - STORAGE_IMAGE: offscreen per frame  -> MAX_FRAMES
+    //  - STORAGE_BUFFER: static (9) + per-frame (4 * MAX_FRAMES) -> just reserve a bit more
+    //  - COMBINED_IMAGE_SAMPLER: textures array once
+
+    VkDescriptorPoolSize poolSizes[3]{};
+
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[0].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT; // offscreen images
+
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizes[1].descriptorCount = 20 * SwapChain::MAX_FRAMES_IN_FLIGHT; // enough for static + per-frame + future dynamic
+
+    poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[2].descriptorCount = maxTextures; // scene textures
+
+    VkDescriptorPoolCreateInfo poolCreateInfo{ };
+    poolCreateInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.poolSizeCount = 3;
+    poolCreateInfo.pPoolSizes    = poolSizes;
+    poolCreateInfo.maxSets       = 1 + 2 * SwapChain::MAX_FRAMES_IN_FLIGHT; // 1 static + N frame + N dynamic
 
     if (vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &computeDescPool) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute descriptor pool!");
 
-    VkDescriptorSetLayout layouts[SwapChain::MAX_FRAMES_IN_FLIGHT];
-    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
-        layouts[i] = computeSetLayout;
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = computeDescPool;
-    allocateInfo.descriptorSetCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
-    allocateInfo.pSetLayouts = layouts;
 
-    if (vkAllocateDescriptorSets(device, &allocateInfo, computeSets) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to allocate compute descriptor set!");
+    // ---------- ALLOCATE STATIC SET (set 0) ----------
 
-    updateComputeDescriptor();
+    VkDescriptorSetLayout staticLayout = computeStaticSetLayout;
+    VkDescriptorSetAllocateInfo allocateInfo0{ };
+    allocateInfo0.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo0.descriptorPool     = computeDescPool;
+    allocateInfo0.descriptorSetCount = 1;
+    allocateInfo0.pSetLayouts        = &staticLayout;
+
+    if (vkAllocateDescriptorSets(device, &allocateInfo0, &computeStaticSet) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate compute static descriptor set!");
+
+
+    // ---------- ALLOCATE FRAME SETS (set 1) ----------
+
+    std::array<VkDescriptorSetLayout, SwapChain::MAX_FRAMES_IN_FLIGHT> frameLayouts{};
+    frameLayouts.fill(computeFrameSetLayout);
+
+    VkDescriptorSetAllocateInfo allocateInfo1{ };
+    allocateInfo1.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo1.descriptorPool     = computeDescPool;
+    allocateInfo1.descriptorSetCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+    allocateInfo1.pSetLayouts        = frameLayouts.data();
+
+    if (vkAllocateDescriptorSets(device, &allocateInfo1, computeFrameSets) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate compute frame descriptor sets!");
+
+
+    // ---------- ALLOCATE DYNAMIC SETS (set 2) ----------
+    // Currently empty layouts, but we allocate now so the pipeline layout can always bind 3 sets.
+
+    std::array<VkDescriptorSetLayout, SwapChain::MAX_FRAMES_IN_FLIGHT> dynLayouts{};
+    dynLayouts.fill(computeDynamicSetLayout);
+
+    VkDescriptorSetAllocateInfo allocateInfo2{ };
+    allocateInfo2.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo2.descriptorPool     = computeDescPool;
+    allocateInfo2.descriptorSetCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+    allocateInfo2.pSetLayouts        = dynLayouts.data();
+
+    if (vkAllocateDescriptorSets(device, &allocateInfo2, computeDynamicSets) != VK_SUCCESS)
+        throw std::runtime_error("Showcase: failed to allocate compute dynamic descriptor sets!");
 }
+
 
 void ShowcaseApp::updateComputeDescriptor()
 {
@@ -1782,111 +2009,62 @@ void ShowcaseApp::updateComputeDescriptor()
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         imageInfo.imageView   = offscreenView[i];
         imageInfo.sampler     = VK_NULL_HANDLE;
-        
-        VkWriteDescriptorSet w0{};
-        w0.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w0.dstSet = computeSets[i];
-        w0.dstBinding = 0;
-        w0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w0.descriptorCount = 1;
-        w0.pImageInfo = &imageInfo;
-        
-        vkUpdateDescriptorSets(device, 1, &w0, 0, nullptr);
-    }
-    
 
+        VkWriteDescriptorSet w{};
+        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet          = computeFrameSets[i];
+        w.dstBinding      = 4;
+        w.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w.descriptorCount = 1;
+        w.pImageInfo      = &imageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+    }
 }
 
 void ShowcaseApp::writeStaticComputeBindings()
 {
-    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    VkDescriptorBufferInfo sbvhInfo{ sbvhNodesBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo eTriInfo{ emissiveTriangleBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo lightProbInfo{ lightProbBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo lightPdfInfo{ lightPdfBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo lightAliasInfo{ lightAliasBuffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo triToLightIdxInfo{ triToLightIdxBuffer, 0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet writes[9]{};
+
+    auto initWrite = [&](VkWriteDescriptorSet& w, uint32_t binding, const VkDescriptorBufferInfo* info)
     {
-        VkDescriptorBufferInfo sbvhInfo{ sbvhNodesBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo triangleInfo{ triangleBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo shadeInfo{ shadingBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo matInfo{ materialBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo eTriInfo{ emissiveTriangleBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo lightProbInfo{ lightProbBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo lightPdfInfo{ lightPdfBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo lightAliasInfo{ lightAliasBuffer, 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo triToLightIdxInfo{ triToLightIdxBuffer, 0, VK_WHOLE_SIZE };
+        w = {};
+        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet          = computeStaticSet;
+        w.dstBinding      = binding;
+        w.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.descriptorCount = 1;
+        w.pBufferInfo     = info;
+    };
 
-        VkWriteDescriptorSet w1{};
-        w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w1.dstSet = computeSets[i];
-        w1.dstBinding = 1;
-        w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w1.descriptorCount = 1;
-        w1.pBufferInfo = &sbvhInfo;
-
-        VkWriteDescriptorSet w2{};
-        w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w2.dstSet = computeSets[i];
-        w2.dstBinding = 2;
-        w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w2.descriptorCount = 1;
-        w2.pBufferInfo = &triangleInfo;
-
-        VkWriteDescriptorSet w3{};
-        w3.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w3.dstSet = computeSets[i];
-        w3.dstBinding = 3;
-        w3.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w3.descriptorCount = 1;
-        w3.pBufferInfo = &shadeInfo;
-
-        VkWriteDescriptorSet w4{};
-        w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w4.dstSet = computeSets[i];
-        w4.dstBinding = 4;
-        w4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w4.descriptorCount = 1;
-        w4.pBufferInfo = &matInfo;
-
-        VkWriteDescriptorSet w10{};
-        w10.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w10.dstSet = computeSets[i];
-        w10.dstBinding = 10;
-        w10.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w10.descriptorCount = 1;
-        w10.pBufferInfo = &eTriInfo;
-
-        VkWriteDescriptorSet w11{};
-        w11.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w11.dstSet = computeSets[i];
-        w11.dstBinding = 11;
-        w11.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w11.descriptorCount = 1;
-        w11.pBufferInfo = &lightProbInfo;
-
-        VkWriteDescriptorSet w12{};
-        w12.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w12.dstSet = computeSets[i];
-        w12.dstBinding = 12;
-        w12.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w12.descriptorCount = 1;
-        w12.pBufferInfo = &lightPdfInfo;
-
-        VkWriteDescriptorSet w13{};
-        w13.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w13.dstSet = computeSets[i];
-        w13.dstBinding = 13;
-        w13.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w13.descriptorCount = 1;
-        w13.pBufferInfo = &lightAliasInfo;
-
-        VkWriteDescriptorSet w14{};
-        w14.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w14.dstSet = computeSets[i];
-        w14.dstBinding = 14;
-        w14.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w14.descriptorCount = 1;
-        w14.pBufferInfo = &lightAliasInfo;
-
-        std::array<VkWriteDescriptorSet, 9> writes = {w1, w2, w3, w4, w10, w11, w12, w13, w14};
-        vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    initWrite(writes[0], 0, &sbvhInfo);
+    initWrite(writes[1], 1, &triangleInfo);
+    initWrite(writes[2], 2, &shadeInfo);
+    initWrite(writes[3], 3, &matInfo);
+    if constexpr (!SimpleRayTrace)
+    {
+        initWrite(writes[4], 4, &eTriInfo);
+        initWrite(writes[5], 5, &lightProbInfo);
+        initWrite(writes[6], 6, &lightPdfInfo);
+        initWrite(writes[7], 7, &lightAliasInfo);
+        initWrite(writes[8], 8, &triToLightIdxInfo);
+        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
     }
+    else
+        vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+
 }
+
 
 void ShowcaseApp::uploadStaticData()
 {
@@ -1894,11 +2072,14 @@ void ShowcaseApp::uploadStaticData()
     uploadDeviceLocal(intersectionTrinagles, 0, triangleBuffer, triangleMemory);
     uploadDeviceLocal(shadingTriangles, 0, shadingBuffer, shadingMemory);
     uploadDeviceLocal(materials, 0, materialBuffer, materialMemory);
-    uploadDeviceLocal(emissiveTrinagles, 0, emissiveTriangleBuffer, emissiveTriangleMemory);
-    uploadDeviceLocal(lightProb, 0, lightProbBuffer, lightProbMemory);
-    uploadDeviceLocal(lightPdf, 0, lightPdfBuffer, lightPdfMemory);
-    uploadDeviceLocal(lightAlias, 0, lightAliasBuffer, lightAliasMemory);
-    uploadDeviceLocal(triToLightIdx, 0, triToLightIdxBuffer, triToLightIdxMemory);
+    if constexpr (!SimpleRayTrace)
+    {
+        uploadDeviceLocal(emissiveTrinagles, 0, emissiveTriangleBuffer, emissiveTriangleMemory);
+        uploadDeviceLocal(lightProb, 0, lightProbBuffer, lightProbMemory);
+        uploadDeviceLocal(lightPdf, 0, lightPdfBuffer, lightPdfMemory);
+        uploadDeviceLocal(lightAlias, 0, lightAliasBuffer, lightAliasMemory);
+        uploadDeviceLocal(triToLightIdx, 0, triToLightIdxBuffer, triToLightIdxMemory);
+    }
     uploadTextureImages();
     writeStaticComputeBindings();
 }
@@ -1907,15 +2088,15 @@ void ShowcaseApp::writeParamsBindingForFrame(uint32_t frameIndex)
 {
     VkDescriptorBufferInfo paramsInfo{ paramsBuffer[frameIndex], 0, VK_WHOLE_SIZE };
 
-    VkWriteDescriptorSet w5{};
-    w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w5.dstSet = computeSets[frameIndex];
-    w5.dstBinding = 5;
-    w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w5.descriptorCount = 1;
-    w5.pBufferInfo = &paramsInfo;
+    VkWriteDescriptorSet w{};
+    w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet          = computeFrameSets[frameIndex];
+    w.dstBinding      = 3;
+    w.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.descriptorCount = 1;
+    w.pBufferInfo     = &paramsInfo;
 
-    vkUpdateDescriptorSets(device, 1, &w5, 0, nullptr);
+    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
 }
 
 void ShowcaseApp::createParamsBuffers()
@@ -1936,46 +2117,108 @@ void ShowcaseApp::createParamsBuffers()
 
 void ShowcaseApp::createComputePipeline()
 {
+    // Clean up any old pipelines/pipeline layout first
+    if (computePipeline)
+    {
+        vkDestroyPipeline(device, computePipeline, nullptr);
+        computePipeline = VK_NULL_HANDLE;
+    }
+
+    if (rayTraceLogicPipeline)
+    {
+        vkDestroyPipeline(device, rayTraceLogicPipeline, nullptr);
+        rayTraceLogicPipeline = VK_NULL_HANDLE;
+    }
+    if (rayTraceNewPathPipeline)
+    {
+        vkDestroyPipeline(device, rayTraceNewPathPipeline, nullptr);
+        rayTraceNewPathPipeline = VK_NULL_HANDLE;
+    }
+    if (rayTraceMaterialPipeline)
+    {
+        vkDestroyPipeline(device, rayTraceMaterialPipeline, nullptr);
+        rayTraceMaterialPipeline = VK_NULL_HANDLE;
+    }
+    if (rayTraceExtendRayPipeline)
+    {
+        vkDestroyPipeline(device, rayTraceExtendRayPipeline, nullptr);
+        rayTraceExtendRayPipeline = VK_NULL_HANDLE;
+    }
+    if (rayTraceShadowRayPipeline)
+    {
+        vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
+        rayTraceShadowRayPipeline = VK_NULL_HANDLE;
+    }
+
+    if (computePipelineLayout)
+    {
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+        computePipelineLayout = VK_NULL_HANDLE;
+    }
+
+    // --- Pipeline layout: 3 descriptor sets (static, per-frame, dynamic) ---
+
+    VkDescriptorSetLayout setLayouts[3] = {
+        computeStaticSetLayout,  // set 0: static scene + textures
+        computeFrameSetLayout,   // set 1: TLAS + params
+        computeDynamicSetLayout  // set 2: wavefront buffers
+    };
+
     VkPipelineLayoutCreateInfo layoutCreateInfo{};
-    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutCreateInfo.setLayoutCount = 1;
-    layoutCreateInfo.pSetLayouts = &computeSetLayout;
+    layoutCreateInfo.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.setLayoutCount = 3;
+    layoutCreateInfo.pSetLayouts    = setLayouts;
     layoutCreateInfo.pushConstantRangeCount = 0;
-    layoutCreateInfo.pPushConstantRanges = nullptr;
+    layoutCreateInfo.pPushConstantRanges    = nullptr;
 
     if (vkCreatePipelineLayout(device, &layoutCreateInfo, nullptr, &computePipelineLayout) != VK_SUCCESS)
         throw std::runtime_error("Showcase: failed to create compute pipeline layout!");
-    
-    
 
-    auto code = [&] {
-        if constexpr (SimpleRayTrace)
-            return Pipeline::readFile("build/shaders/rayTraceSimple.comp.spv");
-        else
-            return Pipeline::readFile("build/shaders/rayTrace.comp.spv");
-    }();
+    // --- Helper to create a compute pipeline from a SPIR-V file ---
 
+    auto makeComputePipeline = [&](const char* path, VkPipeline& outPipeline)
+    {
+        auto code = Pipeline::readFile(path);
+        VkShaderModule shader = createShaderModule(code);
 
-    VkShaderModule shader = createShaderModule(code);
+        VkPipelineShaderStageCreateInfo stage{};
+        stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = shader;
+        stage.pName  = "main";
 
-    VkPipelineShaderStageCreateInfo stage{};
-    stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = shader;
-    stage.pName  = "main";
+        VkComputePipelineCreateInfo createInfo{};
+        createInfo.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        createInfo.stage  = stage;
+        createInfo.layout = computePipelineLayout;
+        createInfo.basePipelineHandle = VK_NULL_HANDLE;
+        createInfo.basePipelineIndex  = -1;
 
-    VkComputePipelineCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    createInfo.stage = stage;
-    createInfo.layout = computePipelineLayout;
-    createInfo.basePipelineHandle = VK_NULL_HANDLE;
-    createInfo.basePipelineIndex = -1;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &outPipeline) != VK_SUCCESS)
+        {
+            vkDestroyShaderModule(device, shader, nullptr);
+            throw std::runtime_error(std::string("Showcase: failed to create compute pipeline for ") + path);
+        }
 
-    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &computePipeline) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: failed to create compute pipeline!");
+        vkDestroyShaderModule(device, shader, nullptr);
+    };
 
-    vkDestroyShaderModule(device, shader, nullptr);
+    if constexpr (SimpleRayTrace)
+    {
+        // Simple path: single mega kernel like before
+        makeComputePipeline("build/shaders/rayTraceSimple.comp.spv", computePipeline);
+    }
+    else
+    {
+        // Wavefront path: multiple kernels
+        makeComputePipeline("build/shaders/rayTraceLogic.comp.spv",     rayTraceLogicPipeline);
+        makeComputePipeline("build/shaders/rayTraceNewPath.comp.spv",   rayTraceNewPathPipeline);
+        makeComputePipeline("build/shaders/rayTraceMaterial.comp.spv",  rayTraceMaterialPipeline);
+        makeComputePipeline("build/shaders/rayTraceExtendRay.comp.spv", rayTraceExtendRayPipeline);
+        makeComputePipeline("build/shaders/rayTraceShadowRay.comp.spv", rayTraceShadowRayPipeline);
+    }
 }
+
 
 void ShowcaseApp::createRenderPass()
 {
@@ -2217,6 +2460,29 @@ void ShowcaseApp::createFullscreenGraphicsPipeline()
 
 // ~~~~~ Destruction ~~~~~~
 
+void ShowcaseApp::destroyWavefrontBuffers()
+{
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        auto destroy = [&](VkBuffer& buf, VkDeviceMemory& mem)
+        {
+            if (buf) { vkDestroyBuffer(device, buf, nullptr); buf = VK_NULL_HANDLE; }
+            if (mem) { vkFreeMemory(device, mem, nullptr);     mem = VK_NULL_HANDLE; }
+        };
+
+        destroy(pathHeaderBuf[i],   pathHeaderMem[i]);
+        destroy(rayBuf[i],          rayMem[i]);
+        destroy(hitIdsBuf[i],       hitIdsMem[i]);
+        destroy(hitDataBuf[i],      hitDataMem[i]);
+        destroy(radianceBuf[i],     radianceMem[i]);
+        destroy(bsdfSampleBuf[i],   bsdfSampleMem[i]);
+        destroy(lightSampleBuf[i],  lightSampleMem[i]);
+        destroy(shadowRayBuf[i],    shadowRayMem[i]);
+        destroy(shadowResultBuf[i], shadowResultMem[i]);
+        destroy(pathQueueBuf[i],    pathQueueMem[i]);
+    }
+}
+
 void ShowcaseApp::destroySceneTextures()
 {
     if (device == VK_NULL_HANDLE)
@@ -2259,10 +2525,30 @@ void ShowcaseApp::destroyComputeDescriptors()
         vkDestroyDescriptorPool(device, computeDescPool, nullptr);
         computeDescPool = VK_NULL_HANDLE;
     }
-    if (computeSetLayout)
+
+    if (computeStaticSetLayout)
     {
-        vkDestroyDescriptorSetLayout(device, computeSetLayout, nullptr);
-        computeSetLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(device, computeStaticSetLayout, nullptr);
+        computeStaticSetLayout = VK_NULL_HANDLE;
+    }
+
+    if (computeFrameSetLayout)
+    {
+        vkDestroyDescriptorSetLayout(device, computeFrameSetLayout, nullptr);
+        computeFrameSetLayout = VK_NULL_HANDLE;
+    }
+
+    if (computeDynamicSetLayout)
+    {
+        vkDestroyDescriptorSetLayout(device, computeDynamicSetLayout, nullptr);
+        computeDynamicSetLayout = VK_NULL_HANDLE;
+    }
+
+    computeStaticSet = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        computeFrameSets[i]   = VK_NULL_HANDLE;
+        computeDynamicSets[i] = VK_NULL_HANDLE;
     }
 }
 
@@ -2290,7 +2576,7 @@ void ShowcaseApp::destroyOffscreenTarget()
     }
 }
 
-void ShowcaseApp::destorySSBOdata()
+void ShowcaseApp::destroySSBOdata()
 {
     if (sbvhNodesBuffer)
         vkDestroyBuffer(device, sbvhNodesBuffer, nullptr);

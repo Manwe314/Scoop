@@ -3,7 +3,7 @@
 // ------ Cpu side passed Objects -------
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform image2D outImage;
+layout(set = 1, binding = 4, rgba16f) uniform image2D outImage;
 
 struct SBVHNode {
     vec4 bbMin_left__left_start;
@@ -32,12 +32,12 @@ struct MaterialGPU {
     vec4 textureId;
 };
 
-layout(set = 0, binding = 1, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
-layout(set = 0, binding = 2, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
-layout(set = 0, binding = 3, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
-layout(set = 0, binding = 4, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
 
-layout(set = 0, binding = 5, std430) readonly buffer ParamsBuf {
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     mat4  viewProjInv;
     vec4  camPos_time;
     uvec2 imageSize;
@@ -63,13 +63,13 @@ struct InstanceDataGPU {
     vec4 aabbMin;
     vec4 aabbMax;
 
-    uvec4 bases01; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
-    uvec4 bases23; // x=textureBase, y=sbvhRoot
+    uvec4 bases0; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases1; // x=textureBase, y=sbvhRoot
 };
 
-layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
-layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
-layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
 layout(set = 0, binding = 9) uniform sampler2D textures2D[];
 
 // ---------- RayTracing Engine ----------
@@ -574,8 +574,8 @@ void main()
                 float previousClosestT = closestT;
             
                 traverseBLAS(modelRay, hit,
-                    instances[instanceId].bases01.x,
-                    instances[instanceId].bases01.y,
+                    instances[instanceId].bases0.x,
+                    instances[instanceId].bases0.y,
                     closestT, modelToWorldScale, modelToWorldScaleInverse
                 );
 
@@ -599,7 +599,7 @@ void main()
                 vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
 
                 uint materialIndex = floatBitsToUint(texture_material.w);
-                materialIndex += instances[hit.instanceIndex].bases01.w;
+                materialIndex += instances[hit.instanceIndex].bases0.w;
 
                 vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz,
                                            hit.barrycentricUV.x, hit.barrycentricUV.y);

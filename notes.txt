@@ -339,7 +339,7 @@ m48 final Simple comp shader w/ iGpu & O3 just a girl
 [CPU] avg FPS: 13.9123 avg MS: 71.8788
 
 
-cornellBox Megakernel dGpu | -0.8y no full screen.
+cornellBox Megakernel dGpu | -0.8y no full screen. 1SPP 64 max depth
 [GPU] compute: 155.412 ms, graphics: 0.02752 ms, combined: 155.439 ms
 [GPU] compute: 155.298 ms, graphics: 0.02752 ms, combined: 155.326 ms
 [GPU] compute: 155.211 ms, graphics: 0.02764 ms, combined: 155.238 ms
