@@ -237,7 +237,7 @@ void ShowcaseApp::ensureBufferCapacity(
     VkMemoryPropertyFlags flags)
 {
     
-    neededSize = nonZero(neededSize, 16);
+    neededSize = nonZero(neededSize);
 
     if (buf != VK_NULL_HANDLE)
     {
@@ -606,29 +606,26 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
                                  0, nullptr);
         };
 
-        // Order is somewhat arbitrary for now; real control flow
-        // will be driven by queue counters once shaders are written.
+        for (uint32_t bounce = 0; bounce < 64; bounce++)
+        {
+            if (bounce == 0)
+            {
+                bindAndDispatch(rayTraceNewPathPipeline);
+                passBarrier();
+            }
 
-        // 1) New paths (camera rays etc.)
-        bindAndDispatch(rayTraceNewPathPipeline);
-        passBarrier();
+            bindAndDispatch(rayTraceExtendRayPipeline);
+            passBarrier();
+    
+            bindAndDispatch(rayTraceMaterialPipeline);
+            passBarrier();
+            
+            bindAndDispatch(rayTraceShadowRayPipeline);
+            passBarrier();
 
-        // 2) Core logic pass (e.g. compaction, queue management)
-        bindAndDispatch(rayTraceLogicPipeline);
-        passBarrier();
-
-        // 3) Material evaluation / lighting
-        bindAndDispatch(rayTraceMaterialPipeline);
-        passBarrier();
-
-        // 4) Path extension (bounce rays)
-        bindAndDispatch(rayTraceExtendRayPipeline);
-        passBarrier();
-
-        // 5) Shadow rays / visibility
-        bindAndDispatch(rayTraceShadowRayPipeline);
-        // No extra barrier needed here before we transition the image,
-        // the imageBarrier below will serve as a full sync to TRANSFER.
+            bindAndDispatch(rayTraceLogicPipeline);
+            passBarrier();
+        }
     }
     
 

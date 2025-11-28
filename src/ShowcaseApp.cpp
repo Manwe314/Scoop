@@ -146,17 +146,13 @@ void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src
 
 void ShowcaseApp::createOrResizeWavefrontBuffers()
 {
-    // Simple path: do nothing, we don't need any of the wavefront SSBOs yet.
     if constexpr (SimpleRayTrace)
         return;
 
     const uint32_t maxPaths = getMaxPaths();
     const VkDeviceSize pathCount = VkDeviceSize(maxPaths);
 
-    // All these go through ensureBufferCapacity so even if maxPaths == 0 by some bug,
-    // nonZero() will enforce a minimum size (16 bytes).
-    const VkBufferUsageFlags usage =
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags memFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
     for (uint32_t frame = 0; frame < SwapChain::MAX_FRAMES_IN_FLIGHT; ++frame)
@@ -793,9 +789,6 @@ void ShowcaseApp::createWavefrontBuffers()
     destroyWavefrontBuffers();
 
     createOrResizeWavefrontBuffers();
-
-    const uint32_t     maxPaths  = getMaxPaths();
-    const VkDeviceSize pathCount = std::max<VkDeviceSize>(VkDeviceSize(1), VkDeviceSize(maxPaths));
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
@@ -1836,15 +1829,15 @@ void ShowcaseApp::createComputeDescriptors()
         b.stageFlags      = stages;
     };
 
-    initSet0(set0[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[5], 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[6], 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[7], 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
-    initSet0(set0[8], 8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[5], 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[6], 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[7], 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet0(set0[8], 8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
     uint32_t maxTextures = std::max(1u, static_cast<uint32_t>(flattened.size()));
     initSet0(set0[9], 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  maxTextures, VK_SHADER_STAGE_COMPUTE_BIT);

@@ -24,8 +24,8 @@
 
 
 #define VALIDATE true
-#define FPS false
-constexpr bool SimpleRayTrace = true;
+#define FPS true
+constexpr bool SimpleRayTrace = false;
 
 struct GpuTexture {
     VkImage        image        = VK_NULL_HANDLE;

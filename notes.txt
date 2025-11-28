@@ -15,7 +15,8 @@ for read me:
     what i wouldve upgraded.
     mtl files use K phong data not P PBR data.
 
-
+read later:
+http://graphics.ucsd.edu/~henrik/papers/multidimensional_adaptive_sampling/multidimensional_adaptive_sampling.pdf
     
 
 

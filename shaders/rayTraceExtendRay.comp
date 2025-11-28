@@ -1,0 +1,557 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// ------ Cpu side passed Objects -------
+
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 vertex_0;
+    vec4 edge_vec1;
+    vec4 edge_vec2;
+};
+
+struct ShadingTriangle {
+    vec4 vertexNormal0_uv;
+    vec4 vertexNormal1_uv;
+    vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
+};
+
+
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+
+// ---------- TLAS / instances (SET 1) ----------
+
+struct TLASNodeGPU {
+    vec4  bbMin;           
+    vec4  bbMax;          
+    uvec4 meta;            // x=first, y=count, z=left, w=right
+};
+
+struct InstanceDataGPU {
+    vec4 modelToWorld0;
+    vec4 modelToWorld1;
+    vec4 modelToWorld2;
+
+    vec4 worldToModel0;
+    vec4 worldToModel1;
+    vec4 worldToModel2;
+
+    vec4 aabbMin;
+    vec4 aabbMax;
+
+    uvec4 bases01; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases23; // x=textureBase, y=sbvhRoot, w=triLightOffset
+};
+
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf   { uint             instanceIndices[]; };
+
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  flags;
+} Params;
+
+// ---------- Dynamic WAVEFRONT buffers (SET 2) ----------
+
+struct PathHeader {
+    uint pixelIndex;
+    uint rngState;
+    uint depth;
+    uint flags;
+};
+
+struct RayData {
+    vec4 origin;
+    vec4 direction;
+};
+
+struct HitIds {
+    uint instanceIndex;
+    uint primitiveIndex;
+};
+
+struct Hitdata {
+    float worldT;
+    float localT;
+    float baryU;
+    float baryV;
+};
+
+struct RadianceState {
+    vec4  throughput;
+    vec4  radiance;
+    float prevBsdfPdf;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct BsdfSample {
+    vec4 dir;
+    vec4 f;
+    float pdf;
+    float cosTheta;
+    float pdf_L_B;
+    float pad0;
+};
+
+struct LightSample {
+    vec4 dir;
+    vec4 Li_fL;
+    float pdf;
+    float cosTheta;
+    float pdf_B_L;
+    uint  lightId;
+    uint  pad0;
+};
+
+struct ShadowRay {
+    vec4 origin;
+    vec4 direction;
+    uint lightId;
+    uint primitiveId;
+    uint pad0;
+    uint pad1;
+};
+
+struct ShadowResult {
+    uint visible;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct PathQueue {
+    uint count;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
+layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
+layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
+layout(set = 2, binding = 3, std430) buffer HitdataBuf    { Hitdata        hitData[];       };
+layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
+layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfSamples[];   };
+layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
+layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
+layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
+layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+
+// ---------- Path state flags ----------
+
+const uint PATH_STATE_DEAD        = 0u;
+const uint PATH_STATE_NEED_HIT    = 1u;
+const uint PATH_STATE_NEED_SHADE  = 2u;
+const uint PATH_STATE_NEED_SHADOW = 3u;
+const uint PATH_STATE_NEED_MIS    = 4u;
+const uint PATH_STATE_DEAD_WRITTEN= 5u;
+
+
+// ---------- RayTracing Engine helpers (mostly copied) ----------
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Hit {
+    float dist_to_hit;
+    float world_dist_to_hit;
+    uint instanceIndex;
+    uint primitiveIndex;
+    vec2 barrycentricUV;
+};
+
+void swap(inout float a, inout float b)
+{
+    float temp = a;
+    a = b;
+    b = temp;
+}
+
+float safeSqrt(float x) {
+    return sqrt(max(x, 0.0));
+}
+
+float angleBetween(vec3 a, vec3 b) {
+    return acos(clamp(dot(a, b), -1.0, 1.0));
+}
+
+vec3 gramSchmidt(vec3 v, vec3 n) {
+    return normalize(v - n * dot(v, n));
+}
+
+float differenceOfProducts(float a, float b, float c, float d) {
+    return a * b - c * d;
+}
+
+float sumOfProducts(float a, float b, float c, float d) {
+    return a * b + c * d;
+}
+
+vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, point) + row0.w,
+                dot(row1.xyz, point) + row1.w,
+                dot(row2.xyz, point) + row2.w);
+}
+
+vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, direction),
+                dot(row1.xyz, direction),
+                dot(row2.xyz, direction));
+}
+
+Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    Ray newRay;
+    newRay.origin = affineTransformPoint(ray.origin, row0, row1, row2); 
+    newRay.direction = affineTransformDirection(ray.direction, row0, row1, row2);
+    return newRay;
+}
+
+bool intersectingAABB(const in Ray ray, const in vec3 bbMin, const in vec3 bbMax, const in float tMin, const in float tMax, inout float tEnter, inout float tExit)
+{
+    float t0 = tMin;
+    float t1 = tMax;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        float originI    = ray.origin[axis];
+        float directionI = ray.direction[axis];
+        float minBoxA    = bbMin[axis];
+        float maxBoxA    = bbMax[axis];
+
+        if (abs(directionI) <= 1e-8)
+        {
+            if (originI < minBoxA || originI > maxBoxA)
+                return false;
+        }
+        else
+        {
+            float inverseDirectionI = 1.0 / directionI;
+            float tNearA = (minBoxA - originI) * inverseDirectionI;
+            float tFarA  = (maxBoxA - originI) * inverseDirectionI;
+            if (tNearA > tFarA)
+                swap(tNearA, tFarA);
+            
+            t0 = tNearA > t0 ? tNearA : t0;
+            t1 = tFarA  < t1 ? tFarA  : t1;
+            if (t1 < t0)
+                return false;
+        }
+    }
+    tEnter = t0;
+    tExit  = t1;
+    return (tExit >= tMin) && (tEnter <= tMax);
+}
+
+bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, const in vec3 edge_1, const in vec3 edge_2, inout float min_distance)
+{
+    vec3 P = cross(ray.direction, edge_2);
+    float det = dot(P, edge_1);
+
+    if (abs(det) <= 1e-8)
+        return false;
+    
+    float inverse_det = 1.0 / det;
+    vec3 T = ray.origin - vertex_0;
+
+    float u = dot(T, P) * inverse_det;
+    if (u < 0.0 || u > 1.0)
+        return false;
+    
+    vec3 Q = cross(T, edge_1);
+    float v = dot(ray.direction, Q) * inverse_det;
+    if (v < 0.0 || (v + u) > 1.0)
+        return false;
+
+    float t = dot(edge_2, Q) * inverse_det;
+    if (t < 1e-4)
+        return false;
+
+    if (t < min_distance)
+    {
+        min_distance          = t;
+        hit.dist_to_hit       = t;
+        hit.barrycentricUV.x  = u;
+        hit.barrycentricUV.y  = v;
+        return true;
+    }
+    return false;
+}
+
+void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
+{
+    uint stack[30];
+    int stackPointer = 0;
+    stack[stackPointer] = root;
+    outPutPointer = 0;
+        
+    while (stackPointer >= 0)
+    {
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+
+        uvec4 meta = tlasNodes[stack[stackPointer]].meta;
+        if (meta.y > 0)
+        {
+            uint instanceI = instanceIndices[meta.x];
+            Ray modelRay = affineTransformRay(ray, instances[instanceI].worldToModel0, instances[instanceI].worldToModel1, instances[instanceI].worldToModel2);
+            vec3 bbmin = vec3(instances[instanceI].aabbMin);
+            vec3 bbmax = vec3(instances[instanceI].aabbMax);
+            float tNear, tFar;
+            if (intersectingAABB(modelRay, bbmin, bbmax, tEnter, tExit, tNear, tFar))
+            {
+                vec3 pModel = modelRay.origin + tNear * modelRay.direction;
+                vec3 pWorld = affineTransformPoint(pModel,
+                                instances[instanceI].modelToWorld0,
+                                instances[instanceI].modelToWorld1,
+                                instances[instanceI].modelToWorld2);
+                float tNearWorld = dot(pWorld - ray.origin, normalize(ray.direction));
+                if (outPutPointer < 30)
+                {
+                    instancesOut[outPutPointer] = instanceI;
+                    outPutPointer++;
+                }
+            }
+        
+            stackPointer--;
+            continue;
+        }
+
+        TLASNodeGPU leftNode  = tlasNodes[meta.z];
+        TLASNodeGPU rightNode = tlasNodes[meta.w];
+
+        vec3 left_bbMin  = vec3(leftNode.bbMin);
+        vec3 left_bbMax  = vec3(leftNode.bbMax);
+        vec3 right_bbMin = vec3(rightNode.bbMin);
+        vec3 right_bbMax = vec3(rightNode.bbMax);
+
+        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  tEnter, tExit, tNearLeft,  tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, tEnter, tExit, tNearRight, tFarRight);
+
+        if (hitLeft && hitRight)
+        {
+            if (tNearLeft > tNearRight)
+            {
+                stack[stackPointer] = meta.z;
+                stackPointer++;
+                stack[stackPointer] = meta.w;
+            }
+            else
+            {
+                stack[stackPointer] = meta.w;
+                stackPointer++;
+                stack[stackPointer] = meta.z;
+            }
+        }
+        else if (hitLeft)
+            stack[stackPointer] = meta.z;
+        else if (hitRight)
+            stack[stackPointer] = meta.w;
+        else
+            stackPointer--;
+    }
+}
+
+void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, const in uint triBase, inout float closestT, const in float modelToWorldScale, const in float modelToWorldScaleInverse)
+{
+    const float ORDER_EPS = 1e-6;
+
+    uint stack[64];
+    int  stackPointer = 0;
+    stack[stackPointer] = nodeOffset;
+
+    while (stackPointer >= 0)
+    {
+        float tNearLeft, tNearRight, tFarLeft, tFarRight;
+
+        SBVHNode node = bvhNodes[stack[stackPointer]];
+
+        vec4 left_count_n_max = node.bbMax_left__left_count;
+        vec3 left_bbMax       = vec3(left_count_n_max);
+        uint left_count       = floatBitsToUint(left_count_n_max.w);
+
+        vec4 left_start_n_min = node.bbMin_left__left_start;
+        vec3 left_bbMin       = vec3(left_start_n_min);
+        uint left_start       = floatBitsToUint(left_start_n_min.w);
+
+        if (left_count != 0xFFFFFFFFu)
+        {
+            float tNearLeaf, tFarLeaf;
+            bool leafHit = intersectingAABB(ray, left_bbMin, left_bbMax, 1e-6, closestT * modelToWorldScaleInverse, tNearLeaf, tFarLeaf);
+            if (!leafHit || tNearLeaf * modelToWorldScale >= closestT)
+            {
+                stackPointer--;
+                continue;
+            }
+
+            float min_distance = closestT * modelToWorldScaleInverse;
+            uint  primIndex    = 0xFFFFFFFFu;
+
+            for (uint i = 0; i < left_count; i++)
+            {
+                uint prim = left_start + triBase + i;
+                MollerTriangle triangle = triangles[prim];
+                if (moller_trumbore(ray, hit,
+                                    vec3(triangle.vertex_0),
+                                    vec3(triangle.edge_vec1),
+                                    vec3(triangle.edge_vec2),
+                                    min_distance))
+                {
+                    primIndex = prim;
+                }
+            }
+            if (primIndex != 0xFFFFFFFFu)
+            {
+                closestT            = min_distance * modelToWorldScale;
+                hit.primitiveIndex  = primIndex;
+            }
+            stackPointer--;
+            continue;
+        }
+
+        vec3 right_bbMax = vec3(node.bbMax_right__right_count);
+
+        vec4 right_start_n_Min = node.bbMin_right__right_start;
+        vec3 right_bbMin       = vec3(right_start_n_Min);
+        uint right_start       = floatBitsToUint(right_start_n_Min.w);
+
+        bool hitLeft  = intersectingAABB(ray, left_bbMin,  left_bbMax,  1e-6, closestT * modelToWorldScaleInverse, tNearLeft,  tFarLeft);
+        bool hitRight = intersectingAABB(ray, right_bbMin, right_bbMax, 1e-6, closestT * modelToWorldScaleInverse, tNearRight, tFarRight);
+
+        if ( (!hitLeft  || tNearLeft  * modelToWorldScale >= closestT) &&
+             (!hitRight || tNearRight * modelToWorldScale >= closestT) )
+        {
+            stackPointer--;
+            continue;
+        }
+
+        if (hitLeft && hitRight)
+        {
+            bool leftIsNear = (abs(tNearLeft - tNearRight) > ORDER_EPS) ? (tNearLeft < tNearRight) : (left_start < right_start);
+
+            uint nearIdx = leftIsNear ? (left_start  + nodeOffset) : (right_start + nodeOffset);
+            uint farIdx  = leftIsNear ? (right_start + nodeOffset) : (left_start  + nodeOffset);
+
+            stack[stackPointer] = farIdx;
+            stackPointer++;
+            stack[stackPointer] = nearIdx;
+        }
+        else if (hitLeft)
+        {
+            stack[stackPointer] = left_start + nodeOffset;
+        }
+        else
+        {
+            stack[stackPointer] = right_start + nodeOffset;
+        }
+    }
+}
+
+void trace(const in Ray ray, inout Hit hit)
+{
+    uint rootId = Params.rootIndex;
+    uint TLASInstanceLeafIDs[30];
+    float tEnter, tExit;
+
+    if (intersectingAABB(ray, vec3(tlasNodes[rootId].bbMin), vec3(tlasNodes[rootId].bbMax), 1e-8, 1e30, tEnter, tExit))
+    {
+        int   leafCount = 0;
+        float closestT  = 1e30;
+
+        traverseTLAS(ray, rootId, TLASInstanceLeafIDs, tEnter, tExit, leafCount);
+
+        for (int i = 0; i < leafCount; i++)
+        {
+            uint instanceId = TLASInstanceLeafIDs[i];
+            Ray modelRay = affineTransformRay(ray, instances[instanceId].worldToModel0, instances[instanceId].worldToModel1, instances[instanceId].worldToModel2);
+            vec3 worldDir = affineTransformDirection(modelRay.direction, instances[instanceId].modelToWorld0, instances[instanceId].modelToWorld1, instances[instanceId].modelToWorld2);
+            float modelToWorldScale        = length(worldDir);
+            float modelToWorldScaleInverse = 1.0 / modelToWorldScale;
+            float previousClosestT         = closestT;
+        
+            traverseBLAS(modelRay, hit,
+                         instances[instanceId].bases01.x,
+                         instances[instanceId].bases01.y,
+                         closestT, modelToWorldScale, modelToWorldScaleInverse
+            );
+
+            if (hit.primitiveIndex != 0xFFFFFFFFu && closestT < previousClosestT)
+            {
+                hit.instanceIndex     = instanceId;
+                hit.world_dist_to_hit = closestT;
+            }
+        }
+        if (closestT == 1e30)
+        {
+            hit.primitiveIndex = 0xFFFFFFFFu;
+            hit.instanceIndex  = 0xFFFFFFFFu;
+        }
+    }
+    else
+    {
+        hit.primitiveIndex = 0xFFFFFFFFu;
+        hit.instanceIndex  = 0xFFFFFFFFu;
+    }
+}
+
+
+// ---------- MAIN: extend rays (intersection pass) ----------
+
+void main()
+{
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+
+    if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
+        return;
+
+    uint pathId = pixel.x + pixel.y * Params.imageSize.x;
+
+    if (pathHeaders[pathId].flags != PATH_STATE_NEED_HIT)
+        return;
+
+    Ray ray;
+    ray.origin    = rays[pathId].origin.xyz;
+    ray.direction = rays[pathId].direction.xyz;
+
+    Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
+    trace(ray, hit);
+
+    if (hit.instanceIndex == 0xFFFFFFFFu || hit.primitiveIndex == 0xFFFFFFFFu)
+        pathHeaders[pathId].flags = PATH_STATE_DEAD;
+    else
+    {
+        HitIds hid;
+        hid.instanceIndex  = hit.instanceIndex;
+        hid.primitiveIndex = hit.primitiveIndex;
+        hitIds[pathId] = hid;
+
+        Hitdata hd;
+        hd.worldT = hit.world_dist_to_hit;
+        hd.localT = hit.dist_to_hit;
+        hd.baryU  = hit.barrycentricUV.x;
+        hd.baryV  = hit.barrycentricUV.y;
+        hitData[pathId] = hd;
+
+        pathHeaders[pathId].flags = PATH_STATE_NEED_SHADE;
+    }
+}

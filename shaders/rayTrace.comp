@@ -3,7 +3,7 @@
 // ------ Cpu side passed Objects -------
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform image2D outImage;
+layout(set = 1, binding = 4, rgba16f) uniform image2D outImage;
 
 struct SBVHNode {
     vec4 bbMin_left__left_start;
@@ -32,12 +32,12 @@ struct MaterialGPU {
     vec4 textureId;
 };
 
-layout(set = 0, binding = 1, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
-layout(set = 0, binding = 2, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
-layout(set = 0, binding = 3, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
-layout(set = 0, binding = 4, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
 
-layout(set = 0, binding = 5, std430) readonly buffer ParamsBuf {
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     mat4  viewProjInv;
     vec4  camPos_time;
     uvec2 imageSize;
@@ -74,15 +74,15 @@ struct EmisiveTrinagle {
     uint padding;
 };
 
-layout(set = 0, binding = 6, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
-layout(set = 0, binding = 7, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
-layout(set = 0, binding = 8, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf { uint instanceIndices[]; };
 layout(set = 0, binding = 9) uniform sampler2D textures2D[];
-layout(set = 0, binding = 10, std430) readonly buffer EmissiveTriBuf {EmisiveTrinagle emissiveTrinagles[]; };
-layout(set = 0, binding = 11, std430) readonly buffer LightProb { float lightProbability[]; };
-layout(set = 0, binding = 12, std430) readonly buffer LightPdf { float lightPDF[]; };
-layout(set = 0, binding = 13, std430) readonly buffer LightAli { uint LightAlias[]; };
-layout(set = 0, binding = 14, std430) readonly buffer triToLightIdxBuffer { uint triToLightIdx[]; };
+layout(set = 0, binding = 4, std430) readonly buffer EmissiveTriBuf {EmisiveTrinagle emissiveTrinagles[]; };
+layout(set = 0, binding = 5, std430) readonly buffer LightProb { float lightProbability[]; };
+layout(set = 0, binding = 6, std430) readonly buffer LightPdf { float lightPDF[]; };
+layout(set = 0, binding = 7, std430) readonly buffer LightAli { uint LightAlias[]; };
+layout(set = 0, binding = 8, std430) readonly buffer triToLightIdxBuffer { uint triToLightIdx[]; };
 
 // ---------- RayTracing Engine ----------
 

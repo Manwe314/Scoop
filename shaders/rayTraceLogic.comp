@@ -1,0 +1,439 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// ------ Cpu side passed Objects -------
+
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 vertex_0;
+    vec4 edge_vec1;
+    vec4 edge_vec2;
+};
+
+struct ShadingTriangle {
+    vec4 vertexNormal0_uv;
+    vec4 vertexNormal1_uv;
+    vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
+};
+
+struct MaterialGPU {
+    vec4 baseColor_opacity;
+    vec4 F0_ior_rough;
+    vec4 emission_flags;
+    vec4 textureId;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+
+layout(set = 1, binding = 4, rgba16f) uniform image2D outImage;
+
+struct TLASNodeGPU {
+    vec4  bbMin;           
+    vec4  bbMax;          
+    uvec4 meta;
+};
+
+struct InstanceDataGPU {
+    vec4 modelToWorld0;
+    vec4 modelToWorld1;
+    vec4 modelToWorld2;
+
+    vec4 worldToModel0;
+    vec4 worldToModel1;
+    vec4 worldToModel2;
+
+    vec4 aabbMin;
+    vec4 aabbMax;
+
+    uvec4 bases0; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases1; // x=textureBase, y=sbvhRoot, w=triLightOffset
+};
+
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf   { uint             instanceIndices[]; };
+
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  flags;
+} Params;
+
+// ---------- DYNAMIC WAVEFRONT (SET 2) ----------
+
+struct PathHeader {
+    uint pixelIndex;
+    uint rngState;
+    uint depth;
+    uint flags;
+};
+
+struct RayData {
+    vec4 origin;
+    vec4 direction;
+};
+
+struct HitIds {
+    uint instanceIndex;
+    uint primitiveIndex;
+};
+
+struct Hitdata {
+    float worldT;
+    float localT;
+    float baryU;
+    float baryV;
+};
+
+struct RadianceState {
+    vec4  throughput;  // xyz: throughput, w unused
+    vec4  radiance;    // xyz: accumulated radiance, w unused
+    float prevBsdfPdf; // previous bounce BSDF pdf
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct BsdfSample {
+    vec4 dir;
+    vec4 f;
+    float pdf;
+    float cosTheta;
+    float pdf_L_B; // light pdf for BSDF-sampled direction (if we hit a light)
+    float pad0;
+};
+
+struct LightSample {
+    vec4 dir;
+    vec4 Li_fL;   // Li * f_L
+    float pdf;    // light pdf
+    float cosTheta;
+    float pdf_B_L; // BSDF pdf for light-sampled direction
+    uint  lightId;
+    uint  pad0;
+};
+
+struct ShadowRay {
+    vec4 origin;
+    vec4 direction;
+    uint lightId;
+    uint primitiveId;
+    uint pad0;
+    uint pad1;
+};
+
+struct ShadowResult {
+    uint visible; // 1 = unoccluded, 0 = blocked
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct PathQueue {
+    uint count;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
+layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
+layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
+layout(set = 2, binding = 3, std430) buffer HitdataBuf    { Hitdata        hitData[];       };
+layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
+layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfSamples[];   };
+layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
+layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
+layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
+layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+
+// ---------- Path state flags ----------
+
+const uint PATH_STATE_DEAD        = 0u;
+const uint PATH_STATE_NEED_HIT    = 1u;
+const uint PATH_STATE_NEED_SHADE  = 2u;
+const uint PATH_STATE_NEED_SHADOW = 3u;
+const uint PATH_STATE_NEED_MIS    = 4u;
+const uint PATH_STATE_DEAD_WRITTEN= 5u;
+
+// ---------- Camera / selection flags (same as mega kernel) ----------
+
+const uint FLAG_B            = 1u << 31;
+const uint FLAG_INSTANCE_SEL = 1u << 30;
+const uint B_INTERP_SHIFT    = 20u;
+const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
+const uint MASK_INSTANCE_IDX = 0xFu;
+
+// ---------- CONSTS ----------
+const float PI      = 3.14159265358979323846;
+const float INV_PI  = 0.31830988618379067154;
+
+// ---------- RNG (same as before) ----------
+
+uint wang_hash(uint s)
+{
+    s = (s ^ 61u) ^ (s >> 16);
+    s *= 9u;
+    s = s ^ (s >> 4);
+    s *= 0x27d4eb2du;
+    s = s ^ (s >> 15);
+    return s;
+}
+
+uint xorshift(inout uint state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+float floatConstruct(uint state)
+{
+    const uint ieeeMantissa = 0x007FFFFFu;
+    const uint ieeeOne      = 0x3F800000u;
+
+    state &= ieeeMantissa;
+    state |= ieeeOne;
+
+    float  f = uintBitsToFloat(state);
+    return f - 1.0;
+}
+
+float rand(inout uint state)
+{
+    return floatConstruct(wang_hash(xorshift(state)));
+}
+
+// ---------- small helpers ----------
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Hit {
+    float dist_to_hit;
+    float world_dist_to_hit;
+    uint  instanceIndex;
+    uint  primitiveIndex;
+    vec2  barrycentricUV;
+};
+
+vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, point) + row0.w,
+                dot(row1.xyz, point) + row1.w,
+                dot(row2.xyz, point) + row2.w);
+}
+
+vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, direction),
+                dot(row1.xyz, direction),
+                dot(row2.xyz, direction));
+}
+
+// ---------- main logic ----------
+
+void writeFinalPixel(uint pathId, PathHeader pathHeader, RadianceState rad)
+{
+    uint pixelIndex = pathHeader.pixelIndex;
+    uvec2 pixel = uvec2(pixelIndex % Params.imageSize.x,
+                        pixelIndex / Params.imageSize.x);
+
+    imageStore(outImage, ivec2(pixel), vec4(rad.radiance.xyz, 1.0));
+    
+    pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
+    pathHeaders[pathId] = pathHeader;
+}
+
+void main()
+{
+    uvec2 gid = gl_GlobalInvocationID.xy;
+
+    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
+        return;
+
+    uint pathId = gid.x + gid.y * Params.imageSize.x;
+
+    PathHeader pathHeader = pathHeaders[pathId];
+    uint state = pathHeader.flags;
+
+    if (state == PATH_STATE_DEAD_WRITTEN)
+        return;
+
+    RadianceState rad = radianceStates[pathId];
+
+    if (state == PATH_STATE_DEAD)
+    {
+        writeFinalPixel(pathId, pathHeader, rad);
+        return;
+    }
+
+    if (state != PATH_STATE_NEED_MIS)
+        return;
+
+    uint depth = pathHeader.depth;
+
+    HitIds hid   = hitIds[pathId];
+    Hitdata hd   = hitData[pathId];
+    RayData rd   = rays[pathId];
+
+    Ray ray;
+    ray.origin    = rd.origin.xyz;
+    ray.direction = rd.direction.xyz;
+
+    Hit hit;
+    hit.dist_to_hit      = hd.localT;
+    hit.world_dist_to_hit= hd.worldT;
+    hit.instanceIndex    = hid.instanceIndex;
+    hit.primitiveIndex   = hid.primitiveIndex;
+    hit.barrycentricUV   = vec2(hd.baryU, hd.baryV);
+
+    vec4 tex_mtl             = shadingTris[hit.primitiveIndex].texture_materialId;
+    uint localMtlIdx         = floatBitsToUint(tex_mtl.w);
+    uint materialIndex       = localMtlIdx + instances[hit.instanceIndex].bases0.w;
+    MaterialGPU mtl          = materials[materialIndex];
+    vec3 emission            = mtl.emission_flags.xyz;
+
+    // ----- 1) Emission & BSDF-sampled direct lighting (light hit) -----
+
+    BsdfSample bs = bsdfSamples[pathId];
+
+    // Bounce 0: add pure emission (throughput should be 1,1,1 here)
+    if (depth == 0u)
+    {
+        rad.radiance.xyz += rad.throughput.xyz * emission;
+    }
+    else
+    {
+        // For bounces > 0, if we are on a light and have a valid previous BSDF pdf, do MIS for BSDF-sampled direction
+        if (rad.prevBsdfPdf > 0.0 && bs.pdf_L_B > 0.0)
+        {
+            float pdfB2 = rad.prevBsdfPdf * rad.prevBsdfPdf;
+            float pdfL2 = bs.pdf_L_B * bs.pdf_L_B;
+            float denom = pdfB2 + pdfL2;
+            float w_B   = (denom > 0.0) ? (pdfB2 / denom) : 0.0;
+
+            rad.radiance.xyz += rad.throughput.xyz * w_B * emission;
+        }
+    }
+
+    // ----- 2) Light-sampled direct lighting (shadow + MIS) -----
+
+    LightSample ls = lightSamples[pathId];
+    ShadowResult sr = shadowResults[pathId];
+
+    if (ls.pdf > 0.0 && ls.cosTheta > 0.0 && sr.visible != 0u)
+    {
+        float pdf_L  = ls.pdf;
+        float pdf_BL = ls.pdf_B_L;
+
+        float pdfL2 = pdf_L * pdf_L;
+        float pdfB2 = pdf_BL * pdf_BL;
+        float denom = pdfL2 + pdfB2;
+        float w_L   = (denom > 0.0) ? (pdfL2 / denom) : 0.0;
+
+        vec3 C_L = ls.Li_fL.xyz * (ls.cosTheta / pdf_L);
+
+        rad.radiance.xyz += rad.throughput.xyz * w_L * C_L;
+    }
+
+    // ----- 3) Instance selection highlight on bounce 0 -----
+
+    bool instanceSelected = (Params.flags & FLAG_INSTANCE_SEL) != 0u;
+    uint selectedIdx      = Params.flags & MASK_INSTANCE_IDX;
+
+    if (depth == 0u && instanceSelected && hit.instanceIndex == selectedIdx)
+    {
+        rad.radiance.xyz = mix(rad.radiance.xyz, vec3(1.0, 1.0, 0.0), 0.4);
+    }
+
+    // ----- 4) Throughput update & BSDF pdf bookkeeping -----
+
+    vec3  T_prev      = rad.throughput.xyz;
+    vec3  f_B         = bs.f.xyz;
+    float pdf_B       = bs.pdf;
+    float cosTheta_B  = bs.cosTheta;
+
+    vec3 T_next = T_prev * f_B * (cosTheta_B / max(pdf_B, 1e-6));
+
+    rad.throughput.xyz = T_next;
+    rad.prevBsdfPdf    = pdf_B;
+
+    // ----- 5) Russian roulette -----
+
+    const uint MAX_DEPTH = 64u;
+    bool terminate = false;
+
+    uint rngState = pathHeader.rngState;
+
+    if (depth > 3u)
+    {
+        float p = clamp(max(T_next.r, max(T_next.g, T_next.b)), 0.0, 0.99);
+        if (p <= 0.0)
+        {
+            terminate = true;
+        }
+        else
+        {
+            float xi = rand(rngState);
+            if (xi > p)
+            {
+                terminate = true;
+            }
+            else
+            {
+                rad.throughput.xyz /= p;
+            }
+        }
+    }
+
+    // If we’ve hit max depth, terminate after this bounce.
+    if (depth + 1u >= MAX_DEPTH)
+        terminate = true;
+
+    pathHeader.rngState = rngState;
+
+    if (T_next.r == 0.0 && T_next.g == 0.0 && T_next.b == 0.0)
+        terminate = true;
+
+    if (terminate)
+    {
+        pathHeader.flags = PATH_STATE_DEAD;
+        radianceStates[pathId] = rad;
+        writeFinalPixel(pathId, pathHeader, rad);
+        return;
+    }
+
+    // ----- 6) Update ray for next bounce & advance depth -----
+
+    vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
+    vec3 newDir   = normalize(bs.dir.xyz);
+
+    vec3 newOrigin = hitPoint + 1e-4 * newDir;
+
+    rays[pathId].origin    = vec4(newOrigin, 0.0);
+    rays[pathId].direction = vec4(newDir,   0.0);
+
+    pathHeader.depth = depth + 1u;
+    pathHeader.flags = PATH_STATE_NEED_HIT;
+
+    pathHeaders[pathId]     = pathHeader;
+    radianceStates[pathId]  = rad;
+}
