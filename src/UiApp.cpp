@@ -1027,6 +1027,12 @@ void UiApp::HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerD
         {
             if (uiState.targetEditor == -1)
                 return;
+            if (models.size() >= 16)
+            {
+                uiState.errorMsg = "Maximum instance count (16) reached.";
+                uiState.showError = true;
+                return;
+            }
             auto ptr = models[uiState.targetEditor].object;
             models.push_back(ModelTab{ models[uiState.targetEditor].name, ptr, nextSid++});
             state.scene.objects.emplace_back(SceneObject{});

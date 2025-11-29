@@ -159,12 +159,12 @@ layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQ
 
 // ---------- Path state flags ----------
 
-const uint PATH_STATE_DEAD        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_DEAD        = 7u;
 
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;
@@ -348,9 +348,9 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
 
 // ---------- TLAS traversal (same as original, updated bases0 usage only where needed) ----------
 
-void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
+void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[4], const in float tEnter, const in float tExit, out int outPutPointer)
 {
-    uint stack[30];
+    uint stack[4];
     int stackPointer = 0;
     stack[stackPointer] = root;
     outPutPointer = 0;
@@ -427,7 +427,7 @@ bool traverseBLASShadow(const in Ray ray, const in uint nodeOffset, const in uin
 {
     const float ORDER_EPS = 1e-6;
 
-    uint stack[64];
+    uint stack[12];
     int  stackPointer = 0;
     stack[stackPointer] = nodeOffset;
 
@@ -568,7 +568,7 @@ bool traceShadow(const in Ray ray, const in float tMaxWorld)
     if (!intersectingAABB(ray, vec3(tlasNodes[rootId].bbMin), vec3(tlasNodes[rootId].bbMax), 1e-6, tMaxWorld, tEnter, tExit))
         return false;
 
-    uint TLASInstanceLeafIDs[30];
+    uint TLASInstanceLeafIDs[4];
     int leafCount = 0;
     traverseTLAS(ray, rootId, TLASInstanceLeafIDs, tEnter, tExit, leafCount);
 

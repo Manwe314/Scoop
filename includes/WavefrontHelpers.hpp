@@ -11,12 +11,29 @@ enum QueueIndex : uint32_t {
 
 
 enum PathState : uint32_t {
-    PATH_STATE_DEAD        = 0,
+    PATH_STATE_INIT        = 0,
     PATH_STATE_NEED_HIT    = 1,
     PATH_STATE_NEED_SHADE  = 2,
     PATH_STATE_NEED_SHADOW = 3,
     PATH_STATE_NEED_MIS    = 4,
     PATH_STATE_DEAD_WRITTEN= 5,
+    PATH_STATE_COMPLETE    = 6,
+    PATH_STATE_DEAD        = 7,
+};
+
+struct alignas(16) PixelStatsGPU {
+    glm::vec4 mean;
+    glm::vec4 m2;
+    uint32_t  sampleCount;
+    uint32_t  flags;
+    glm::uvec2 _pad;
+};
+
+struct AdaptiveCountersGPU {
+    uint32_t highVarCount;
+    uint32_t rescheduleCounter;
+    uint32_t _pad0;
+    uint32_t _pad1;
 };
 
 

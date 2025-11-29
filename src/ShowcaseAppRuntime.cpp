@@ -606,13 +606,17 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
                                  0, nullptr);
         };
 
+        const uint32_t maxPaths = getMaxPaths();
+        const VkDeviceSize pathCount = VkDeviceSize(maxPaths);
+
+        VkDeviceSize bufferSize = pathCount * sizeof(PathHeader);
+
+        vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
+
         for (uint32_t bounce = 0; bounce < 64; bounce++)
         {
-            if (bounce == 0)
-            {
-                bindAndDispatch(rayTraceNewPathPipeline);
-                passBarrier();
-            }
+            bindAndDispatch(rayTraceNewPathPipeline);
+            passBarrier();
 
             bindAndDispatch(rayTraceExtendRayPipeline);
             passBarrier();

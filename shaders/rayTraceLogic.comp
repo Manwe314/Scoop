@@ -150,27 +150,44 @@ struct PathQueue {
     uint pad2;
 };
 
-layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
-layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
-layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
-layout(set = 2, binding = 3, std430) buffer HitdataBuf    { Hitdata        hitData[];       };
-layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
-layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfSamples[];   };
-layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
-layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
-layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
-layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+struct PixelStats {
+    vec4 mean;
+    vec4 m2;
+    uint sampleCount;
+    uint flags;
+};
+
+layout(set = 2, binding = 0, std430)  buffer PathHeaderBuf   { PathHeader     pathHeaders[];   };
+layout(set = 2, binding = 1, std430)  buffer RayBuf          { RayData        rays[];          };
+layout(set = 2, binding = 2, std430)  buffer HitIdsBuf       { HitIds         hitIds[];        };
+layout(set = 2, binding = 3, std430)  buffer HitdataBuf      { Hitdata        hitData[];       };
+layout(set = 2, binding = 4, std430)  buffer RadianceBuf     { RadianceState  radianceStates[];};
+layout(set = 2, binding = 5, std430)  buffer BsdfSampleBuf   { BsdfSample     bsdfSamples[];   };
+layout(set = 2, binding = 6, std430)  buffer LightSampleBuf  { LightSample    lightSamples[];  };
+layout(set = 2, binding = 7, std430)  buffer ShadowRayBuf    { ShadowRay      shadowRays[];    };
+layout(set = 2, binding = 8, std430)  buffer ShadowResBuf    { ShadowResult   shadowResults[]; };
+layout(set = 2, binding = 9, std430)  buffer PathQueueBuf    { PathQueue      pathQueues[];    };
+layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
+layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint     highVarPixelIndices[]; };
+layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
+    uint highVarCount;
+    uint rescheduleCounter;
+};
+
 
 // ---------- Path state flags ----------
 
-const uint PATH_STATE_DEAD        = 0u;
+const uint PATH_STATE_INIT        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_COMPLETE    = 6u;
+const uint PATH_STATE_DEAD        = 7u;
+const uint PATH_STATE_NEED_RAY    = 8u;
 
-// ---------- Camera / selection flags (same as mega kernel) ----------
+// ---------- Camera / selection flags  ----------
 
 const uint FLAG_B            = 1u << 31;
 const uint FLAG_INSTANCE_SEL = 1u << 30;
@@ -181,8 +198,37 @@ const uint MASK_INSTANCE_IDX = 0xFu;
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;
 const float INV_PI  = 0.31830988618379067154;
+const uint DEPTH_BITS = 16u;
+const uint DEPTH_MASK = 0x0000FFFFu;
+const uint SPP_MASK   = 0xFFFF0000u;
+
+const uint PIXEL_FLAG_IN_HIGHVAR = 1u << 0;
+const uint  MIN_SAMPLES_FOR_ADAPT = 1u;
+const float ERROR_THRESHOLD       = 0.25; 
+const uint MAX_SPP_PER_PATH = 4u;
+
 
 // ---------- RNG (same as before) ----------
+
+uint getDepth(uint packed)
+{
+    return packed & DEPTH_MASK;
+}
+
+uint getSPP(uint packed)
+{
+    return packed >> DEPTH_BITS;
+}
+
+void setDepth(inout uint packed, uint depth)
+{
+    packed = (packed & SPP_MASK) | (depth & DEPTH_MASK);
+}
+
+void setSPP(inout uint packed, uint spp)
+{
+    packed = (packed & DEPTH_MASK) | ((spp & DEPTH_MASK) << DEPTH_BITS);
+}
 
 uint wang_hash(uint s)
 {
@@ -248,19 +294,114 @@ vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const
                 dot(row2.xyz, direction));
 }
 
+uvec2 pixelCoordsFromIndex(uint pixIdx)
+{
+    uint x = pixIdx % Params.imageSize.x;
+    uint y = pixIdx / Params.imageSize.x;
+    return uvec2(x, y);
+}
+
+void accumulateSampleForPixel(uint pixelIdx, vec3 sampleRadiance)
+{
+    PixelStats ps = pixelStats[pixelIdx];
+
+    float nOld = float(ps.sampleCount);
+    float nNew = nOld + 1.0;
+
+    vec3 oldMean = ps.mean.rgb;
+    vec3 delta   = sampleRadiance - oldMean;
+    vec3 newMean = oldMean + delta / nNew;
+
+    float lum = dot(sampleRadiance, vec3(0.2126, 0.7152, 0.0722));
+    float oldLumMean = ps.mean.a;
+    float deltaLum   = lum - oldLumMean;
+    float newLumMean = oldLumMean + deltaLum / nNew;
+
+    float oldM2 = ps.m2.x;
+    float newM2 = oldM2 + deltaLum * (lum - newLumMean);
+
+    ps.mean.rgb = newMean;
+    ps.mean.a   = newLumMean;
+    ps.m2.x     = newM2;
+    ps.sampleCount += 1u;
+
+    pixelStats[pixelIdx] = ps;
+
+    uvec2 pix = pixelCoordsFromIndex(pixelIdx);
+    imageStore(outImage, ivec2(pix), vec4(newMean, 1.0));
+}
+
+void maybeMarkPixelHighVar(uint pixelIdx)
+{
+    PixelStats ps = pixelStats[pixelIdx];
+
+    if (ps.sampleCount < MIN_SAMPLES_FOR_ADAPT)
+        return;
+
+    float n = float(ps.sampleCount);
+    float variance = (n > 1.0) ? ps.m2.x / (n - 1.0) : 0.0;
+    float meanLum  = max(ps.mean.a, 1e-5);
+    float relError = sqrt(variance) / meanLum;
+
+    if (relError <= ERROR_THRESHOLD)
+        return;
+
+    uint oldFlags = atomicOr(pixelStats[pixelIdx].flags, PIXEL_FLAG_IN_HIGHVAR);
+    if ((oldFlags & PIXEL_FLAG_IN_HIGHVAR) != 0u)
+        return;
+
+    uint idx = atomicAdd(highVarCount, 1u);
+    highVarPixelIndices[idx] = pixelIdx;
+
+    ps.flags = oldFlags | PIXEL_FLAG_IN_HIGHVAR;
+    pixelStats[pixelIdx] = ps;
+}
+
+
+void reusePathIfPossible(uint pathId, inout PathHeader header)
+{
+    uint packed = header.depth;
+    uint spp    = getSPP(packed);
+
+    if (spp >= MAX_SPP_PER_PATH)
+    {
+        header.flags = PATH_STATE_COMPLETE;
+        return;
+    }
+
+    uint totalHigh = highVarCount;
+
+    if (totalHigh == 0u)
+    {
+        setDepth(header.depth, 0u);
+        header.flags = PATH_STATE_NEED_RAY;
+        return;
+    }
+
+    uint idx = atomicAdd(rescheduleCounter, 1u);
+    uint pixelIdx = highVarPixelIndices[idx % totalHigh];
+
+    header.pixelIndex = pixelIdx;
+    setDepth(header.depth, 0u);
+    header.flags = PATH_STATE_NEED_RAY;
+}
+
+
+
 // ---------- main logic ----------
 
-void writeFinalPixel(uint pathId, PathHeader pathHeader, RadianceState rad)
+void writeFinalPixel(uint pathId, PathHeader pathHeader, vec3 rad)
 {
     uint pixelIndex = pathHeader.pixelIndex;
     uvec2 pixel = uvec2(pixelIndex % Params.imageSize.x,
                         pixelIndex / Params.imageSize.x);
 
-    imageStore(outImage, ivec2(pixel), vec4(rad.radiance.xyz, 1.0));
+    imageStore(outImage, ivec2(pixel), vec4(rad, 1.0));
     
     pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
     pathHeaders[pathId] = pathHeader;
 }
+
 
 void main()
 {
@@ -274,25 +415,50 @@ void main()
     PathHeader pathHeader = pathHeaders[pathId];
     uint state = pathHeader.flags;
 
-    if (state == PATH_STATE_DEAD_WRITTEN)
+    if (state == PATH_STATE_COMPLETE)
         return;
-
-    RadianceState rad = radianceStates[pathId];
 
     if (state == PATH_STATE_DEAD)
     {
-        writeFinalPixel(pathId, pathHeader, rad);
+        uint pixelIdx = pathHeader.pixelIndex;
+        vec3 L = radianceStates[pathId].radiance.xyz;
+
+        accumulateSampleForPixel(pixelIdx, L);
+        maybeMarkPixelHighVar(pixelIdx);
+
+        uint packed = pathHeader.depth;
+        uint spp    = getSPP(packed);
+        setSPP(packed, spp + 1u);
+        pathHeader.depth = packed;
+
+        pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
+    }
+
+    if (pathHeader.flags == PATH_STATE_DEAD_WRITTEN)
+    {
+        reusePathIfPossible(pathId, pathHeader);
+        pathHeaders[pathId] = pathHeader;
         return;
     }
 
-    if (state != PATH_STATE_NEED_MIS)
+    if (pathHeader.flags == PATH_STATE_COMPLETE)
+    {
+        pathHeaders[pathId] = pathHeader;
         return;
+    }
 
-    uint depth = pathHeader.depth;
+    if (pathHeader.flags != PATH_STATE_NEED_MIS)
+    {
+        pathHeaders[pathId] = pathHeader;
+        return;
+    }
+
+    uint depth = getDepth(pathHeader.depth);
 
     HitIds hid   = hitIds[pathId];
     Hitdata hd   = hitData[pathId];
     RayData rd   = rays[pathId];
+    RadianceState rad = radianceStates[pathId];
 
     Ray ray;
     ray.origin    = rd.origin.xyz;
@@ -411,13 +577,17 @@ void main()
     pathHeader.rngState = rngState;
 
     if (T_next.r == 0.0 && T_next.g == 0.0 && T_next.b == 0.0)
+    {
         terminate = true;
+    }
 
     if (terminate)
     {
-        pathHeader.flags = PATH_STATE_DEAD;
         radianceStates[pathId] = rad;
-        writeFinalPixel(pathId, pathHeader, rad);
+        accumulateSampleForPixel(pathHeader.pixelIndex, rad.radiance.xyz);
+        maybeMarkPixelHighVar(pathHeader.pixelIndex);
+        pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
+        pathHeaders[pathId] = pathHeader;
         return;
     }
 
@@ -431,7 +601,7 @@ void main()
     rays[pathId].origin    = vec4(newOrigin, 0.0);
     rays[pathId].direction = vec4(newDir,   0.0);
 
-    pathHeader.depth = depth + 1u;
+    setDepth(pathHeader.depth , getDepth(pathHeader.depth) + 1u);
     pathHeader.flags = PATH_STATE_NEED_HIT;
 
     pathHeaders[pathId]     = pathHeader;

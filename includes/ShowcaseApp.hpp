@@ -25,7 +25,7 @@
 
 #define VALIDATE true
 #define FPS true
-constexpr bool SimpleRayTrace = false;
+static constexpr bool SimpleRayTrace = false;
 
 struct GpuTexture {
     VkImage        image        = VK_NULL_HANDLE;
@@ -278,6 +278,16 @@ private:
 
     VkBuffer       pathQueueBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory pathQueueMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
+    VkBuffer      pixelStatsBuf   [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+    VkDeviceMemory pixelStatsMem  [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+
+    VkBuffer      highVarPixelBuf [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+    VkDeviceMemory highVarPixelMem[SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+
+    VkBuffer      adaptiveCountersBuf   [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+    VkDeviceMemory adaptiveCountersMem  [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
+
 
     VkBuffer       paramsBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};

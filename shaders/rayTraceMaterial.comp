@@ -175,18 +175,41 @@ layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQ
 
 // ---------- Path state flags ----------
 
-const uint PATH_STATE_DEAD        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_DEAD        = 7u;
 
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;
 const float INV_PI  = 0.31830988618379067154;
+const uint DEPTH_BITS = 16u;
+const uint DEPTH_MASK = 0x0000FFFFu;
+const uint SPP_MASK   = 0xFFFF0000u;
 
 // ~~~~~~~~~~~~~ RNG ~~~~~~~~~~~~~
+
+uint getDepth(uint packed)
+{
+    return packed & DEPTH_MASK;
+}
+
+uint getSPP(uint packed)
+{
+    return packed >> DEPTH_BITS;
+}
+
+void setDepth(inout uint packed, uint depth)
+{
+    packed = (packed & SPP_MASK) | (depth & DEPTH_MASK);
+}
+
+void setSPP(inout uint packed, uint spp)
+{
+    packed = (packed & DEPTH_MASK) | ((spp & DEPTH_MASK) << DEPTH_BITS);
+}
 
 uint wang_hash(uint s)
 {
@@ -953,6 +976,8 @@ void solveRenderingEquation(const in Ray ray, const in Hit hit, inout uint rngSt
     bsdfSample.pdf = pdf_B;
     bsdfSample.cosTheta = cosTheta_B;
     bsdfSample.pdf_L_B = pdf_L_B;
+    bsdfSamples[pathId] = bsdfSample;
+    pathHeaders[pathId].rngState = rngState;
     if (pathHeaders[pathId].flags != PATH_STATE_NEED_SHADOW)
         pathHeaders[pathId].flags = PATH_STATE_NEED_MIS;
 
@@ -977,7 +1002,7 @@ void main()
     uvec2 pixel = uvec2(pixelIndex % Params.imageSize.x,
                         pixelIndex / Params.imageSize.x);
 
-    uint depth    = pathHeader.depth;
+    uint depth    = getDepth(pathHeader.depth);
     uint rngState = pathHeader.rngState;
 
     RayData rd = rays[pathId];

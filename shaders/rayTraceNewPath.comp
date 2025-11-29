@@ -89,28 +89,66 @@ struct PathQueue {
     uint pad2;
 };
 
-layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
-layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
-layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
-layout(set = 2, binding = 3, std430) buffer HitdataBuf    { Hitdata        hitData[];       };
-layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
-layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfSamples[];   };
-layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
-layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
-layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
-layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+struct PixelStats {
+    vec4 mean;
+    vec4 m2;
+    uint sampleCount;
+    uint flags;
+};
 
+layout(set = 2, binding = 0, std430)  buffer PathHeaderBuf   { PathHeader     pathHeaders[];   };
+layout(set = 2, binding = 1, std430)  buffer RayBuf          { RayData        rays[];          };
+layout(set = 2, binding = 2, std430)  buffer HitIdsBuf       { HitIds         hitIds[];        };
+layout(set = 2, binding = 3, std430)  buffer HitdataBuf      { Hitdata        hitData[];       };
+layout(set = 2, binding = 4, std430)  buffer RadianceBuf     { RadianceState  radianceStates[];};
+layout(set = 2, binding = 5, std430)  buffer BsdfSampleBuf   { BsdfSample     bsdfSamples[];   };
+layout(set = 2, binding = 6, std430)  buffer LightSampleBuf  { LightSample    lightSamples[];  };
+layout(set = 2, binding = 7, std430)  buffer ShadowRayBuf    { ShadowRay      shadowRays[];    };
+layout(set = 2, binding = 8, std430)  buffer ShadowResBuf    { ShadowResult   shadowResults[]; };
+layout(set = 2, binding = 9, std430)  buffer PathQueueBuf    { PathQueue      pathQueues[];    };
+layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
+layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint     highVarPixelIndices[]; };
+layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
+    uint highVarCount;
+    uint rescheduleCounter;
+};
 
-const uint PATH_STATE_DEAD        = 0u;
+const uint PATH_STATE_INIT        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_COMPLETE    = 6u;
+const uint PATH_STATE_DEAD        = 7u;
+const uint PATH_STATE_NEED_RAY    = 8u;
+const uint DEPTH_BITS = 16u;
+const uint DEPTH_MASK = 0x0000FFFFu;
+const uint SPP_MASK   = 0xFFFF0000u;
     
 
 
 // ---------- RNG helpers ----------
+
+uint getDepth(uint packed)
+{
+    return packed & DEPTH_MASK;
+}
+
+uint getSPP(uint packed)
+{
+    return packed >> DEPTH_BITS;
+}
+
+void setDepth(inout uint packed, uint depth)
+{
+    packed = (packed & SPP_MASK) | (depth & DEPTH_MASK);
+}
+
+void setSPP(inout uint packed, uint spp)
+{
+    packed = (packed & DEPTH_MASK) | ((spp & DEPTH_MASK) << DEPTH_BITS);
+}
 
 uint wang_hash(uint s)
 {
@@ -173,38 +211,88 @@ Ray generateRayJittered(uvec2 pixel, vec2 jitter)
     return ray;
 }
 
+uvec2 unpackPixelCoords(uint pixelIndex)
+{
+    uint x = pixelIndex % Params.imageSize.x;
+    uint y = pixelIndex / Params.imageSize.x;
+    return uvec2(x, y);
+}
+
 void main()
 {
-    uvec2 pixel = gl_GlobalInvocationID.xy;
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
+        return;
 
+    uint pathId = gid.x + gid.y * Params.imageSize.x;
+
+    PathHeader header = pathHeaders[pathId];
+
+    if (header.flags == PATH_STATE_INIT)
+    {
+        header.pixelIndex = pathId;
+
+        PixelStats ps;
+        ps.mean        = vec4(0.0);
+        ps.m2          = vec4(0.0);
+        ps.sampleCount = 0u;
+        ps.flags       = 0u;
+        pixelStats[pathId] = ps;
+
+        if (pathId == 0)
+        {
+            highVarCount      = 0u;
+            rescheduleCounter = 0u;
+        }
+
+        header.flags = PATH_STATE_NEED_RAY;
+        pathHeaders[pathId] = header;
+    }
+
+    if (header.flags != PATH_STATE_NEED_RAY)
+        return;
+
+    uint spp = getSPP(header.depth);
+    setDepth(header.depth, 0u);
+
+    uvec2 pixel = unpackPixelCoords(header.pixelIndex);
     if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
         return;
 
-    uint pathId = pixel.x + pixel.y * Params.imageSize.x;
-
-    uint rngState = wang_hash(uint(pathId ^ (floatBitsToUint(Params.camPos_time.w) * 1664525u)));
+    uint frameIndex = floatBitsToUint(Params.camPos_time.w);
+    uint seed = ((pathId + 320452039u) * frameIndex) ^ header.pixelIndex ^ ((spp + 1239741293u) * 1664525u);
+    uint rngState = wang_hash(seed);
 
     vec2 jitter = vec2(rand(rngState), rand(rngState));
-    Ray ray  = generateRayJittered(pixel, jitter);
+    Ray ray = generateRayJittered(pixel, jitter);
 
     rays[pathId].origin    = vec4(ray.origin,    0.0);
     rays[pathId].direction = vec4(ray.direction, 0.0);
 
-    PathHeader pathHeader;
-    pathHeader.pixelIndex = pathId;
-    pathHeader.rngState   = rngState;
-    pathHeader.depth      = 0u;
-    pathHeader.flags      = PATH_STATE_NEED_HIT;
-    pathHeaders[pathId] = pathHeader;
+    header.rngState = rngState;
+    header.flags    = PATH_STATE_NEED_HIT;
+    pathHeaders[pathId] = header;
 
     RadianceState radiance;
     radiance.throughput   = vec4(1.0, 1.0, 1.0, 0.0);
-    radiance.radiance     = vec4(0.0, 0.0, 0.0, 0.0);
+    radiance.radiance     = vec4(0.0);
     radiance.prevBsdfPdf  = 0.0;
     radiance.pad0         = 0.0;
     radiance.pad1         = 0.0;
     radiance.pad2         = 0.0;
     radianceStates[pathId] = radiance;
 
-}
+    hitIds[pathId].instanceIndex  = 0xFFFFFFFFu;
+    hitIds[pathId].primitiveIndex = 0xFFFFFFFFu;
+    hitData[pathId]               = Hitdata(0.0, 0.0, 0.0, 0.0);
 
+    bsdfSamples[pathId].pdf      = 0.0;
+    bsdfSamples[pathId].cosTheta = 0.0;
+    bsdfSamples[pathId].pdf_L_B  = 0.0;
+
+    lightSamples[pathId].pdf      = 0.0;
+    lightSamples[pathId].cosTheta = 0.0;
+    lightSamples[pathId].pdf_B_L  = 0.0;
+
+    shadowResults[pathId].visible = 0u;
+}

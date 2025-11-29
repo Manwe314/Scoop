@@ -5,6 +5,7 @@ to-add later:
     unspliting in SBVH construction;
     add a tab on Ui App for key binding + general stats? at index -2?
     add inverse transpose of linnear part for normal transform model->world
+    dynamic leaf cost
 
 tomorrow?
     eval BRDF
@@ -18,7 +19,6 @@ for read me:
 read later:
 http://graphics.ucsd.edu/~henrik/papers/multidimensional_adaptive_sampling/multidimensional_adaptive_sampling.pdf
     
-
 
 sources:
 
@@ -45,6 +45,7 @@ https://en.wikipedia.org/wiki/Alias_method
 https://dl.acm.org/doi/pdf/10.1145/218380.218500
 https://cw.fel.cvut.cz/b241/_media/courses/b4m39rso/tutorials/multiple_importance_sampling_101.pdf
 https://research.nvidia.com/sites/default/files/pubs/2013-07_Megakernels-Considered-Harmful/laine2013hpg_paper.pdf
+https://changyaochen.github.io/welford/
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms
@@ -349,6 +350,45 @@ cornellBox Megakernel dGpu | -0.8y no full screen. 1SPP 64 max depth
 [GPU] compute: 155.505 ms, graphics: 0.02748 ms, combined: 155.533 ms
 [GPU] compute: 154.637 ms, graphics: 0.02748 ms, combined: 154.665 ms
 [GPU] compute: 155.044 ms, graphics: 0.02744 ms, combined: 155.072 ms
+
+-> 81% speedup.
+
+cornellBox Wavefront PathTracing dGPU | -0.8y no full screen 1SPP 64 max depth
+[GPU] compute: 29.2846 ms, graphics: 0.08272 ms, combined: 29.3673 ms
+[GPU] compute: 29.1454 ms, graphics: 0.08308 ms, combined: 29.2285 ms
+[GPU] compute: 29.209 ms, graphics: 0.08344 ms, combined: 29.2925 ms
+[GPU] compute: 29.2218 ms, graphics: 0.08316 ms, combined: 29.305 ms
+[GPU] compute: 29.3053 ms, graphics: 0.0824 ms, combined: 29.3877 ms
+[GPU] compute: 29.299 ms, graphics: 0.08344 ms, combined: 29.3825 ms
+[GPU] compute: 29.1519 ms, graphics: 0.0832 ms, combined: 29.2351 ms
+[GPU] compute: 29.2352 ms, graphics: 0.08276 ms, combined: 29.318 ms
+
+-> 33.45% further speedup
+
+cornellBox Wavefront PathTracing dGPU | -0.8y no full screen 1SPP 64 max depth reduced stack sizes
+[GPU] compute: 19.4426 ms, graphics: 0.05876 ms, combined: 19.5013 ms
+[GPU] compute: 19.543 ms, graphics: 0.05924 ms, combined: 19.6022 ms
+[GPU] compute: 19.3185 ms, graphics: 0.05872 ms, combined: 19.3772 ms
+[GPU] compute: 19.605 ms, graphics: 0.05924 ms, combined: 19.6642 ms
+[GPU] compute: 19.4664 ms, graphics: 0.05872 ms, combined: 19.5251 ms
+[GPU] compute: 19.3952 ms, graphics: 0.05888 ms, combined: 19.4541 ms
+[GPU] compute: 19.436 ms, graphics: 0.05864 ms, combined: 19.4947 ms
+[GPU] compute: 19.4068 ms, graphics: 0.05884 ms, combined: 19.4657 ms
+[GPU] compute: 19.4482 ms, graphics: 0.05924 ms, combined: 19.5074 ms
+[GPU] compute: 19.4617 ms, graphics: 0.05848 ms, combined: 19.5202 ms
+[GPU] compute: 19.4483 ms, graphics: 0.05904 ms, combined: 19.5074 ms
+
+
+cornellBox Wavefront pathtracing dGpu ADAPTIVE sampling max SPP per PathId 4 | -0.8y no full screen 65 max depth reduced stack sizes
+[GPU] compute: 25.5086 ms, graphics: 0.08508 ms, combined: 25.5937 ms
+[GPU] compute: 25.5298 ms, graphics: 0.08568 ms, combined: 25.6155 ms
+[GPU] compute: 25.4188 ms, graphics: 0.08704 ms, combined: 25.5058 ms
+[GPU] compute: 25.5371 ms, graphics: 0.0882 ms, combined: 25.6253 ms
+[GPU] compute: 25.5878 ms, graphics: 0.08648 ms, combined: 25.6743 ms
+[GPU] compute: 25.5964 ms, graphics: 0.08624 ms, combined: 25.6827 ms
+[GPU] compute: 25.5168 ms, graphics: 0.08564 ms, combined: 25.6024 ms
+[GPU] compute: 25.4953 ms, graphics: 0.0868 ms, combined: 25.5821 ms
+
 
 
 

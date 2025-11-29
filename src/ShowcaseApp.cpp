@@ -196,6 +196,18 @@ void ShowcaseApp::createOrResizeWavefrontBuffers()
         ensureBufferCapacity(pathQueueBuf[frame], pathQueueMem[frame],
                              VkDeviceSize(NUM_PATH_QUEUES) * sizeof(PathQueue),
                              usage, memFlags);
+        
+        ensureBufferCapacity(pixelStatsBuf[frame], pixelStatsMem[frame],
+                             pathCount * sizeof(PixelStatsGPU),
+                             usage, memFlags);
+
+        ensureBufferCapacity(highVarPixelBuf[frame], highVarPixelMem[frame],
+                             pathCount * sizeof(uint32_t),
+                             usage, memFlags);
+
+        ensureBufferCapacity(adaptiveCountersBuf[frame], adaptiveCountersMem[frame],
+                             sizeof(AdaptiveCountersGPU),
+                             usage, memFlags);
     }
 }
 
@@ -792,18 +804,21 @@ void ShowcaseApp::createWavefrontBuffers()
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
-        VkDescriptorBufferInfo b0{ pathHeaderBuf[i],   0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b1{ rayBuf[i],          0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b2{ hitIdsBuf[i],       0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b3{ hitDataBuf[i],      0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b4{ radianceBuf[i],     0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b5{ bsdfSampleBuf[i],   0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b6{ lightSampleBuf[i],  0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b7{ shadowRayBuf[i],    0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b8{ shadowResultBuf[i], 0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo b9{ pathQueueBuf[i],    0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b0 { pathHeaderBuf[i],         0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b1 { rayBuf[i],                0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b2 { hitIdsBuf[i],             0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b3 { hitDataBuf[i],            0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b4 { radianceBuf[i],           0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b5 { bsdfSampleBuf[i],         0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b6 { lightSampleBuf[i],        0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b7 { shadowRayBuf[i],          0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b8 { shadowResultBuf[i],       0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b9 { pathQueueBuf[i],          0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b10{ pixelStatsBuf[i],        0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b11{ highVarPixelBuf[i],      0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b12{ adaptiveCountersBuf[i],  0, VK_WHOLE_SIZE };
 
-        VkWriteDescriptorSet writes[10]{};
+        VkWriteDescriptorSet writes[13]{};
 
         auto initWrite = [&](VkWriteDescriptorSet& w, uint32_t binding, const VkDescriptorBufferInfo* info)
         {
@@ -826,8 +841,11 @@ void ShowcaseApp::createWavefrontBuffers()
         initWrite(writes[7], 7, &b7);
         initWrite(writes[8], 8, &b8);
         initWrite(writes[9], 9, &b9);
+        initWrite(writes[10], 10, &b10);
+        initWrite(writes[11], 11, &b11);
+        initWrite(writes[12], 12, &b12);
 
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 13, writes, 0, nullptr);
     }
 }
 
@@ -1898,8 +1916,11 @@ void ShowcaseApp::createComputeDescriptors()
     //   7: ShadowRay[]
     //   8: ShadowResult[]
     //   9: PathQueue[]
+    //  10: PixelStats[]
+    //  11: HighVarPixelIndices[]
+    //  12: AdaptiveCounters
 
-    VkDescriptorSetLayoutBinding d[10]{};
+    VkDescriptorSetLayoutBinding d[13]{};
 
     auto initSet2 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding)
     {
@@ -1910,12 +1931,12 @@ void ShowcaseApp::createComputeDescriptors()
         b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
     };
 
-    for (uint32_t b = 0; b < 10; ++b)
+    for (uint32_t b = 0; b < 13; ++b)
         initSet2(d[b], b);
 
     VkDescriptorSetLayoutCreateInfo dynamicLayoutCreateInfo{ };
     dynamicLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dynamicLayoutCreateInfo.bindingCount = 10;
+    dynamicLayoutCreateInfo.bindingCount = 13;
     dynamicLayoutCreateInfo.pBindings    = d;
 
     if (vkCreateDescriptorSetLayout(device, &dynamicLayoutCreateInfo, nullptr, &computeDynamicSetLayout) != VK_SUCCESS)
@@ -1934,7 +1955,7 @@ void ShowcaseApp::createComputeDescriptors()
     poolSizes[0].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT; // offscreen images
 
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[1].descriptorCount = 20 * SwapChain::MAX_FRAMES_IN_FLIGHT; // enough for static + per-frame + future dynamic
+    poolSizes[1].descriptorCount = 27 * SwapChain::MAX_FRAMES_IN_FLIGHT; // enough for static + per-frame + future dynamic
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[2].descriptorCount = maxTextures; // scene textures
@@ -2473,6 +2494,9 @@ void ShowcaseApp::destroyWavefrontBuffers()
         destroy(shadowRayBuf[i],    shadowRayMem[i]);
         destroy(shadowResultBuf[i], shadowResultMem[i]);
         destroy(pathQueueBuf[i],    pathQueueMem[i]);
+        destroy(pixelStatsBuf[i],      pixelStatsMem[i]);
+        destroy(highVarPixelBuf[i],    highVarPixelMem[i]);
+        destroy(adaptiveCountersBuf[i], adaptiveCountersMem[i]);
     }
 }
 

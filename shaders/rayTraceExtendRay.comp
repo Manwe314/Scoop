@@ -156,12 +156,12 @@ layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQ
 
 // ---------- Path state flags ----------
 
-const uint PATH_STATE_DEAD        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_DEAD        = 7u;
 
 
 // ---------- RayTracing Engine helpers (mostly copied) ----------
@@ -299,9 +299,9 @@ bool moller_trumbore(const in Ray ray, inout Hit hit, const in vec3 vertex_0, co
     return false;
 }
 
-void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[30], const in float tEnter, const in float tExit, out int outPutPointer)
+void traverseTLAS(const in Ray ray, const in uint root, inout uint instancesOut[4], const in float tEnter, const in float tExit, out int outPutPointer)
 {
-    uint stack[30];
+    uint stack[4];
     int stackPointer = 0;
     stack[stackPointer] = root;
     outPutPointer = 0;
@@ -376,7 +376,7 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
 {
     const float ORDER_EPS = 1e-6;
 
-    uint stack[64];
+    uint stack[12];
     int  stackPointer = 0;
     stack[stackPointer] = nodeOffset;
 
@@ -470,7 +470,7 @@ void traverseBLAS(const in Ray ray, inout Hit hit, const in uint nodeOffset, con
 void trace(const in Ray ray, inout Hit hit)
 {
     uint rootId = Params.rootIndex;
-    uint TLASInstanceLeafIDs[30];
+    uint TLASInstanceLeafIDs[4];
     float tEnter, tExit;
 
     if (intersectingAABB(ray, vec3(tlasNodes[rootId].bbMin), vec3(tlasNodes[rootId].bbMax), 1e-8, 1e30, tEnter, tExit))

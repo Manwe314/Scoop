@@ -144,7 +144,7 @@ static inline bool shouldBeLeaf(uint32_t count, int depth, const AABB& centroidB
     const uint32_t LEAF_THRESHOLD = 4; //Gloabl
     if (count <= LEAF_THRESHOLD)
         return true;
-    if (depth  > 64) //Global
+    if (depth  > 12) //Global
         return true;
     
     glm::vec3 d = centroidBB.max - centroidBB.min;
