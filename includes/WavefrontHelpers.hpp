@@ -22,11 +22,10 @@ enum PathState : uint32_t {
 };
 
 struct alignas(16) PixelStatsGPU {
-    glm::vec4 mean;
-    glm::vec4 m2;
+    glm::uvec4 sum;
+    glm::uvec4 sumSQ;
     uint32_t  sampleCount;
     uint32_t  flags;
-    glm::uvec2 _pad;
 };
 
 struct AdaptiveCountersGPU {

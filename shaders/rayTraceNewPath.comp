@@ -90,8 +90,8 @@ struct PathQueue {
 };
 
 struct PixelStats {
-    vec4 mean;
-    vec4 m2;
+    uvec4 sum;
+    uvec4 sumSq;
     uint sampleCount;
     uint flags;
 };
@@ -231,13 +231,6 @@ void main()
     if (header.flags == PATH_STATE_INIT)
     {
         header.pixelIndex = pathId;
-
-        PixelStats ps;
-        ps.mean        = vec4(0.0);
-        ps.m2          = vec4(0.0);
-        ps.sampleCount = 0u;
-        ps.flags       = 0u;
-        pixelStats[pathId] = ps;
 
         if (pathId == 0)
         {

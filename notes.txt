@@ -46,6 +46,11 @@ https://dl.acm.org/doi/pdf/10.1145/218380.218500
 https://cw.fel.cvut.cz/b241/_media/courses/b4m39rso/tutorials/multiple_importance_sampling_101.pdf
 https://research.nvidia.com/sites/default/files/pubs/2013-07_Megakernels-Considered-Harmful/laine2013hpg_paper.pdf
 https://changyaochen.github.io/welford/
+https://schuttejoe.github.io/post/arealightsampling/
+https://dl.acm.org/doi/pdf/10.1145/218380.218498
+https://gfxcourses.stanford.edu/cs348b/spring22content/media/directillum/directlighting1.pdf
+https://amindforeverprogramming.blogspot.com/2013/07/random-floats-in-glsl-330.html
+https://www3.nd.edu/~zxu2/acms40390F13/MC-Integration.pdf
 
 moller 64 bytes - lunox
 [GPU] compute: 3.807 ms, graphics: 0.259 ms, combined: 4.066 ms
@@ -378,18 +383,101 @@ cornellBox Wavefront PathTracing dGPU | -0.8y no full screen 1SPP 64 max depth r
 [GPU] compute: 19.4617 ms, graphics: 0.05848 ms, combined: 19.5202 ms
 [GPU] compute: 19.4483 ms, graphics: 0.05904 ms, combined: 19.5074 ms
 
+-> 858.97% slowdown
 
-cornellBox Wavefront pathtracing dGpu ADAPTIVE sampling max SPP per PathId 4 | -0.8y no full screen 65 max depth reduced stack sizes
-[GPU] compute: 25.5086 ms, graphics: 0.08508 ms, combined: 25.5937 ms
-[GPU] compute: 25.5298 ms, graphics: 0.08568 ms, combined: 25.6155 ms
-[GPU] compute: 25.4188 ms, graphics: 0.08704 ms, combined: 25.5058 ms
-[GPU] compute: 25.5371 ms, graphics: 0.0882 ms, combined: 25.6253 ms
-[GPU] compute: 25.5878 ms, graphics: 0.08648 ms, combined: 25.6743 ms
-[GPU] compute: 25.5964 ms, graphics: 0.08624 ms, combined: 25.6827 ms
-[GPU] compute: 25.5168 ms, graphics: 0.08564 ms, combined: 25.6024 ms
-[GPU] compute: 25.4953 ms, graphics: 0.0868 ms, combined: 25.5821 ms
+cornellBox Wavefront pathtracing dGpu ADAPTIVE sampling max SPP per PathId 4 | -0.8y no full screen 64 max depth reduced stack sizes
+[GPU] compute: 187.515 ms, graphics: 0.0556 ms, combined: 187.57 ms
+[GPU] compute: 187.728 ms, graphics: 0.05608 ms, combined: 187.784 ms
+[GPU] compute: 187.189 ms, graphics: 0.05696 ms, combined: 187.246 ms
+[GPU] compute: 187.771 ms, graphics: 0.05652 ms, combined: 187.827 ms
+[GPU] compute: 187.032 ms, graphics: 0.05588 ms, combined: 187.088 ms
+[GPU] compute: 187.192 ms, graphics: 0.05584 ms, combined: 187.248 ms
+[GPU] compute: 187.185 ms, graphics: 0.05548 ms, combined: 187.241 ms
+[GPU] compute: 187.645 ms, graphics: 0.05632 ms, combined: 187.702 ms
 
 
+
+
+
+
+#version 460
+
+layout(location = 0) in  vec2 vUV;
+layout(location = 0) out vec4 outColor;
+
+layout(set = 0, binding = 0) uniform sampler2D srcLinear;
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main()
+{
+    vec3 centerColor = texture(srcLinear, vUV).rgb;
+    float centerL    = luma(centerColor);
+
+    ivec2 sizeI = textureSize(srcLinear, 0);
+    vec2 texel  = 1.0 / vec2(max(sizeI, ivec2(1)));
+
+    const int R = 1;
+    float wSum   = 0.0;
+    float meanL  = 0.0;
+    float meanL2 = 0.0;
+
+    for (int dy = -R; dy <= R; ++dy)
+    {
+        for (int dx = -R; dx <= R; ++dx)
+        {
+            if (dx == 0 && dy == 0)
+                continue;
+    
+            vec2 uvN = vUV + vec2(dx, dy) * texel;
+            uvN = clamp(uvN, texel * 0.5, vec2(1.0) - texel * 0.5);
+    
+            vec3 c = texture(srcLinear, uvN).rgb;
+            float l = luma(c);
+    
+            float w = 1.0;
+            wSum   += w;
+            meanL  += w * l;
+            meanL2 += w * l * l;
+        }
+    }
+
+
+    if (wSum > 0.0)
+    {
+        meanL  /= wSum;
+        meanL2 /= wSum;
+    }
+
+    float varL   = max(meanL2 - meanL * meanL, 0.0);
+    float sigmaL = sqrt(varL);
+
+    float k      = 1.0;
+    float upperL = meanL + k * sigmaL;
+
+    if (sigmaL < 1e-5 || centerL <= 0.0)
+    {
+        outColor = vec4(centerColor, 1.0);
+        return;
+    }
+
+    bool isFirefly = (centerL > upperL);
+
+    if (!isFirefly)
+    {
+        outColor = vec4(centerColor, 1.0);
+        return;
+    }
+
+    float scale = upperL / centerL;
+    vec3 clampedColor = centerColor * scale;
+
+    clampedColor = clamp(clampedColor, 0.0, 1.0);
+    outColor = vec4(clampedColor, 1);
+
+}
 
 
 

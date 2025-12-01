@@ -27,6 +27,13 @@
 #define FPS true
 static constexpr bool SimpleRayTrace = false;
 
+struct FsrConstants {
+    uint32_t con0[4];
+    uint32_t con1[4];
+    uint32_t con2[4];
+    uint32_t con3[4];
+};
+
 struct GpuTexture {
     VkImage        image        = VK_NULL_HANDLE;
     VkImageView    view         = VK_NULL_HANDLE;
@@ -159,6 +166,9 @@ private:
     std::vector<VkFramebuffer> swapChainFramebuffers;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
+    VkExtent2D rayTraceExtent;
+    float resolutionScale = 0.5f;
+    bool hasMoved = true;
 
     std::vector<VkImageView> swapChainImageViews;
     bool offscreenValid[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
@@ -190,6 +200,11 @@ private:
     VkDeviceMemory offscreenMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkImageView    offscreenView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
+    VkImage        fsrImage[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory fsrMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkImageView    fsrView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    bool           fsrValid[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
     VkDescriptorSetLayout computeStaticSetLayout  = VK_NULL_HANDLE;
     VkDescriptorSetLayout computeFrameSetLayout   = VK_NULL_HANDLE;
     VkDescriptorSetLayout computeDynamicSetLayout = VK_NULL_HANDLE;
@@ -204,11 +219,13 @@ private:
 
     VkPipeline       computePipeline       = VK_NULL_HANDLE;
 
-    VkPipeline rayTraceLogicPipeline     = VK_NULL_HANDLE;
-    VkPipeline rayTraceNewPathPipeline   = VK_NULL_HANDLE;
-    VkPipeline rayTraceMaterialPipeline  = VK_NULL_HANDLE;
-    VkPipeline rayTraceExtendRayPipeline = VK_NULL_HANDLE;
-    VkPipeline rayTraceShadowRayPipeline = VK_NULL_HANDLE;
+    VkPipeline rayTraceLogicPipeline      = VK_NULL_HANDLE;
+    VkPipeline rayTraceNewPathPipeline    = VK_NULL_HANDLE;
+    VkPipeline rayTraceMaterialPipeline   = VK_NULL_HANDLE;
+    VkPipeline rayTraceExtendRayPipeline  = VK_NULL_HANDLE;
+    VkPipeline rayTraceShadowRayPipeline  = VK_NULL_HANDLE;
+    VkPipeline rayTraceFinalWritePipeline = VK_NULL_HANDLE;
+    VkPipeline FSRPipeline                = VK_NULL_HANDLE;
 
     VkRenderPass          renderPass = VK_NULL_HANDLE;
 
@@ -219,6 +236,11 @@ private:
 
     VkPipelineLayout      graphicsPipelineLayout = VK_NULL_HANDLE;
     VkPipeline            graphicsPipeline       = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout fsrSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      fsrDescPool  = VK_NULL_HANDLE;
+    VkDescriptorSet       fsrSets[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+
 
     VkSemaphore computeDone[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
@@ -293,6 +315,11 @@ private:
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     void*          paramsMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
+    VkBuffer        fsrConstBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory  fsrConstMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    void*    fsrConstMapped[SwapChain::MAX_FRAMES_IN_FLIGHT];
+
+
     VkBuffer       tlasNodesBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory tlasNodesMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
@@ -307,6 +334,7 @@ private:
     VkCommandBuffer graphicsCommandBuffers[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkCommandBuffer computeCommandBuffers[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     bool offscreenInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+    bool fsrInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT]       = {false};
 
     uint32_t graphicsFamily = VK_QUEUE_FAMILY_IGNORED;
     uint32_t computeFamily  = VK_QUEUE_FAMILY_IGNORED;
@@ -386,6 +414,7 @@ private:
     void createImageViews();
     void createSyncObjects();
     void createOffscreenTargets();
+    void createFSRTargets();
     void destroyOffscreenTarget();
     void createComputeDescriptors();
     void updateComputeDescriptor();
@@ -402,8 +431,10 @@ private:
     void destroyCommandPoolAndBuffers();
     void destroySceneTextures();
     void destroySSBOdata();
+    void destroyFSRTarget();
     void uploadStaticData();
     void createParamsBuffers();
+    void createFsrConstBuffers();
     void writeStaticComputeBindings();
     void writeParamsBindingForFrame(uint32_t frameIndex);
     void createTextureSampler(VkPhysicalDevice phys, float requestedAniso = 8.0f);
@@ -413,6 +444,7 @@ private:
     void uploadTextureImages();
     void createWavefrontBuffers();
     void destroyWavefrontBuffers();
+    void updateFsrConstants(uint32_t frameIndex);
     uint32_t getMaxPaths() const;
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
     SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);

@@ -656,6 +656,12 @@ void UiApp::loadUi()
     uiOverlay = std::make_unique<UiRenderer>(device, 12);
 }
 
+void UiApp::setUierror(std::string msg)
+{
+    uiState.errorMsg = msg;
+    uiState.showError = true;
+}
+
 void UiApp::reconstruct()
 {
     swapChain.reset();

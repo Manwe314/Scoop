@@ -1,5 +1,12 @@
 #include "ShowcaseApp.hpp"
 #include <iostream>
+#define A_CPU 1
+#include "ffx_a.h"
+#define FSR_EASU_F 1
+#include "ffx_fsr1.h"
+typedef uint32_t AU4[4];
+
+
 
 
 
@@ -476,13 +483,23 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
         offscreenInitialized[i] = true;
     }
+    
+    if (!fsrInitialized[i])
+    {
+        imageBarrier(cmd, fsrImage[i],
+                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        fsrInitialized[i] = true;
+    }
     else
     {
-        imageBarrier(cmd, offscreenImage[i],
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        imageBarrier(cmd, fsrImage[i],
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
     }
 
     if (hasDedicatedTransfer && computeFamily != transferFamily)
@@ -544,8 +561,8 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
     
 
-    uint32_t gx = (swapChainExtent.width  + 7)/8;
-    uint32_t gy = (swapChainExtent.height + 7)/8;
+    uint32_t gx = (rayTraceExtent.width  + 7)/8;
+    uint32_t gy = (rayTraceExtent.height + 7)/8;
 
     if constexpr (SimpleRayTrace)
     {
@@ -574,7 +591,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             computeDynamicSets[i]
         };
 
-        auto bindAndDispatch = [&](VkPipeline pipeline)
+        auto bindAndDispatch = [&](VkPipeline pipeline, uint32_t gx, uint32_t gy)
         {
             if (pipeline == VK_NULL_HANDLE)
                 return;
@@ -610,34 +627,43 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         const VkDeviceSize pathCount = VkDeviceSize(maxPaths);
 
         VkDeviceSize bufferSize = pathCount * sizeof(PathHeader);
+        VkDeviceSize bufferSize2 = pathCount * sizeof(PixelStatsGPU);
 
         vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
+        vkCmdFillBuffer(cmd, pixelStatsBuf[i], 0, bufferSize2, 0u);
+
 
         for (uint32_t bounce = 0; bounce < 64; bounce++)
         {
-            bindAndDispatch(rayTraceNewPathPipeline);
+            bindAndDispatch(rayTraceNewPathPipeline, gx, gy);
             passBarrier();
 
-            bindAndDispatch(rayTraceExtendRayPipeline);
+            bindAndDispatch(rayTraceExtendRayPipeline, gx, gy);
             passBarrier();
     
-            bindAndDispatch(rayTraceMaterialPipeline);
+            bindAndDispatch(rayTraceMaterialPipeline, gx, gy);
             passBarrier();
             
-            bindAndDispatch(rayTraceShadowRayPipeline);
+            bindAndDispatch(rayTraceShadowRayPipeline, gx, gy);
             passBarrier();
 
-            bindAndDispatch(rayTraceLogicPipeline);
+            bindAndDispatch(rayTraceLogicPipeline, gx, gy);
             passBarrier();
         }
+
+        bindAndDispatch(rayTraceFinalWritePipeline, gx, gy);
+        passBarrier();
+
+        bindAndDispatch(FSRPipeline, (swapChainExtent.width  + 15)/16, (swapChainExtent.height + 15)/16);
+        passBarrier();
     }
     
 
-    imageBarrier(cmd, offscreenImage[i],
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    imageBarrier(cmd, fsrImage[i],
+                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
 
 
 
@@ -747,6 +773,7 @@ void ShowcaseApp::update(float dt)
         move = glm::normalize(move) * (speed * dt);
         scene.camera.position += move;
         scene.camera.target   += move;
+        hasMoved = true;
     }
 
 
@@ -881,6 +908,35 @@ void ShowcaseApp::update(float dt)
     }
 }
 
+void ShowcaseApp::updateFsrConstants(uint32_t frameIndex)
+{
+    float inputViewportW = float(rayTraceExtent.width);
+    float inputViewportH = float(rayTraceExtent.height);
+
+    float inputSizeW = float(rayTraceExtent.width);
+    float inputSizeH = float(rayTraceExtent.height);
+
+    float outputW = float(swapChainExtent.width);
+    float outputH = float(swapChainExtent.height);
+
+    AU4 c0, c1, c2, c3;
+
+    FsrEasuCon(
+        c0, c1, c2, c3,
+        inputViewportW, inputViewportH,
+        inputSizeW,     inputSizeH,
+        outputW,        outputH);
+
+    FsrConstants data{};
+    memcpy(data.con0, c0, sizeof(uint32_t) * 4);
+    memcpy(data.con1, c1, sizeof(uint32_t) * 4);
+    memcpy(data.con2, c2, sizeof(uint32_t) * 4);
+    memcpy(data.con3, c3, sizeof(uint32_t) * 4);
+    
+    memcpy(fsrConstMapped[frameIndex], &data, sizeof(FsrConstants));
+}
+
+
 
 void ShowcaseApp::run()
 {
@@ -996,7 +1052,7 @@ void ShowcaseApp::run()
             flags |= (bInterpInt << B_INTERP_SHIFT) & B_INTERP_MASK;
         
         ParamsGPU params = makeParamsForVulkan(
-                            swapChainExtent,
+                            rayTraceExtent,
                             /*rootIndex*/ topLevelAS.root,       
                             /*time*/ dt,
                             /*camPos*/ scene.camera.position,

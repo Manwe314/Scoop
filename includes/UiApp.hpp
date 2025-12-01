@@ -143,8 +143,7 @@ class UiApp
                     self->HandleButtonInteraction(id, pd);
             }
         }
-        void resetUiApp();
-        
+        void setUierror(std::string msg);
         
     private:
         void loadUi();

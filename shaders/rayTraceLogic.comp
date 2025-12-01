@@ -151,8 +151,8 @@ struct PathQueue {
 };
 
 struct PixelStats {
-    vec4 mean;
-    vec4 m2;
+    uvec4 sum;
+    uvec4 sumSq;
     uint sampleCount;
     uint flags;
 };
@@ -201,6 +201,7 @@ const float INV_PI  = 0.31830988618379067154;
 const uint DEPTH_BITS = 16u;
 const uint DEPTH_MASK = 0x0000FFFFu;
 const uint SPP_MASK   = 0xFFFF0000u;
+const vec3 LUM_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
 
 const uint PIXEL_FLAG_IN_HIGHVAR = 1u << 0;
 const uint  MIN_SAMPLES_FOR_ADAPT = 1u;
@@ -280,6 +281,21 @@ struct Hit {
     vec2  barrycentricUV;
 };
 
+#define ATOMIC_ADD_FLOAT(lval, val)                               \
+{                                                                 \
+    uint _oldBits = (lval);                                       \
+    uint _assumed;                                                \
+    while (true) {                                                \
+        _assumed       = _oldBits;                                \
+        float _oldVal  = uintBitsToFloat(_assumed);               \
+        float _newVal  = _oldVal + (val);                         \
+        uint  _newBits = floatBitsToUint(_newVal);                \
+        _oldBits = atomicCompSwap((lval), _assumed, _newBits);    \
+        if (_oldBits == _assumed)                                 \
+            break;                                                \
+    }                                                             \
+}
+
 vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
 {
     return vec3(dot(row0.xyz, point) + row0.w,
@@ -301,61 +317,58 @@ uvec2 pixelCoordsFromIndex(uint pixIdx)
     return uvec2(x, y);
 }
 
+
+
 void accumulateSampleForPixel(uint pixelIdx, vec3 sampleRadiance)
 {
-    PixelStats ps = pixelStats[pixelIdx];
+    float lum = dot(sampleRadiance, LUM_WEIGHTS);
 
-    float nOld = float(ps.sampleCount);
-    float nNew = nOld + 1.0;
+    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.x, sampleRadiance.r);
+    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.y, sampleRadiance.g);
+    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.z, sampleRadiance.b);
 
-    vec3 oldMean = ps.mean.rgb;
-    vec3 delta   = sampleRadiance - oldMean;
-    vec3 newMean = oldMean + delta / nNew;
+    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.w,   lum);
+    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sumSq.x, lum * lum);
 
-    float lum = dot(sampleRadiance, vec3(0.2126, 0.7152, 0.0722));
-    float oldLumMean = ps.mean.a;
-    float deltaLum   = lum - oldLumMean;
-    float newLumMean = oldLumMean + deltaLum / nNew;
-
-    float oldM2 = ps.m2.x;
-    float newM2 = oldM2 + deltaLum * (lum - newLumMean);
-
-    ps.mean.rgb = newMean;
-    ps.mean.a   = newLumMean;
-    ps.m2.x     = newM2;
-    ps.sampleCount += 1u;
-
-    pixelStats[pixelIdx] = ps;
-
-    uvec2 pix = pixelCoordsFromIndex(pixelIdx);
-    imageStore(outImage, ivec2(pix), vec4(newMean, 1.0));
+    atomicAdd(pixelStats[pixelIdx].sampleCount, 1u);
 }
 
 void maybeMarkPixelHighVar(uint pixelIdx)
 {
     PixelStats ps = pixelStats[pixelIdx];
 
-    if (ps.sampleCount < MIN_SAMPLES_FOR_ADAPT)
+    uint nSamp = ps.sampleCount;
+    if (nSamp < MIN_SAMPLES_FOR_ADAPT)
         return;
 
-    float n = float(ps.sampleCount);
-    float variance = (n > 1.0) ? ps.m2.x / (n - 1.0) : 0.0;
-    float meanLum  = max(ps.mean.a, 1e-5);
-    float relError = sqrt(variance) / meanLum;
+    float n        = float(nSamp);
+    float sumLum   = uintBitsToFloat(ps.sum.w);
+    float sumLum2  = uintBitsToFloat(ps.sumSq.x);
 
-    if (relError <= ERROR_THRESHOLD)
-        return;
+    float meanLum  = max(sumLum / max(n, 1.0), 1e-5);
 
-    uint oldFlags = atomicOr(pixelStats[pixelIdx].flags, PIXEL_FLAG_IN_HIGHVAR);
-    if ((oldFlags & PIXEL_FLAG_IN_HIGHVAR) != 0u)
-        return;
+    // Var(X) = E[X^2] - (E[X])^2
+    float ex2      = sumLum2 / n;
+    float var      = max(ex2 - meanLum * meanLum, 0.0);
+    float relError = sqrt(var / n) / meanLum;
 
-    uint idx = atomicAdd(highVarCount, 1u);
-    highVarPixelIndices[idx] = pixelIdx;
+    bool highNow = (relError > ERROR_THRESHOLD);
+    bool wasHigh = (ps.flags & PIXEL_FLAG_IN_HIGHVAR) != 0u;
 
-    ps.flags = oldFlags | PIXEL_FLAG_IN_HIGHVAR;
-    pixelStats[pixelIdx] = ps;
+    if (highNow && !wasHigh)
+    {
+        // Set flag atomically
+        uint oldFlags = atomicOr(pixelStats[pixelIdx].flags, PIXEL_FLAG_IN_HIGHVAR);
+        if ((oldFlags & PIXEL_FLAG_IN_HIGHVAR) == 0u)
+        {
+            uint idx = atomicAdd(highVarCount, 1u);
+            highVarPixelIndices[idx] = pixelIdx;
+        }
+    }
+    else if (!highNow && wasHigh)
+        atomicAnd(pixelStats[pixelIdx].flags, ~PIXEL_FLAG_IN_HIGHVAR);
 }
+
 
 
 void reusePathIfPossible(uint pathId, inout PathHeader header)
@@ -378,10 +391,22 @@ void reusePathIfPossible(uint pathId, inout PathHeader header)
         return;
     }
 
-    uint idx = atomicAdd(rescheduleCounter, 1u);
-    uint pixelIdx = highVarPixelIndices[idx % totalHigh];
+    const int MAX_TRIES = 4;
+    for (int i = 0; i < MAX_TRIES; ++i)
+    {
+        uint idx      = atomicAdd(rescheduleCounter, 1u);
+        uint pixelIdx = highVarPixelIndices[idx % totalHigh];
 
-    header.pixelIndex = pixelIdx;
+        uint flags = pixelStats[pixelIdx].flags;
+        if ((flags & PIXEL_FLAG_IN_HIGHVAR) != 0u)
+        {
+            header.pixelIndex = pixelIdx;
+            setDepth(header.depth, 0u);
+            header.flags = PATH_STATE_NEED_RAY;
+            return;
+        }
+    }
+
     setDepth(header.depth, 0u);
     header.flags = PATH_STATE_NEED_RAY;
 }
@@ -586,6 +611,10 @@ void main()
         radianceStates[pathId] = rad;
         accumulateSampleForPixel(pathHeader.pixelIndex, rad.radiance.xyz);
         maybeMarkPixelHighVar(pathHeader.pixelIndex);
+        uint packed = pathHeader.depth;
+        uint spp    = getSPP(packed);
+        setSPP(packed, spp + 1u);
+        pathHeader.depth = packed;
         pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
         pathHeaders[pathId] = pathHeader;
         return;

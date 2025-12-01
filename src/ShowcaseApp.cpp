@@ -51,8 +51,8 @@ static void destroyGpuTexture(VkDevice device, GpuTexture& tex) {
 
 uint32_t ShowcaseApp::getMaxPaths() const
 {
-    uint32_t w = std::max(1u, swapChainExtent.width);
-    uint32_t h = std::max(1u, swapChainExtent.height);
+    uint32_t w = std::max(1u, rayTraceExtent.width);
+    uint32_t h = std::max(1u, rayTraceExtent.height);
 
     return w * h;
 }
@@ -343,6 +343,7 @@ void ShowcaseApp::CursorPosCallback(GLFWwindow*, double x, double y)
     ));
 
     scene.camera.target = scene.camera.position + forward;
+    hasMoved = true;
 }
 
 
@@ -673,15 +674,17 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createSwapchain();
     createImageViews();
     createSyncObjects();
-    createOffscreenTargets(); // on resizing will need to call this again
+    createOffscreenTargets();
+    createFSRTargets();
+    createParamsBuffers();
+    createFsrConstBuffers();
     createComputeDescriptors();
+    createGraphicsDescriptors();
     updateComputeDescriptor();
     createComputePipeline();
     createRenderPass();
     createFramebuffers();
-    createGraphicsDescriptors();
     createFullscreenGraphicsPipeline();
-    createParamsBuffers();
     createWavefrontBuffers();
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(gpu, &properties);
@@ -718,12 +721,16 @@ ShowcaseApp::~ShowcaseApp()
         vkDestroyPipeline(device, rayTraceExtendRayPipeline, nullptr);
     if (rayTraceShadowRayPipeline)
         vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
-
+    if (rayTraceFinalWritePipeline)
+        vkDestroyPipeline(device, rayTraceFinalWritePipeline, nullptr);
+    if (FSRPipeline)
+        vkDestroyPipeline(device, FSRPipeline, nullptr);
     if (computePipelineLayout)
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
     
     destroyComputeDescriptors();
     destroyOffscreenTarget();
+    destroyFSRTarget();
 
     if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
     destroySceneTextures();
@@ -745,6 +752,15 @@ ShowcaseApp::~ShowcaseApp()
             vkDestroyBuffer(device, paramsBuffer[i], nullptr);
         if (paramsMemory[i])
             vkFreeMemory(device, paramsMemory[i], nullptr);
+        if (fsrConstMapped[i])
+        {
+            vkUnmapMemory(device, fsrConstMemory[i]);
+            fsrConstMapped[i] = nullptr;
+        }
+        if (fsrConstBuffer[i])
+            vkDestroyBuffer(device, fsrConstBuffer[i], nullptr);
+        if (fsrConstMemory[i])
+            vkFreeMemory(device, fsrConstMemory[i], nullptr);
         if (tlasNodesBuf[i]) vkDestroyBuffer(device, tlasNodesBuf[i], nullptr);
         if (tlasNodesMem[i]) vkFreeMemory(device, tlasNodesMem[i], nullptr);
         if (tlasInstBuf[i])  vkDestroyBuffer(device, tlasInstBuf[i], nullptr);
@@ -1541,6 +1557,8 @@ void ShowcaseApp::createSwapchain()
 
     swapChainImageFormat = surfaceFormat.format;
     swapChainExtent = extent;
+    rayTraceExtent.width  = std::max(1u, uint32_t(extent.width  * resolutionScale));
+    rayTraceExtent.height = std::max(1u, uint32_t(extent.height * resolutionScale));
 }
 
 void ShowcaseApp::recreateSwapchain()
@@ -1579,12 +1597,14 @@ void ShowcaseApp::recreateSwapchain()
         renderPass = VK_NULL_HANDLE;
     }
     destroyOffscreenTarget();
+    destroyFSRTarget();
 
     createSwapchain();
     createImageViews();
     createRenderPass();
     createFramebuffers();
     createOffscreenTargets();
+    createFSRTargets();
 
     updateComputeDescriptor();
     createWavefrontBuffers();
@@ -1595,7 +1615,7 @@ void ShowcaseApp::recreateSwapchain()
         {
             VkDescriptorImageInfo img{};
             img.sampler     = offscreenSampler;
-            img.imageView   = offscreenView[i];
+            img.imageView   = fsrView[i];
             img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     
             VkWriteDescriptorSet w{};
@@ -1707,8 +1727,8 @@ void ShowcaseApp::createOffscreenTargets()
     {
         offscreenValid[i] = false;
         VkExtent3D extent3D{};
-        extent3D.width  = swapChainExtent.width;
-        extent3D.height = swapChainExtent.height;
+        extent3D.width  = rayTraceExtent.width;
+        extent3D.height = rayTraceExtent.height;
         extent3D.depth  = 1;
 
         VkImageCreateInfo createInfo{};
@@ -1820,6 +1840,116 @@ void ShowcaseApp::createOffscreenTargets()
     }
 }
 
+void ShowcaseApp::createFSRTargets()
+{
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        fsrValid[i] = false;
+        VkExtent3D extent3D{};
+        extent3D.width  = swapChainExtent.width;
+        extent3D.height = swapChainExtent.height;
+        extent3D.depth  = 1;
+
+        VkImageCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        createInfo.imageType = VK_IMAGE_TYPE_2D;
+        createInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        createInfo.extent = extent3D;
+        createInfo.mipLevels = 1;
+        createInfo.arrayLayers = 1;
+        createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        createInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        
+        uint32_t fams[2] = { graphicsFamily, computeFamily };
+        uint32_t unique[2];
+        uint32_t uniqueCount = 0;
+
+        for (uint32_t j = 0; j < 2; ++j)
+        {
+            uint32_t f = fams[j];
+            bool seen = false;
+            for (uint32_t k = 0; k < uniqueCount; ++k)
+            {
+                if (unique[k] == f) { seen = true; break; }
+            }
+            if (!seen)
+                unique[uniqueCount++] = f;
+        }
+
+        if (uniqueCount > 1)
+        {
+            createInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = uniqueCount;
+            createInfo.pQueueFamilyIndices   = unique;
+        }
+        else
+        {
+            createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            createInfo.queueFamilyIndexCount = 0;
+            createInfo.pQueueFamilyIndices   = nullptr;
+        }
+        
+        
+        
+
+        if (vkCreateImage(device, &createInfo, nullptr, &fsrImage[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create offscreen image!");
+        VkMemoryRequirements memReq{};
+        vkGetImageMemoryRequirements(device, fsrImage[i], &memReq);
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+    
+        uint32_t memoryTypeIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+        {
+            bool typeOk = (memReq.memoryTypeBits & (1u << i)) != 0;
+            bool flagsOk = (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            if (typeOk && flagsOk)
+            {
+                memoryTypeIndex = i;
+                break;
+            }
+        }
+        if (memoryTypeIndex == UINT32_MAX)
+            throw std::runtime_error("Showcase: no suitable memory type for offscreen image!");
+        
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memReq.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+        if (vkAllocateMemory(device, &allocateInfo, nullptr, &fsrMemory[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to allocate offscreen image memory!");
+    
+        vkBindImageMemory(device, fsrImage[i], fsrMemory[i], 0);
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = fsrImage[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = createInfo.format;
+        viewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = 1;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 1;
+    
+        if (vkCreateImageView(device, &viewCreateInfo, nullptr, &fsrView[i]) != VK_SUCCESS)
+        {
+            if (fsrImage[i])  { vkDestroyImage(device, fsrImage[i], nullptr);  fsrImage[i] = VK_NULL_HANDLE; }
+            if (fsrMemory[i]) { vkFreeMemory(device, fsrMemory[i], nullptr);   fsrMemory[i] = VK_NULL_HANDLE; }
+            throw std::runtime_error("Showcase: failed to create fsr image view!");
+        }
+        fsrValid[i] = true;
+    }
+}
+
 void ShowcaseApp::createComputeDescriptors()
 {
     // ---------- SET 0: STATIC SCENE DATA ----------
@@ -1876,8 +2006,11 @@ void ShowcaseApp::createComputeDescriptors()
     //   2: tlasIdxBuf[frame]
     //   3: paramsBuffer[frame]
     //   4: offscreenImage[frame]
+    //   5: fsrImage[frame]        (upscaled output)
+    //   6: fsrConstBuffer[frame]  (FSR UBO)
+    //   7: 2d sampler
 
-    VkDescriptorSetLayoutBinding set1[5]{};
+    VkDescriptorSetLayoutBinding set1[8]{};
 
     auto initSet1 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding,
                      VkDescriptorType type, VkShaderStageFlags stages)
@@ -1894,10 +2027,13 @@ void ShowcaseApp::createComputeDescriptors()
     initSet1(set1[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS indices
     initSet1(set1[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // params
     initSet1(set1[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // offscreen image
+    initSet1(set1[5], 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // fsrImage
+    initSet1(set1[6], 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // FSR UBO
+    initSet1(set1[7], 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 
     VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
     frameLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    frameLayoutCreateInfo.bindingCount = 5;
+    frameLayoutCreateInfo.bindingCount = 8;
     frameLayoutCreateInfo.pBindings    = set1;
 
     if (vkCreateDescriptorSetLayout(device, &frameLayoutCreateInfo, nullptr, &computeFrameSetLayout) != VK_SUCCESS)
@@ -1943,26 +2079,28 @@ void ShowcaseApp::createComputeDescriptors()
         throw std::runtime_error("Showcase: failed to create compute dynamic descriptor set layout!");
 
 
-    // ---------- DESCRIPTOR POOL ----------
-    // We need:
-    //  - STORAGE_IMAGE: offscreen per frame  -> MAX_FRAMES
-    //  - STORAGE_BUFFER: static (9) + per-frame (4 * MAX_FRAMES) -> just reserve a bit more
-    //  - COMBINED_IMAGE_SAMPLER: textures array once
-
-    VkDescriptorPoolSize poolSizes[3]{};
+    VkDescriptorPoolSize poolSizes[4]{};
 
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT; // offscreen images
+    poolSizes[0].descriptorCount = 2 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[1].descriptorCount = 27 * SwapChain::MAX_FRAMES_IN_FLIGHT; // enough for static + per-frame + future dynamic
+    poolSizes[1].descriptorCount = 27 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[2].descriptorCount = maxTextures; // scene textures
+    poolSizes[2].descriptorCount = maxTextures + 1;
 
+    poolSizes[3].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[3].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+
+    VkDescriptorPoolSize uboPool{};
+    uboPool.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uboPool.descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
+
+    
     VkDescriptorPoolCreateInfo poolCreateInfo{ };
     poolCreateInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.poolSizeCount = 3;
+    poolCreateInfo.poolSizeCount = 4;
     poolCreateInfo.pPoolSizes    = poolSizes;
     poolCreateInfo.maxSets       = 1 + 2 * SwapChain::MAX_FRAMES_IN_FLIGHT; // 1 static + N frame + N dynamic
 
@@ -1970,7 +2108,6 @@ void ShowcaseApp::createComputeDescriptors()
         throw std::runtime_error("Showcase: failed to create compute descriptor pool!");
 
 
-    // ---------- ALLOCATE STATIC SET (set 0) ----------
 
     VkDescriptorSetLayout staticLayout = computeStaticSetLayout;
     VkDescriptorSetAllocateInfo allocateInfo0{ };
@@ -1983,7 +2120,6 @@ void ShowcaseApp::createComputeDescriptors()
         throw std::runtime_error("Showcase: failed to allocate compute static descriptor set!");
 
 
-    // ---------- ALLOCATE FRAME SETS (set 1) ----------
 
     std::array<VkDescriptorSetLayout, SwapChain::MAX_FRAMES_IN_FLIGHT> frameLayouts{};
     frameLayouts.fill(computeFrameSetLayout);
@@ -1998,8 +2134,6 @@ void ShowcaseApp::createComputeDescriptors()
         throw std::runtime_error("Showcase: failed to allocate compute frame descriptor sets!");
 
 
-    // ---------- ALLOCATE DYNAMIC SETS (set 2) ----------
-    // Currently empty layouts, but we allocate now so the pipeline layout can always bind 3 sets.
 
     std::array<VkDescriptorSetLayout, SwapChain::MAX_FRAMES_IN_FLIGHT> dynLayouts{};
     dynLayouts.fill(computeDynamicSetLayout);
@@ -2019,20 +2153,57 @@ void ShowcaseApp::updateComputeDescriptor()
 {
     for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
     {
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        imageInfo.imageView   = offscreenView[i];
-        imageInfo.sampler     = VK_NULL_HANDLE;
+        VkDescriptorImageInfo offscreenInfo{};
+        offscreenInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        offscreenInfo.imageView   = offscreenView[i];
+        offscreenInfo.sampler     = VK_NULL_HANDLE;
 
-        VkWriteDescriptorSet w{};
-        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet          = computeFrameSets[i];
-        w.dstBinding      = 4;
-        w.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w.descriptorCount = 1;
-        w.pImageInfo      = &imageInfo;
+        VkDescriptorImageInfo fsrInfo{};
+        fsrInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        fsrInfo.imageView   = fsrView[i];
+        fsrInfo.sampler     = VK_NULL_HANDLE;
 
-        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+        VkDescriptorBufferInfo fsrBuf{};
+        fsrBuf.buffer = fsrConstBuffer[i];
+        fsrBuf.offset = 0;
+        fsrBuf.range  = sizeof(FsrConstants);
+
+        VkDescriptorImageInfo fsrInputSamplerInfo{};
+        fsrInputSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        fsrInputSamplerInfo.imageView   = offscreenView[i];
+        fsrInputSamplerInfo.sampler     = offscreenSampler;
+
+        VkWriteDescriptorSet writes[4]{};
+
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = computeFrameSets[i];
+        writes[0].dstBinding      = 4;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].descriptorCount = 1;
+        writes[0].pImageInfo      = &offscreenInfo;
+
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = computeFrameSets[i];
+        writes[1].dstBinding      = 5;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].descriptorCount = 1;
+        writes[1].pImageInfo      = &fsrInfo;
+
+        writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet          = computeFrameSets[i];
+        writes[2].dstBinding      = 6;
+        writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[2].descriptorCount = 1;
+        writes[2].pBufferInfo     = &fsrBuf;
+
+        writes[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[3].dstSet          = computeFrameSets[i];
+        writes[3].dstBinding      = 7;
+        writes[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[3].descriptorCount = 1;
+        writes[3].pImageInfo      = &fsrInputSamplerInfo;
+
+        vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
     }
 }
 
@@ -2128,10 +2299,25 @@ void ShowcaseApp::createParamsBuffers()
     }
 }
 
+void ShowcaseApp::createFsrConstBuffers()
+{
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        createBuffer(device, physicalDevice, sizeof(FsrConstants),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        fsrConstBuffer[i], fsrConstMemory[i]);
+        
+        VkResult result = vkMapMemory(device, fsrConstMemory[i], 0, sizeof(FsrConstants), 0, &fsrConstMapped[i]);
+        if (result != VK_SUCCESS)
+            throw std::runtime_error("Map FSR buffer failed");
+    }
+}
+
+
 
 void ShowcaseApp::createComputePipeline()
 {
-    // Clean up any old pipelines/pipeline layout first
     if (computePipeline)
     {
         vkDestroyPipeline(device, computePipeline, nullptr);
@@ -2162,6 +2348,16 @@ void ShowcaseApp::createComputePipeline()
     {
         vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
         rayTraceShadowRayPipeline = VK_NULL_HANDLE;
+    }
+    if (rayTraceFinalWritePipeline)
+    {
+        vkDestroyPipeline(device, rayTraceFinalWritePipeline, nullptr);
+        rayTraceFinalWritePipeline = VK_NULL_HANDLE;
+    }
+    if (FSRPipeline)
+    {
+        vkDestroyPipeline(device, FSRPipeline, nullptr);
+        FSRPipeline = VK_NULL_HANDLE;
     }
 
     if (computePipelineLayout)
@@ -2225,11 +2421,13 @@ void ShowcaseApp::createComputePipeline()
     else
     {
         // Wavefront path: multiple kernels
-        makeComputePipeline("build/shaders/rayTraceLogic.comp.spv",     rayTraceLogicPipeline);
-        makeComputePipeline("build/shaders/rayTraceNewPath.comp.spv",   rayTraceNewPathPipeline);
-        makeComputePipeline("build/shaders/rayTraceMaterial.comp.spv",  rayTraceMaterialPipeline);
-        makeComputePipeline("build/shaders/rayTraceExtendRay.comp.spv", rayTraceExtendRayPipeline);
-        makeComputePipeline("build/shaders/rayTraceShadowRay.comp.spv", rayTraceShadowRayPipeline);
+        makeComputePipeline("build/shaders/rayTraceLogic.comp.spv",           rayTraceLogicPipeline);
+        makeComputePipeline("build/shaders/rayTraceNewPath.comp.spv",       rayTraceNewPathPipeline);
+        makeComputePipeline("build/shaders/rayTraceMaterial.comp.spv",     rayTraceMaterialPipeline);
+        makeComputePipeline("build/shaders/rayTraceExtendRay.comp.spv",   rayTraceExtendRayPipeline);
+        makeComputePipeline("build/shaders/rayTraceShadowRay.comp.spv",   rayTraceShadowRayPipeline);
+        makeComputePipeline("build/shaders/rayTraceFinalWrite.comp.spv", rayTraceFinalWritePipeline);
+        makeComputePipeline("build/shaders/FSR.comp.spv",                               FSRPipeline);
     }
 }
 
@@ -2302,8 +2500,8 @@ void ShowcaseApp::createGraphicsDescriptors()
 {
     VkSamplerCreateInfo samplerCreateInfo{};
     samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+    samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
     samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -2357,7 +2555,7 @@ void ShowcaseApp::createGraphicsDescriptors()
 
         VkDescriptorImageInfo img{};
         img.sampler = offscreenSampler;
-        img.imageView = offscreenView[i];
+        img.imageView = fsrView[i];
         img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     
         VkWriteDescriptorSet w{};
@@ -2589,6 +2787,27 @@ void ShowcaseApp::destroyOffscreenTarget()
         if (offscreenMemory[i]){vkFreeMemory(device, offscreenMemory[i], nullptr);     offscreenMemory[i] = VK_NULL_HANDLE; }
 
         offscreenValid[i] = false;
+        
+    }
+}
+
+void ShowcaseApp::destroyFSRTarget()
+{
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (!fsrValid[i])
+        {
+            if (fsrView[i]) { vkDestroyImageView(device, fsrView[i], nullptr); fsrView[i] = VK_NULL_HANDLE; }
+            if (fsrImage[i]){ vkDestroyImage(device, fsrImage[i], nullptr);    fsrImage[i] = VK_NULL_HANDLE; }
+            if (fsrMemory[i]){vkFreeMemory(device, fsrMemory[i], nullptr);     fsrMemory[i] = VK_NULL_HANDLE; }
+            continue;
+        }
+
+        if (fsrView[i]) { vkDestroyImageView(device, fsrView[i], nullptr); fsrView[i] = VK_NULL_HANDLE; }
+        if (fsrImage[i]){ vkDestroyImage(device, fsrImage[i], nullptr);    fsrImage[i] = VK_NULL_HANDLE; }
+        if (fsrMemory[i]){vkFreeMemory(device, fsrMemory[i], nullptr);     fsrMemory[i] = VK_NULL_HANDLE; }
+
+        fsrValid[i] = false;
         
     }
 }

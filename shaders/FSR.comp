@@ -1,0 +1,83 @@
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_GOOGLE_include_directive    : enable
+
+// ---------- FSR constants (matches fsrConstBuffer[i] at set 1, binding 6) ----------
+layout(set = 1, binding = 6) uniform FsrConstBuffer {
+    uvec4 Const0;
+    uvec4 Const1;
+    uvec4 Const2;
+    uvec4 Const3;
+    uvec4 Sample;   // Sample.x == 1 → output squared
+} fsr;
+
+// ---------- FSR config ----------
+#define A_GPU  1
+#define A_GLSL 1
+
+// Use the float (slow fallback) path: no half-precision
+#define SAMPLE_SLOW_FALLBACK 1
+#define SAMPLE_EASU          1
+
+#include "../external/ffx_a.h"
+
+// Input: low-res raytraced image as combined image sampler
+// C++: set 1, binding 7 is VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+layout(set = 1, binding = 7) uniform sampler2D InputTexture;
+
+// Output: upscaled FSR image (fsrImage)
+// C++: set 1, binding 5 is VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_FORMAT_R16G16B16A16_SFLOAT
+layout(set = 1, binding = 5, rgba16f) uniform writeonly image2D OutputTexture;
+
+// Tell FSR we’re using the float-precision EASU path
+#define FSR_EASU_F 1
+
+// textureGather wrappers using combined sampler
+AF4 FsrEasuRF(AF2 p) { return textureGather(InputTexture, p, 0); }
+AF4 FsrEasuGF(AF2 p) { return textureGather(InputTexture, p, 1); }
+AF4 FsrEasuBF(AF2 p) { return textureGather(InputTexture, p, 2); }
+
+#include "../external/ffx_fsr1.h"
+
+// ---------- Main FSR filter ----------
+// void CurrFilter(AU2 pos)
+// {
+//     AF3 c;
+//     // FSR does all the math using the Const0..Const3 you fill from C++
+//     FsrEasuF(c, pos, fsr.Const0, fsr.Const1, fsr.Const2, fsr.Const3);
+
+//     if (fsr.Sample.x == 1u)
+//         c *= c;
+
+//     imageStore(OutputTexture, ASU2(pos), AF4(c, 1.0));
+// }
+
+void CurrFilter(AU2 pos)
+{
+    // Simple nearest-ish upsample, ignores FSR constants completely
+    // Just map output pixel to [0,1] based on *output* size coming from gl_NumWorkGroups etc.
+
+    // Output size in pixels is 16x workgroups because of ARmp8x8 pattern.
+    // Compute an approximate normalized UV:
+    vec2 outSize = vec2(fsr.Const1.xy); // if you packed renderSize or displaySize there
+    if (outSize.x <= 0.0 || outSize.y <= 0.0)
+        outSize = vec2(1.0); // avoid div by zero, just to be safe
+
+    vec2 uv = (vec2(pos) + 0.5) / outSize;
+    vec3 raw = texture(InputTexture, uv).rgb;
+
+    imageStore(OutputTexture, ASU2(pos), vec4(raw, 1.0));
+}
+
+layout(local_size_x = 64) in;
+void main()
+{
+    // Same 8x8 swizzle pattern as AMD sample
+    AU2 gxy = ARmp8x8(gl_LocalInvocationID.x)
+            + AU2(gl_WorkGroupID.x << 4u, gl_WorkGroupID.y << 4u);
+
+    CurrFilter(gxy);
+    gxy.x += 8u; CurrFilter(gxy);
+    gxy.y += 8u; CurrFilter(gxy);
+    gxy.x -= 8u; CurrFilter(gxy);
+}

@@ -1,0 +1,71 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 4, rgba16f) uniform image2D outImage;
+
+
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  flags;
+} Params;
+
+struct PixelStats {
+    uvec4 sum;
+    uvec4 sumSq;
+    uint sampleCount;
+    uint flags;
+};
+
+layout(set = 2, binding = 10, std430) buffer PixelStatsBuf {
+    PixelStats pixelStats[];
+};
+
+
+vec3 sampleCountToColor(uint n, float maxVisSamples)
+{
+    float nf = float(n);
+
+    float t = (maxVisSamples > 0.0)
+        ? log(1.0 + nf) / log(1.0 + maxVisSamples)
+        : 0.0;
+
+    t = clamp(t, 0.0, 1.0);
+
+    vec3 low  = vec3(0.0, 0.0, 0.2);
+    vec3 high = vec3(1.0, 0.0, 0.0);
+
+    return mix(low, high, t);
+}
+
+void main()
+{
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
+        return;
+
+    uint pixelIdx = gid.x + gid.y * Params.imageSize.x;
+    PixelStats ps = pixelStats[pixelIdx];
+
+    uint n = ps.sampleCount;
+    vec3 color = vec3(0.0);
+
+    if (n > 0u)
+    {
+        float invN = 1.0 / float(n);
+        float sumR = uintBitsToFloat(ps.sum.x);
+        float sumG = uintBitsToFloat(ps.sum.y);
+        float sumB = uintBitsToFloat(ps.sum.z);
+        color = vec3(sumR, sumG, sumB) * invN;
+    }
+
+    // const float MAX_VIS_SAMPLES = 100.0; 
+
+    // vec3 heatColor = sampleCountToColor(n, MAX_VIS_SAMPLES);
+
+    // imageStore(outImage, ivec2(gid), vec4(heatColor, 1.0));
+
+    imageStore(outImage, ivec2(gid), vec4(color, 1.0));
+}
