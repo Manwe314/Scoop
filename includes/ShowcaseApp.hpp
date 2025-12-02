@@ -20,18 +20,46 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <initializer_list>
-
+#include <NRD.h>
+#include <NRDDescs.h>
 
 
 #define VALIDATE true
 #define FPS true
 static constexpr bool SimpleRayTrace = false;
 
+
+struct NrdFrameImage
+{
+    VkImage        outputImage = VK_NULL_HANDLE;
+    VkDeviceMemory outputMemory = VK_NULL_HANDLE;
+    VkImageView    outputView = VK_NULL_HANDLE;
+    bool           valid = false;
+};
+
+struct NrdTexture
+{
+    VkImage        image  = VK_NULL_HANDLE;
+    VkImageView    view   = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t       width  = 0;
+    uint32_t       height = 0;
+    VkFormat       format = VK_FORMAT_UNDEFINED;
+};
+
+struct NrdPipeline
+{
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const nrd::PipelineDesc* nrdPipelineDesc = nullptr;
+};
+
+
 struct FsrConstants {
     uint32_t con0[4];
     uint32_t con1[4];
     uint32_t con2[4];
     uint32_t con3[4];
+    uint32_t conSharp[4];
 };
 
 struct GpuTexture {
@@ -190,6 +218,31 @@ private:
     std::vector<VkFence>     imagesInFlight;
     VkFence imageAcquiredFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
+    nrd::Instance*            nrdInstance;
+    nrd::CommonSettings       nrdCommonSettings{};
+    nrd::RelaxSettings        relaxSettings{};
+    const nrd::InstanceDesc*  nrdInstDesc            = nullptr;
+    const nrd::LibraryDesc*   nrdLibDesc             = nullptr;
+    nrd::Identifier           nrdRelaxId             = 1;
+    nrd::Denoiser             nrdDenoiser            = nrd::Denoiser::RELAX_DIFFUSE_SPECULAR;
+    uint16_t                  nrdResourceSizePrev[2] = {0, 0};
+    uint16_t                  nrdRectSizePrev[2]     = {0, 0};
+    uint32_t                  nrdFrameIndex          = 0;
+    VkDescriptorSetLayout     nrdSetLayout           = VK_NULL_HANDLE;
+    VkPipelineLayout          nrdPipelineLayout      = VK_NULL_HANDLE;
+    VkDescriptorPool          nrdDescriptorPool      = VK_NULL_HANDLE;
+    VkDescriptorSet           nrdSet                 = VK_NULL_HANDLE;
+    VkBuffer                  nrdConstantBuffer      = VK_NULL_HANDLE;
+    VkDeviceMemory            nrdConstantMemory      = VK_NULL_HANDLE;
+    void*                     nrdConstantMapped      = nullptr;
+
+    
+    std::vector<NrdPipeline> nrdPipelines;
+    std::vector<NrdTexture> nrdPermanentTextures;
+    std::vector<NrdTexture> nrdTransientTextures;
+
+    NrdFrameImage nrdFrameImages[SwapChain::MAX_FRAMES_IN_FLIGHT];
+
 
     uint32_t currentFrame = 0;
     VkSampler textureSampler = VK_NULL_HANDLE;
@@ -226,6 +279,7 @@ private:
     VkPipeline rayTraceShadowRayPipeline  = VK_NULL_HANDLE;
     VkPipeline rayTraceFinalWritePipeline = VK_NULL_HANDLE;
     VkPipeline FSRPipeline                = VK_NULL_HANDLE;
+    VkPipeline FSRSharpenPipeline         = VK_NULL_HANDLE; 
 
     VkRenderPass          renderPass = VK_NULL_HANDLE;
 
@@ -406,7 +460,11 @@ private:
     void frameTLASPrepare(uint32_t frameIndex);
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
+    void createNrdTexture2D(VkFormat format, uint32_t width, uint32_t height, NrdTexture& out);
     void makeEmissionTriangles();
+    void createNrdConstantBuffer();
+    void updateNrdDescriptorSets();
+    void initNrdDescriptorsAndPipelines();
     void createOrResizeWavefrontBuffers();
     void createLogicalDevice();
     void createSwapchain();
@@ -415,7 +473,9 @@ private:
     void createSyncObjects();
     void createOffscreenTargets();
     void createFSRTargets();
+    void createNrdTargets();
     void destroyOffscreenTarget();
+    void destroyNrdTargets();
     void createComputeDescriptors();
     void updateComputeDescriptor();
     void destroyComputeDescriptors();
@@ -444,7 +504,12 @@ private:
     void uploadTextureImages();
     void createWavefrontBuffers();
     void destroyWavefrontBuffers();
+    void initNRDTextures();
     void updateFsrConstants(uint32_t frameIndex);
+    void dispatchNrd(uint32_t frameIndex, VkCommandBuffer cmd);
+    void updateNrdDescriptorsForDispatch(uint32_t frameIndex, const nrd::DispatchDesc& dispatch);
+    VkImageView getNrdImageViewForResource(const nrd::ResourceDesc& r, uint32_t frameIndex);
+    VkFormat mapNrdFormatToVk(nrd::Format fmt);
     uint32_t getMaxPaths() const;
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
     SwapChainSupportDetails querrySwapchaindetails(VkPhysicalDevice device);
@@ -455,6 +520,15 @@ private:
     void FlattenSceneTexturesAndRemapMaterials();
     GpuTexture createTextureFromImageRGBA8(const ImageRGBA8& img, VkDevice device, VkPhysicalDevice phys, VkFormat format, bool generateMips);
     
+    void initNRD();
+    void destroyNRD();
+    void resizeNRD();
+    void runNRD(VkCommandBuffer cmd, uint32_t frameIndex);
+    void updateNRDCommonSettings();
+
+
+
+
     inline VkSwapchainKHR validOldSwapchain() const { return swapChain != VK_NULL_HANDLE ? swapChain : VK_NULL_HANDLE; }
 
     inline ParamsGPU makeDefaultParams(uint32_t width = 1, uint32_t height = 1, uint32_t rootIndex = 0, float time = 0.0f, const glm::vec3& camPos = glm::vec3(0.0f))

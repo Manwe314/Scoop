@@ -204,7 +204,7 @@ const uint SPP_MASK   = 0xFFFF0000u;
 const vec3 LUM_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
 
 const uint PIXEL_FLAG_IN_HIGHVAR = 1u << 0;
-const uint  MIN_SAMPLES_FOR_ADAPT = 1u;
+const uint  MIN_SAMPLES_FOR_ADAPT = 3u;
 const float ERROR_THRESHOLD       = 0.25; 
 const uint MAX_SPP_PER_PATH = 4u;
 
@@ -609,6 +609,15 @@ void main()
     if (terminate)
     {
         radianceStates[pathId] = rad;
+        float L = dot(rad.radiance.xyz, LUM_WEIGHTS);
+        uint n = pixelStats[pathHeader.pixelIndex].sampleCount;
+        if (n > 0u)
+        {
+            float meanLum = uintBitsToFloat(pixelStats[pathHeader.pixelIndex].sum.w) / float(n);
+            float maxLum  = meanLum * 15;
+            if (L > maxLum)
+                rad.radiance.xyz *= maxLum / max(L, 1e-6);
+        }
         accumulateSampleForPixel(pathHeader.pixelIndex, rad.radiance.xyz);
         maybeMarkPixelHighVar(pathHeader.pixelIndex);
         uint packed = pathHeader.depth;

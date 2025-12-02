@@ -25,6 +25,23 @@ FetchContent_Declare(
 set(GLM_TEST_ENABLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
+FetchContent_Declare(
+  nrd
+  GIT_REPOSITORY https://github.com/NVIDIA-RTX/NRD.git
+  GIT_TAG v4.16.1
+)
+
+set(NRD_STATIC_LIBRARY        ON  CACHE BOOL "" FORCE)
+set(NRD_EMBEDS_SPIRV_SHADERS  ON  CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nrd)
+
+if (TARGET NRD)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NRD PRIVATE -Wno-unused-parameter)
+    endif()
+endif()
+
+
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/nativefiledialog-extended)
 
 if(NOT DEFINED ENV{VULKAN_SDK})
@@ -86,7 +103,7 @@ target_include_directories(scoop
     "${CMAKE_SOURCE_DIR}/external"
 )
 
-target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm nfd)
+target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm nfd NRD)
 
 
 if(UNIX AND NOT APPLE)

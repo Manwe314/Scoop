@@ -2,41 +2,47 @@
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_GOOGLE_include_directive    : enable
 
-// ---------- FSR constants (matches fsrConstBuffer[i] at set 1, binding 6) ----------
-layout(set = 1, binding = 6) uniform FsrConstBuffer {
+layout (set = 1, binding = 6) uniform FsrConstBuffer {
     uvec4 Const0;
     uvec4 Const1;
     uvec4 Const2;
     uvec4 Const3;
-    uvec4 conSharp; 
+    uvec4 conSharp;
 } fsr;
 
-// ---------- FSR config ----------
 #define A_GPU  1
 #define A_GLSL 1
 
 #define SAMPLE_SLOW_FALLBACK 1
-#define SAMPLE_EASU          1
+#define SAMPLE_RCAS          1
 
 #include "../external/ffx_a.h"
 
-layout(set = 1, binding = 7) uniform sampler2D InputTexture;
+layout(set = 1, binding = 8) uniform sampler2D UpscaledTexture;
+
 layout(set = 1, binding = 5, rgba16f) uniform writeonly image2D OutputTexture;
 
-#define FSR_EASU_F 1
+#define FSR_RCAS_F 1
 
-AF4 FsrEasuRF(AF2 p) { return textureGather(InputTexture, p, 0); }
-AF4 FsrEasuGF(AF2 p) { return textureGather(InputTexture, p, 1); }
-AF4 FsrEasuBF(AF2 p) { return textureGather(InputTexture, p, 2); }
+AF4 FsrRcasLoadF(ASU2 p)
+{
+    ivec2 ip = ivec2(p);
+    vec2  dim = vec2(textureSize(UpscaledTexture, 0));
+    vec2  uv = (vec2(ip) + 0.5) / dim;
+
+    return texture(UpscaledTexture, uv);
+}
+
+void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 
 #include "../external/ffx_fsr1.h"
 
 void CurrFilter(AU2 pos)
 {
-    AF3 c;
-    FsrEasuF(c, pos, fsr.Const0, fsr.Const1, fsr.Const2, fsr.Const3);
+    AF1 r, g, b;
+    FsrRcasF(r, g, b, pos, fsr.conSharp);
 
-    imageStore(OutputTexture, ASU2(pos), AF4(c, 1.0));
+    imageStore(OutputTexture, ivec2(pos), vec4(r, g, b, 1.0));
 }
 
 layout(local_size_x = 64, local_size_y = 1) in;
