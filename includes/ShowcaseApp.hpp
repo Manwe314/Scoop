@@ -20,21 +20,35 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <initializer_list>
+#include <NRI.h>
+#include <NRIDescs.h>
+#include <Extensions/NRIRayTracing.h>
+
+#include <Extensions/NRIHelper.h>
+#include <Extensions/NRIWrapperVK.h>
+
+// NRD
 #include <NRD.h>
 #include <NRDDescs.h>
+#include <NRDIntegration.h>
 
 
 #define VALIDATE true
-#define FPS true
+#define FPS false
 static constexpr bool SimpleRayTrace = false;
 
 
 struct NrdFrameImage
 {
-    VkImage        outputImage = VK_NULL_HANDLE;
-    VkDeviceMemory outputMemory = VK_NULL_HANDLE;
-    VkImageView    outputView = VK_NULL_HANDLE;
-    bool           valid = false;
+    VkImage        diffImage  = VK_NULL_HANDLE;
+    VkDeviceMemory diffMemory = VK_NULL_HANDLE;
+    VkImageView    diffView   = VK_NULL_HANDLE;
+
+    VkImage        specImage  = VK_NULL_HANDLE;
+    VkDeviceMemory specMemory = VK_NULL_HANDLE;
+    VkImageView    specView   = VK_NULL_HANDLE;
+
+    bool           valid      = false;
 };
 
 struct NrdTexture
@@ -45,6 +59,17 @@ struct NrdTexture
     uint32_t       width  = 0;
     uint32_t       height = 0;
     VkFormat       format = VK_FORMAT_UNDEFINED;
+};
+
+struct NrdInputFrame
+{
+    NrdTexture diffRadianceHit;
+    NrdTexture specRadianceHit;
+    NrdTexture normalRoughness;
+    NrdTexture viewZ;
+    NrdTexture motionVec;
+
+    bool valid = false;
 };
 
 struct NrdPipeline
@@ -228,13 +253,12 @@ private:
     uint16_t                  nrdResourceSizePrev[2] = {0, 0};
     uint16_t                  nrdRectSizePrev[2]     = {0, 0};
     uint32_t                  nrdFrameIndex          = 0;
-    VkDescriptorSetLayout     nrdSetLayout           = VK_NULL_HANDLE;
-    VkPipelineLayout          nrdPipelineLayout      = VK_NULL_HANDLE;
-    VkDescriptorPool          nrdDescriptorPool      = VK_NULL_HANDLE;
-    VkDescriptorSet           nrdSet                 = VK_NULL_HANDLE;
-    VkBuffer                  nrdConstantBuffer      = VK_NULL_HANDLE;
-    VkDeviceMemory            nrdConstantMemory      = VK_NULL_HANDLE;
-    void*                     nrdConstantMapped      = nullptr;
+    
+    nrd::Integration nrdIntegration;
+    nrd::InstanceCreationDesc nrdInstanceCreationDesc{};
+    std::array<NrdInputFrame, SwapChain::MAX_FRAMES_IN_FLIGHT> nrdInputs;
+
+
 
     
     std::vector<NrdPipeline> nrdPipelines;
@@ -408,7 +432,7 @@ private:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkSurfaceKHR surface;
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
-    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME};
+    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
 
     FrameUpload frameUpload[SwapChain::MAX_FRAMES_IN_FLIGHT];
     VkFence computeFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -460,11 +484,8 @@ private:
     void frameTLASPrepare(uint32_t frameIndex);
     void setupDebugMessenger();
     QueueFamiliyIndies findQueueFamilies(VkPhysicalDevice device);
-    void createNrdTexture2D(VkFormat format, uint32_t width, uint32_t height, NrdTexture& out);
     void makeEmissionTriangles();
-    void createNrdConstantBuffer();
-    void updateNrdDescriptorSets();
-    void initNrdDescriptorsAndPipelines();
+    void createNrdInputTargets();
     void createOrResizeWavefrontBuffers();
     void createLogicalDevice();
     void createSwapchain();
@@ -504,11 +525,8 @@ private:
     void uploadTextureImages();
     void createWavefrontBuffers();
     void destroyWavefrontBuffers();
-    void initNRDTextures();
     void updateFsrConstants(uint32_t frameIndex);
     void dispatchNrd(uint32_t frameIndex, VkCommandBuffer cmd);
-    void updateNrdDescriptorsForDispatch(uint32_t frameIndex, const nrd::DispatchDesc& dispatch);
-    VkImageView getNrdImageViewForResource(const nrd::ResourceDesc& r, uint32_t frameIndex);
     VkFormat mapNrdFormatToVk(nrd::Format fmt);
     uint32_t getMaxPaths() const;
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, VkPhysicalDevice phys);
@@ -522,7 +540,6 @@ private:
     
     void initNRD();
     void destroyNRD();
-    void resizeNRD();
     void runNRD(VkCommandBuffer cmd, uint32_t frameIndex);
     void updateNRDCommonSettings();
 

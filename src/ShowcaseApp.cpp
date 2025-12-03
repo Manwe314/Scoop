@@ -749,9 +749,7 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     createFSRTargets();
     createNrdTargets();
     initNRD();
-    initNrdDescriptorsAndPipelines();
-    createNrdConstantBuffer();
-    initNRDTextures();
+    createNrdInputTargets();
     createParamsBuffers();
     createFsrConstBuffers();
     createComputeDescriptors();
@@ -1299,13 +1297,13 @@ void ShowcaseApp::createLogicalDevice()
 
     const uint32_t gfxFam = indices.graphicsFamily.value();
     const uint32_t cmpFam = indices.computeFamily.value();
-
     const uint32_t prsFam = indices.presentFamily.value();
+
     bool presentSharesGraphics = (prsFam == gfxFam);
 
     uint32_t xferFam = cmpFam;
-    bool transferIsDistinct = false;
-    bool canSplitComputeXfer = false;
+    bool transferIsDistinct   = false;
+    bool canSplitComputeXfer  = false;
 
     if (indices.transferFamily.has_value())
     {
@@ -1323,18 +1321,22 @@ void ShowcaseApp::createLogicalDevice()
     std::unordered_map<uint32_t, uint32_t> requested;
     auto req_at_least = [&](uint32_t fam, uint32_t n)
     {
-        uint32_t &cur = requested[fam];
+        uint32_t& cur = requested[fam];
         if (cur < n)
             cur = n;
     };
 
+    // graphics
     req_at_least(gfxFam, 1);
 
+    // present
     if (!presentSharesGraphics)
         req_at_least(prsFam, 1);
 
+    // compute
     req_at_least(cmpFam, 1);
 
+    // transfer
     if (transferIsDistinct)
         req_at_least(xferFam, 1);
     else if (canSplitComputeXfer)
@@ -1342,9 +1344,10 @@ void ShowcaseApp::createLogicalDevice()
     else
         xferFam = cmpFam;
 
-    for (auto &kv : requested)
+    // clamp requested queue counts to what the family actually has
+    for (auto& kv : requested)
     {
-        uint32_t fam = kv.first;
+        uint32_t fam  = kv.first;
         uint32_t want = kv.second;
         uint32_t have = props[fam].queueCount;
         if (want > have)
@@ -1359,48 +1362,78 @@ void ShowcaseApp::createLogicalDevice()
     }
 
     std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-    std::vector<std::vector<float>> priorities; priorities.reserve(requested.size());
+    std::vector<std::vector<float>> priorities;
+    priorities.reserve(requested.size());
 
-    for (auto &kv : requested)
+    for (auto& kv : requested)
     {
         uint32_t fam = kv.first;
         uint32_t cnt = kv.second;
-        if (cnt == 0) continue;
+        if (cnt == 0)
+            continue;
 
         priorities.emplace_back(cnt, 1.0f);
+
         VkDeviceQueueCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         qci.queueFamilyIndex = fam;
-        qci.queueCount = cnt;
+        qci.queueCount       = cnt;
         qci.pQueuePriorities = priorities.back().data();
+
         queueCreateInfos.push_back(qci);
     }
 
-    VkPhysicalDeviceDescriptorIndexingFeaturesEXT descIdxFeat{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT };
+    // ---- Feature chain (descriptor indexing + buffer device address) ----
+
+    // Descriptor indexing features (needed by NRD integration)
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT descIdxFeat{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT
+    };
     descIdxFeat.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     descIdxFeat.runtimeDescriptorArray                    = VK_TRUE;
+    descIdxFeat.descriptorBindingPartiallyBound           = VK_TRUE;  // <-- needed for PARTIALLY_BOUND
 
-    VkPhysicalDeviceFeatures2 deviceFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    deviceFeatures.features.samplerAnisotropy = VK_TRUE;
+    // Buffer device address (needed because NRI/NRD uses buffer device addresses)
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeat{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    };
+    bdaFeat.bufferDeviceAddress = VK_TRUE;
+
+    // Base features2
+    VkPhysicalDeviceFeatures2 deviceFeatures{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+    };
+    deviceFeatures.features.samplerAnisotropy   = VK_TRUE;
+    deviceFeatures.features.robustBufferAccess  = VK_TRUE;
+
+    // Chain: deviceFeatures -> descIdxFeat -> bdaFeat
     deviceFeatures.pNext = &descIdxFeat;
+    descIdxFeat.pNext    = &bdaFeat;
 
-    VkDeviceCreateInfo createInfo{ };
-    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
-    createInfo.pQueueCreateInfos    = queueCreateInfos.data();
-    createInfo.pNext     = &deviceFeatures;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    // ---- Device creation ----
+
+    VkDeviceCreateInfo createInfo{};
+    createInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.queueCreateInfoCount    = static_cast<uint32_t>(queueCreateInfos.size());
+    createInfo.pQueueCreateInfos       = queueCreateInfos.data();
+    createInfo.pNext                   = &deviceFeatures;
+    createInfo.enabledExtensionCount   = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-    if (VALIDATE) {
+
+    if (VALIDATE)
+    {
         createInfo.enabledLayerCount   = static_cast<uint32_t>(validationLayers.size());
         createInfo.ppEnabledLayerNames = validationLayers.data();
-    } else {
+    }
+    else
+    {
         createInfo.enabledLayerCount = 0;
     }
-    deviceFeatures.features.robustBufferAccess = VK_TRUE;
+
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
         throw std::runtime_error("Showcase App: failed to make logical device");
 
+    // Fetch queues
     vkGetDeviceQueue(device, gfxFam, 0, &graphicsQueue);
 
     if (presentSharesGraphics)
@@ -1417,12 +1450,13 @@ void ShowcaseApp::createLogicalDevice()
     else
         transferQueue = computeQueue;
 
-    graphicsFamily = gfxFam;
-    presentFamily  = prsFam;
-    computeFamily  = cmpFam;
-    transferFamily = xferFam;
+    graphicsFamily      = gfxFam;
+    presentFamily       = prsFam;
+    computeFamily       = cmpFam;
+    transferFamily      = xferFam;
     hasDedicatedTransfer = transferIsDistinct && indices.hasDedicatedTransfer;
 }
+
 
 QueueFamiliyIndies ShowcaseApp::findQueueFamilies(VkPhysicalDevice device)
 {
@@ -1685,7 +1719,7 @@ void ShowcaseApp::recreateSwapchain()
     createOffscreenTargets();
     createFSRTargets();
     createNrdTargets();
-    initNRDTextures();
+    createNrdInputTargets();
 
     updateComputeDescriptor();
     createWavefrontBuffers();
@@ -2032,7 +2066,16 @@ void ShowcaseApp::createNrdTargets()
 {
     for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
-        auto &frame = nrdFrameImages[i];
+        auto& frame = nrdFrameImages[i];
+
+        // Destroy old stuff if this is a resize / re-init
+        if (frame.diffView)   { vkDestroyImageView(device, frame.diffView,  nullptr); frame.diffView  = VK_NULL_HANDLE; }
+        if (frame.diffImage)  { vkDestroyImage(device,     frame.diffImage, nullptr); frame.diffImage = VK_NULL_HANDLE; }
+        if (frame.diffMemory) { vkFreeMemory(device,       frame.diffMemory,nullptr); frame.diffMemory= VK_NULL_HANDLE; }
+
+        if (frame.specView)   { vkDestroyImageView(device, frame.specView,  nullptr); frame.specView  = VK_NULL_HANDLE; }
+        if (frame.specImage)  { vkDestroyImage(device,     frame.specImage, nullptr); frame.specImage = VK_NULL_HANDLE; }
+        if (frame.specMemory) { vkFreeMemory(device,       frame.specMemory,nullptr); frame.specMemory= VK_NULL_HANDLE; }
 
         frame.valid = false;
 
@@ -2041,16 +2084,226 @@ void ShowcaseApp::createNrdTargets()
         extent3D.height = rayTraceExtent.height;
         extent3D.depth  = 1;
 
-        VkImageCreateInfo ci{ };
-        ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ci.imageType = VK_IMAGE_TYPE_2D;
-        ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-        ci.extent = extent3D;
-        ci.mipLevels = 1;
-        ci.arrayLayers = 1;
-        ci.samples = VK_SAMPLE_COUNT_1_BIT;
-        ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ci.usage = VK_IMAGE_USAGE_STORAGE_BIT  | VK_IMAGE_USAGE_SAMPLED_BIT;
+        VkImageCreateInfo ci{};
+        ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ci.imageType     = VK_IMAGE_TYPE_2D;
+        ci.format        = VK_FORMAT_R16G16B16A16_SFLOAT;   // RGBA16F: radiance + hitdist
+        ci.extent        = extent3D;
+        ci.mipLevels     = 1;
+        ci.arrayLayers   = 1;
+        ci.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        // Queue sharing like before (graphics + compute)
+        uint32_t fams[2]       = { graphicsFamily, computeFamily };
+        uint32_t unique[2];
+        uint32_t uniqueCount   = 0;
+        for (uint32_t j = 0; j < 2; ++j)
+        {
+            uint32_t f = fams[j];
+            bool seen = false;
+            for (uint32_t k = 0; k < uniqueCount; ++k)
+            {
+                if (unique[k] == f) { seen = true; break; }
+            }
+            if (!seen)
+                unique[uniqueCount++] = f;
+        }
+
+        if (uniqueCount > 1)
+        {
+            ci.sharingMode           = VK_SHARING_MODE_CONCURRENT;
+            ci.queueFamilyIndexCount = uniqueCount;
+            ci.pQueueFamilyIndices   = unique;
+        }
+        else
+        {
+            ci.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+            ci.queueFamilyIndexCount = 0;
+            ci.pQueueFamilyIndices   = nullptr;
+        }
+
+        auto allocateImage = [&](VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+        {
+            // Create image
+            if (vkCreateImage(device, &ci, nullptr, &image) != VK_SUCCESS)
+                throw std::runtime_error("Showcase: failed to create NRD output image!");
+
+            VkMemoryRequirements memReq{};
+            vkGetImageMemoryRequirements(device, image, &memReq);
+
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+            uint32_t memoryTypeIndex = UINT32_MAX;
+            for (uint32_t m = 0; m < memProps.memoryTypeCount; ++m)
+            {
+                bool typeOk  = (memReq.memoryTypeBits & (1u << m)) != 0;
+                bool flagsOk = (memProps.memoryTypes[m].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                if (typeOk && flagsOk)
+                {
+                    memoryTypeIndex = m;
+                    break;
+                }
+            }
+            if (memoryTypeIndex == UINT32_MAX)
+                throw std::runtime_error("Showcase: no suitable memory type for NRD output image!");
+
+            VkMemoryAllocateInfo mai{};
+            mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            mai.allocationSize  = memReq.size;
+            mai.memoryTypeIndex = memoryTypeIndex;
+
+            if (vkAllocateMemory(device, &mai, nullptr, &memory) != VK_SUCCESS)
+                throw std::runtime_error("Showcase: failed to allocate NRD output image memory!");
+
+            vkBindImageMemory(device, image, memory, 0);
+
+            // View
+            VkImageViewCreateInfo viewCI{};
+            viewCI.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewCI.image    = image;
+            viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewCI.format   = ci.format;
+            viewCI.components = {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY
+            };
+            viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewCI.subresourceRange.baseMipLevel   = 0;
+            viewCI.subresourceRange.levelCount     = 1;
+            viewCI.subresourceRange.baseArrayLayer = 0;
+            viewCI.subresourceRange.layerCount     = 1;
+
+            if (vkCreateImageView(device, &viewCI, nullptr, &view) != VK_SUCCESS)
+            {
+                vkDestroyImage(device, image, nullptr);
+                vkFreeMemory(device, memory, nullptr);
+                image  = VK_NULL_HANDLE;
+                memory = VK_NULL_HANDLE;
+                throw std::runtime_error("Showcase: failed to create NRD output image view!");
+            }
+        };
+
+        // Create diffuse + spec images
+        allocateImage(frame.diffImage, frame.diffMemory, frame.diffView);
+        allocateImage(frame.specImage, frame.specMemory, frame.specView);
+
+        frame.valid = true;
+    }
+}
+
+
+void ShowcaseApp::initNRD()
+{
+    nrd::IntegrationCreationDesc integDesc{};
+    std::strncpy(integDesc.name, "NRD", 3);
+
+    integDesc.resourceWidth  = static_cast<uint16_t>(rayTraceExtent.width);
+    integDesc.resourceHeight = static_cast<uint16_t>(rayTraceExtent.height);
+
+    
+    integDesc.queuedFrameNum = static_cast<uint8_t>(SwapChain::MAX_FRAMES_IN_FLIGHT);
+
+    
+    integDesc.enableWholeLifetimeDescriptorCaching = true;
+    integDesc.autoWaitForIdle = true;
+    integDesc.demoteFloat32to16 = false;
+    integDesc.promoteFloat16to32 = true;
+
+    static const nrd::DenoiserDesc denoiserDescs[] =
+    {
+        { nrdRelaxId, nrd::Denoiser::RELAX_DIFFUSE_SPECULAR }
+    };
+    nrd::InstanceCreationDesc instCreateDesc{};
+    instCreateDesc.denoisersNum = 1;
+    instCreateDesc.denoisers    = denoiserDescs;
+    
+    nri::DeviceCreationVKDesc deviceVKDesc{};
+    const nrd::LibraryDesc* libDesc = nrd::GetLibraryDesc();
+    deviceVKDesc.vkBindingOffsets.samplerOffset               = libDesc->spirvBindingOffsets.samplerOffset;
+    deviceVKDesc.vkBindingOffsets.textureOffset               = libDesc->spirvBindingOffsets.textureOffset;
+    deviceVKDesc.vkBindingOffsets.constantBufferOffset        = libDesc->spirvBindingOffsets.constantBufferOffset;
+    deviceVKDesc.vkBindingOffsets.storageTextureAndBufferOffset =
+        libDesc->spirvBindingOffsets.storageTextureAndBufferOffset;
+
+    // --- Extensions: tell NRI what we actually enabled on the Vulkan device ---
+    deviceVKDesc.vkExtensions.deviceExtensions      = deviceExtensions.data();
+    deviceVKDesc.vkExtensions.deviceExtensionNum    = static_cast<uint32_t>(deviceExtensions.size());
+    deviceVKDesc.vkInstance       = instance;
+    deviceVKDesc.vkPhysicalDevice = physicalDevice;
+    deviceVKDesc.vkDevice         = device;
+    std::array<nri::QueueFamilyVKDesc, 2> queueFamilies{};
+    
+    queueFamilies[0].queueNum    = 1;
+    queueFamilies[0].queueType   = nri::QueueType::GRAPHICS;
+    queueFamilies[0].familyIndex = graphicsFamily;
+
+    queueFamilies[1].queueNum    = 1;
+    queueFamilies[1].queueType   = nri::QueueType::COMPUTE;
+    queueFamilies[1].familyIndex = computeFamily;
+
+    deviceVKDesc.queueFamilies  = queueFamilies.data();
+    deviceVKDesc.queueFamilyNum = 2;
+
+    deviceVKDesc.minorVersion = 3;
+
+    deviceVKDesc.enableNRIValidation            = true;
+    deviceVKDesc.enableMemoryZeroInitialization = false;
+
+    nrd::Result r = nrdIntegration.RecreateVK(integDesc, instCreateDesc, deviceVKDesc);
+    if (r != nrd::Result::SUCCESS)
+        throw std::runtime_error("Showcase: Failed to create NRD Integration (RecreateVK)");
+}
+
+void ShowcaseApp::createNrdInputTargets()
+{
+    uint32_t w = rayTraceExtent.width;
+    uint32_t h = rayTraceExtent.height;
+
+    auto destroyTex = [&](NrdTexture& t)
+    {
+        if (t.view)   { vkDestroyImageView(device, t.view, nullptr);  t.view = VK_NULL_HANDLE; }
+        if (t.image)  { vkDestroyImage(device, t.image, nullptr);     t.image = VK_NULL_HANDLE; }
+        if (t.memory) { vkFreeMemory(device, t.memory, nullptr);      t.memory = VK_NULL_HANDLE; }
+        t.format = VK_FORMAT_UNDEFINED;
+    };
+
+    // Destroy old if any
+    for (auto& frame : nrdInputs)
+    {
+        destroyTex(frame.diffRadianceHit);
+        destroyTex(frame.specRadianceHit);
+        destroyTex(frame.normalRoughness);
+        destroyTex(frame.viewZ);
+        destroyTex(frame.motionVec);
+        frame.valid = false;
+    }
+
+    // Helper: create and allocate a 2D texture for NRD input
+    auto createTex = [&](VkFormat fmt, uint32_t w, uint32_t h, NrdTexture& out)
+    {
+        out.width  = w;
+        out.height = h;
+        out.format = fmt;
+
+        VkImageCreateInfo ci{};
+        ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ci.imageType     = VK_IMAGE_TYPE_2D;
+        ci.format        = fmt;
+        ci.extent        = { w, h, 1 };
+        ci.mipLevels     = 1;
+        ci.arrayLayers   = 1;
+        ci.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage         = VK_IMAGE_USAGE_STORAGE_BIT | 
+                           VK_IMAGE_USAGE_SAMPLED_BIT |
+                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         uint32_t fams[2] = { graphicsFamily, computeFamily };
@@ -2081,44 +2334,44 @@ void ShowcaseApp::createNrdTargets()
             ci.pQueueFamilyIndices = nullptr;
         }
 
-        if (vkCreateImage(device, &ci, nullptr, &frame.outputImage) != VK_SUCCESS)
-            throw std::runtime_error("Showcase: failed to create NRD output image!");
+        if (vkCreateImage(device, &ci, nullptr, &out.image) != VK_SUCCESS)
+            throw std::runtime_error("NRD: failed to create input image!");
 
-        VkMemoryRequirements memReq{};
-        vkGetImageMemoryRequirements(device, frame.outputImage, &memReq);
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(device, out.image, &req);
 
         VkPhysicalDeviceMemoryProperties memProps{};
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
 
         uint32_t memoryTypeIndex = UINT32_MAX;
-        for (uint32_t m = 0; m < memProps.memoryTypeCount; ++m)
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
         {
-            bool typeOk  = (memReq.memoryTypeBits & (1u << m)) != 0;
-            bool flagsOk = (memProps.memoryTypes[m].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            bool typeOk = (req.memoryTypeBits & (1u << i)) != 0;
+            bool flagsOk = (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             if (typeOk && flagsOk)
             {
-                memoryTypeIndex = m;
+                memoryTypeIndex = i;
                 break;
             }
         }
         if (memoryTypeIndex == UINT32_MAX)
-            throw std::runtime_error("Showcase: no suitable memory type for NRD output image!");
+            throw std::runtime_error("NRD: no suitable memory type for input image!");
 
-        VkMemoryAllocateInfo mai{ };
+        VkMemoryAllocateInfo mai{};
         mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = memReq.size;
+        mai.allocationSize = req.size;
         mai.memoryTypeIndex = memoryTypeIndex;
 
-        if (vkAllocateMemory(device, &mai, nullptr, &frame.outputMemory) != VK_SUCCESS)
-            throw std::runtime_error("Showcase: failed to allocate NRD output image memory!");
+        if (vkAllocateMemory(device, &mai, nullptr, &out.memory) != VK_SUCCESS)
+            throw std::runtime_error("NRD: failed to allocate memory for input image!");
 
-        vkBindImageMemory(device, frame.outputImage, frame.outputMemory, 0);
+        vkBindImageMemory(device, out.image, out.memory, 0);
 
-        VkImageViewCreateInfo viewCI{ };
+        VkImageViewCreateInfo viewCI{};
         viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewCI.image = frame.outputImage;
+        viewCI.image = out.image;
         viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewCI.format = ci.format;
+        viewCI.format = fmt;
         viewCI.components = {
             VK_COMPONENT_SWIZZLE_IDENTITY,
             VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -2131,466 +2384,20 @@ void ShowcaseApp::createNrdTargets()
         viewCI.subresourceRange.baseArrayLayer = 0;
         viewCI.subresourceRange.layerCount = 1;
 
-        if (vkCreateImageView(device, &viewCI, nullptr, &frame.outputView) != VK_SUCCESS)
-        {
-            vkDestroyImage(device, frame.outputImage, nullptr);
-            vkFreeMemory(device, frame.outputMemory, nullptr);
-            frame.outputImage = VK_NULL_HANDLE;
-            frame.outputMemory = VK_NULL_HANDLE;
-            throw std::runtime_error("Showcase: failed to create NRD output image view!");
-        }
+        if (vkCreateImageView(device, &viewCI, nullptr, &out.view) != VK_SUCCESS)
+            throw std::runtime_error("NRD: failed to create input image view!");
+    };
+
+    for (auto& frame : nrdInputs)
+    {
+        createTex(VK_FORMAT_R16G16B16A16_SFLOAT,           w, h, frame.diffRadianceHit);
+        createTex(VK_FORMAT_R16G16B16A16_SFLOAT,           w, h, frame.specRadianceHit);
+        createTex(VK_FORMAT_A2R10G10B10_UNORM_PACK32,      w, h, frame.normalRoughness);
+        createTex(VK_FORMAT_R32_SFLOAT,                    w, h, frame.viewZ);
+        createTex(VK_FORMAT_R16G16_SFLOAT,                 w, h, frame.motionVec);
 
         frame.valid = true;
     }
-}
-
-void ShowcaseApp::initNRD()
-{
-    static const nrd::DenoiserDesc denoiserDescs[] =
-    {
-        { nrdRelaxId, nrd::Denoiser::RELAX_DIFFUSE_SPECULAR }
-    };
-
-    nrd::InstanceCreationDesc instanceDesc{};
-    instanceDesc.denoisers    = denoiserDescs;
-    instanceDesc.denoisersNum = uint32_t(std::size(denoiserDescs));
-
-    // Optional: custom allocators. If you don't care, just leave allocationCallbacks zeroed.
-    instanceDesc.allocationCallbacks.Allocate   = nullptr;
-    instanceDesc.allocationCallbacks.Reallocate = nullptr;
-    instanceDesc.allocationCallbacks.Free       = nullptr;
-    instanceDesc.allocationCallbacks.userArg    = nullptr;
-
-    // 2) Create NRD instance
-    nrd::Result res = nrd::CreateInstance(instanceDesc, nrdInstance);
-    if (res != nrd::Result::SUCCESS || !nrdInstance)
-        throw std::runtime_error("NRD: CreateInstance failed");
-    
-    nrdLibDesc  = nrd::GetLibraryDesc();
-    nrdInstDesc = nrd::GetInstanceDesc(*nrdInstance);
-    if (!nrdInstDesc || !nrdLibDesc)
-        throw std::runtime_error("NRD: GetInstanceDesc / GetLibraryDesc failed");
-
-        // 3) Common settings (set every frame, but you can initialize defaults here)
-    uint16_t currResW = static_cast<uint16_t>(rayTraceExtent.width);
-    uint16_t currResH = static_cast<uint16_t>(rayTraceExtent.height);
-    nrd::CommonSettings common{};
-    common.isMotionVectorInWorldSpace   = false;
-    common.isDisocclusionThresholdMixAvailable   = false;
-
-    common.resourceSize[0] = currResW;
-    common.resourceSize[1] = currResH;
-    common.rectSize[0]     = currResW;
-    common.rectSize[1]     = currResH;
-    common.resourceSizePrev[0] = currResW;
-    common.resourceSizePrev[1] = currResH;
-    common.rectSizePrev[0]     = currResW;
-    common.rectSizePrev[1]     = currResH;
-
-    nrd::SetCommonSettings(*nrdInstance, common);
-    nrdFrameIndex          = 1;
-    nrdResourceSizePrev[0] = currResW;
-    nrdResourceSizePrev[1] = currResH;
-    nrdRectSizePrev[0]     = currResW;
-    nrdRectSizePrev[1]     = currResH;
-
-    nrd::RelaxSettings relaxSettings{};
-    relaxSettings.enableAntiFirefly    = true;
-
-    nrd::SetDenoiserSettings(*nrdInstance, nrdRelaxId, &relaxSettings);
-}
-
-void ShowcaseApp::createNrdTexture2D(VkFormat format, uint32_t width, uint32_t height, NrdTexture& out)
-{
-    if (out.view)   { vkDestroyImageView(device, out.view, nullptr);  out.view = VK_NULL_HANDLE; }
-    if (out.image)  { vkDestroyImage(device, out.image, nullptr);     out.image = VK_NULL_HANDLE; }
-    if (out.memory) { vkFreeMemory(device, out.memory, nullptr);      out.memory = VK_NULL_HANDLE; }
-
-    out.width  = width;
-    out.height = height;
-    out.format = format;
-
-    VkImageCreateInfo ci{};
-    ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ci.imageType     = VK_IMAGE_TYPE_2D;
-    ci.format        = format;
-    ci.extent        = { width, height, 1 };
-    ci.mipLevels     = 1;
-    ci.arrayLayers   = 1;
-    ci.samples       = VK_SAMPLE_COUNT_1_BIT;
-    ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    ci.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    uint32_t fams[2] = { graphicsFamily, computeFamily };
-    uint32_t unique[2];
-    uint32_t uniqueCount = 0;
-
-    for (uint32_t j = 0; j < 2; ++j)
-    {
-        uint32_t f = fams[j];
-        bool seen = false;
-        for (uint32_t k = 0; k < uniqueCount; ++k)
-        {
-            if (unique[k] == f) { seen = true; break; }
-        }
-        if (!seen)
-            unique[uniqueCount++] = f;
-    }
-
-    if (uniqueCount > 1)
-    {
-        ci.sharingMode           = VK_SHARING_MODE_CONCURRENT;
-        ci.queueFamilyIndexCount = uniqueCount;
-        ci.pQueueFamilyIndices   = unique;
-    }
-    else
-    {
-        ci.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
-        ci.queueFamilyIndexCount = 0;
-        ci.pQueueFamilyIndices   = nullptr;
-    }
-
-    if (vkCreateImage(device, &ci, nullptr, &out.image) != VK_SUCCESS)
-        throw std::runtime_error("NRD: vkCreateImage failed for pool texture");
-
-
-    VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(device, out.image, &req);
-
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize  = req.size;
-    mai.memoryTypeIndex = findMemoryType(
-        req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        physicalDevice);
-
-    if (vkAllocateMemory(device, &mai, nullptr, &out.memory) != VK_SUCCESS)
-        throw std::runtime_error("NRD: vkAllocateMemory failed for pool texture");
-
-    vkBindImageMemory(device, out.image, out.memory, 0);
-
-    VkImageViewCreateInfo viewCI{};
-    viewCI.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewCI.image    = out.image;
-    viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewCI.format   = format;
-
-    viewCI.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewCI.subresourceRange.baseMipLevel   = 0;
-    viewCI.subresourceRange.levelCount     = 1;
-    viewCI.subresourceRange.baseArrayLayer = 0;
-    viewCI.subresourceRange.layerCount     = 1;
-
-    if (vkCreateImageView(device, &viewCI, nullptr, &out.view) != VK_SUCCESS)
-        throw std::runtime_error("NRD: vkCreateImageView failed for pool texture");
-}
-
-
-void ShowcaseApp::initNRDTextures()
-{
-    assert(nrdInstDesc);
-
-    // Destroy previous if any
-    for (auto& t : nrdPermanentTextures) destroyNRDTexture(device, t);
-    for (auto& t : nrdTransientTextures) destroyNRDTexture(device, t);
-    nrdPermanentTextures.clear();
-    nrdTransientTextures.clear();
-
-    uint32_t fullW = rayTraceExtent.width;
-    uint32_t fullH = rayTraceExtent.height;
-
-    auto makeTex = [&](const nrd::TextureDesc& td) -> NrdTexture
-    {
-        uint32_t ds = std::max<uint32_t>(1, td.downsampleFactor);
-
-        uint32_t w = (fullW + ds - 1) / ds;
-        uint32_t h = (fullH + ds - 1) / ds;
-
-        VkFormat format = mapNrdFormatToVk(td.format);
-
-        NrdTexture out{};
-        createNrdTexture2D(format, w, h, out);
-        return out;
-    };
-
-    // Permanent
-    nrdPermanentTextures.resize(nrdInstDesc->permanentPoolSize);
-    for (uint32_t i = 0; i < nrdInstDesc->permanentPoolSize; ++i)
-        nrdPermanentTextures[i] = makeTex(nrdInstDesc->permanentPool[i]);
-
-    // Transient
-    nrdTransientTextures.resize(nrdInstDesc->transientPoolSize);
-    for (uint32_t i = 0; i < nrdInstDesc->transientPoolSize; ++i)
-        nrdTransientTextures[i] = makeTex(nrdInstDesc->transientPool[i]);
-}
-
-void ShowcaseApp::initNrdDescriptorsAndPipelines()
-{
-    assert(nrdInstance);
-    assert(nrdInstDesc);
-
-    const auto& offsets = nrdLibDesc->spirvBindingOffsets;
-    const auto& poolDesc = nrdInstDesc->descriptorPoolDesc;
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
-
-    {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = offsets.constantBufferOffset;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        b.descriptorCount = 1;
-        b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings.push_back(b);
-    }
-
-    // 2) Sampled textures (SRVs in NRD terminology)
-    // We reserve up to perSetTexturesMaxNum bindings, starting at textureOffset
-    for (uint32_t i = 0; i < poolDesc.perSetTexturesMaxNum; ++i)
-    {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = offsets.textureOffset + i;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        b.descriptorCount = 1;
-        b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings.push_back(b);
-    }
-
-    // 3) Storage textures (UAVs)
-    for (uint32_t i = 0; i < poolDesc.perSetStorageTexturesMaxNum; ++i)
-    {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = offsets.storageTextureAndBufferOffset + i;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        b.descriptorCount = 1;
-        b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings.push_back(b);
-    }
-
-    // 4) Samplers
-    // NRD prefers static / immutable samplers. For a first pass you can just ignore
-    // `libDesc->samplers` and use a couple of global VkSampler you already have.
-    // Here we create bindings for samplers but *without* immutable samplers for simplicity.
-    for (uint32_t i = 0; i < nrdInstDesc->samplersNum; ++i)
-    {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = offsets.samplerOffset + i;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
-        b.descriptorCount = 1;
-        b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings.push_back(b);
-    }
-
-    // Create the set layout
-    VkDescriptorSetLayoutCreateInfo setInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    setInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-    setInfo.pBindings    = bindings.data();
-
-    if (vkCreateDescriptorSetLayout(device, &setInfo, nullptr, &nrdSetLayout) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: Failed to Create NRD Set Layout");
-    
-    // === Descriptor pool ===
-    std::vector<VkDescriptorPoolSize> poolSizes;
-
-    // textures
-    if (poolDesc.perSetTexturesMaxNum > 0)
-    {
-        VkDescriptorPoolSize ps{};
-        ps.type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        ps.descriptorCount = poolDesc.perSetTexturesMaxNum * poolDesc.setsMaxNum;
-        poolSizes.push_back(ps);
-    }
-
-    // storage textures
-    if (poolDesc.perSetStorageTexturesMaxNum > 0)
-    {
-        VkDescriptorPoolSize ps{};
-        ps.type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        ps.descriptorCount = poolDesc.perSetStorageTexturesMaxNum * poolDesc.setsMaxNum;
-        poolSizes.push_back(ps);
-    }
-
-    // constant buffer
-    {
-        VkDescriptorPoolSize ps{};
-        ps.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        ps.descriptorCount = poolDesc.setsMaxNum;
-        poolSizes.push_back(ps);
-    }
-
-    // samplers
-    if (nrdInstDesc->samplersNum > 0)
-    {
-        VkDescriptorPoolSize ps{};
-        ps.type            = VK_DESCRIPTOR_TYPE_SAMPLER;
-        ps.descriptorCount = nrdInstDesc->samplersNum * poolDesc.setsMaxNum;
-        poolSizes.push_back(ps);
-    }
-
-    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    poolInfo.maxSets       = poolDesc.setsMaxNum;
-    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-    poolInfo.pPoolSizes    = poolSizes.data();
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &nrdDescriptorPool) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: Failed to Create NRD Descriptor Pool");
-
-    // === Pipeline layout ===
-    VkDescriptorSetLayout setLayouts[2] = {
-        nrdSetLayout, // set 0
-        nrdSetLayout  // set 1
-    };
-
-    VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plInfo.setLayoutCount = 2;
-    plInfo.pSetLayouts    = setLayouts;
-
-    plInfo.pushConstantRangeCount = 0;
-    plInfo.pPushConstantRanges    = nullptr;
-
-    if (vkCreatePipelineLayout(device, &plInfo, nullptr, &nrdPipelineLayout) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: Failed to create NRD PipelineLayout");
-    
-    // === Create NRD compute pipelines ===
-    nrdPipelines.resize(nrdInstDesc->pipelinesNum);
-
-    for (uint32_t i = 0; i < nrdInstDesc->pipelinesNum; ++i)
-    {
-        const nrd::PipelineDesc& nrdPipe = nrdInstDesc->pipelines[i];
-
-        const auto& spirv = nrdPipe.computeShaderSPIRV;
-        if (!spirv.bytecode || spirv.size == 0)
-            throw std::runtime_error("Showcase: NRD pipeline has no SPIR-V, check NRD_EMBEDS_SPIRV_SHADERS");
-
-        // 1) Shader module
-        VkShaderModuleCreateInfo smInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-        smInfo.codeSize = static_cast<size_t>(spirv.size);
-        smInfo.pCode    = reinterpret_cast<const uint32_t*>(spirv.bytecode);
-
-        VkShaderModule shaderModule = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(device, &smInfo, nullptr, &shaderModule) != VK_SUCCESS)
-            throw std::runtime_error("Showcase: Failed to Create Shader Module NRD");
-
-        // 2) Compute pipeline
-        VkPipelineShaderStageCreateInfo stageInfo{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        stageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = shaderModule;
-        stageInfo.pName  = nrdInstDesc->shaderEntryPoint;
-
-        VkComputePipelineCreateInfo cpInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
-        cpInfo.stage  = stageInfo;
-        cpInfo.layout = nrdPipelineLayout;
-
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &pipeline) != VK_SUCCESS)
-            throw std::runtime_error("Showcase: Failed to create Pipeline NRD");
-
-        nrdPipelines[i].pipeline        = pipeline;
-        nrdPipelines[i].nrdPipelineDesc = &nrdPipe;
-
-        vkDestroyShaderModule(device, shaderModule, nullptr);
-    }
-    // === Allocate NRD descriptor set ===
-    VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-    ai.descriptorPool     = nrdDescriptorPool;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts        = &nrdSetLayout;
-
-    if (vkAllocateDescriptorSets(device, &ai, &nrdSet) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: Failed to allocate NRD descriptor set");
-}
-
-void ShowcaseApp::createNrdConstantBuffer()
-{
-    if (nrdConstantBuffer)
-    {
-        vkDestroyBuffer(device, nrdConstantBuffer, nullptr);
-        nrdConstantBuffer = VK_NULL_HANDLE;
-    }
-    if (nrdConstantMemory)
-    {
-        vkFreeMemory(device, nrdConstantMemory, nullptr);
-        nrdConstantMemory = VK_NULL_HANDLE;
-    }
-
-    assert(nrdInstDesc);
-    VkDeviceSize size = nrdInstDesc->constantBufferMaxDataSize;
-    if (size == 0)
-        return;
-
-    createBuffer(
-        device,
-        physicalDevice,
-        size,
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        nrdConstantBuffer,
-        nrdConstantMemory
-    );
-
-    if (vkMapMemory(device, nrdConstantMemory, 0, size, 0, &nrdConstantMapped) != VK_SUCCESS)
-        throw std::runtime_error("Showcase: Failed to map NRD constant buffer");
-    updateNrdDescriptorSets();
-}
-
-void ShowcaseApp::updateNrdDescriptorSets()
-{
-    const auto& offsets = nrdLibDesc->spirvBindingOffsets;
-
-    // Constant buffer
-    if (nrdInstDesc->constantBufferMaxDataSize > 0)
-    {
-        VkDescriptorBufferInfo cbInfo{};
-        cbInfo.buffer = nrdConstantBuffer;
-        cbInfo.offset = 0;
-        cbInfo.range  = nrdInstDesc->constantBufferMaxDataSize;
-
-        VkWriteDescriptorSet w{};
-        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet          = nrdSet;
-        w.dstBinding      = offsets.constantBufferOffset;
-        w.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w.descriptorCount = 1;
-        w.pBufferInfo     = &cbInfo;
-
-        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
-    }
-
-    std::vector<VkWriteDescriptorSet> samplerWrites;
-    std::vector<VkDescriptorImageInfo> samplerInfos;
-    samplerWrites.reserve(nrdInstDesc->samplersNum);
-    samplerInfos.reserve(nrdInstDesc->samplersNum);
-
-    for (uint32_t i = 0; i < nrdInstDesc->samplersNum; ++i)
-    {
-        VkDescriptorImageInfo si{};
-        si.sampler     = textureSampler ? textureSampler : offscreenSampler;
-        si.imageView   = VK_NULL_HANDLE;
-        si.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-        samplerInfos.push_back(si);
-
-        VkWriteDescriptorSet w{};
-        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet          = nrdSet;
-        w.dstBinding      = offsets.samplerOffset + i;
-        w.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
-        w.descriptorCount = 1;
-        w.pImageInfo      = &samplerInfos.back();
-
-        samplerWrites.push_back(w);
-    }
-
-    if (!samplerWrites.empty())
-        vkUpdateDescriptorSets(device,
-                               static_cast<uint32_t>(samplerWrites.size()),
-                               samplerWrites.data(),
-                               0, nullptr);
 }
 
 
@@ -2654,7 +2461,7 @@ void ShowcaseApp::createComputeDescriptors()
     //   6: fsrConstBuffer[frame]  (FSR UBO)
     //   7: 2d sampler
 
-    VkDescriptorSetLayoutBinding set1[9]{};
+    VkDescriptorSetLayoutBinding set1[16]{};
 
     auto initSet1 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding,
                      VkDescriptorType type, VkShaderStageFlags stages)
@@ -2675,10 +2482,17 @@ void ShowcaseApp::createComputeDescriptors()
     initSet1(set1[6], 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // FSR UBO
     initSet1(set1[7], 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
     initSet1(set1[8], 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet1(set1[9],  9,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // diff radiance + hitdist
+    initSet1(set1[10], 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // spec radiance + hitdist
+    initSet1(set1[11], 11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // normal + roughness
+    initSet1(set1[12], 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // viewZ
+    initSet1(set1[13], 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // motion vectors
+    initSet1(set1[14], 14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+    initSet1(set1[15], 15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
 
     VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
     frameLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    frameLayoutCreateInfo.bindingCount = 9;
+    frameLayoutCreateInfo.bindingCount = 16;
     frameLayoutCreateInfo.pBindings    = set1;
 
     if (vkCreateDescriptorSetLayout(device, &frameLayoutCreateInfo, nullptr, &computeFrameSetLayout) != VK_SUCCESS)
@@ -2727,7 +2541,7 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorPoolSize poolSizes[4]{};
 
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 2 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[0].descriptorCount = 9 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[1].descriptorCount = 27 * SwapChain::MAX_FRAMES_IN_FLIGHT;
@@ -2815,7 +2629,7 @@ void ShowcaseApp::updateComputeDescriptor()
 
         VkDescriptorImageInfo fsrInputSamplerInfo{};
         fsrInputSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        fsrInputSamplerInfo.imageView   = nrdFrameImages[i].outputView;
+        fsrInputSamplerInfo.imageView   = offscreenView[i];
         fsrInputSamplerInfo.sampler     = offscreenSampler;
 
         VkDescriptorImageInfo rcasInput{};
@@ -2823,8 +2637,20 @@ void ShowcaseApp::updateComputeDescriptor()
         rcasInput.imageView   = fsrView[i];
         rcasInput.sampler     = offscreenSampler;
 
-        VkWriteDescriptorSet writes[5]{};
+        // NEW: NRD OUT_DIFF / OUT_SPEC
+        VkDescriptorImageInfo nrdDiffInfo{};
+        nrdDiffInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        nrdDiffInfo.imageView   = nrdFrameImages[i].diffView;
+        nrdDiffInfo.sampler     = VK_NULL_HANDLE;
 
+        VkDescriptorImageInfo nrdSpecInfo{};
+        nrdSpecInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        nrdSpecInfo.imageView   = nrdFrameImages[i].specView;
+        nrdSpecInfo.sampler     = VK_NULL_HANDLE;
+
+        VkWriteDescriptorSet writes[7]{};
+
+        // 4: offscreen image (write-only for main pathtrace / combine)
         writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet          = computeFrameSets[i];
         writes[0].dstBinding      = 4;
@@ -2832,6 +2658,7 @@ void ShowcaseApp::updateComputeDescriptor()
         writes[0].descriptorCount = 1;
         writes[0].pImageInfo      = &offscreenInfo;
 
+        // 5: FSR output storage image
         writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[1].dstSet          = computeFrameSets[i];
         writes[1].dstBinding      = 5;
@@ -2839,6 +2666,7 @@ void ShowcaseApp::updateComputeDescriptor()
         writes[1].descriptorCount = 1;
         writes[1].pImageInfo      = &fsrInfo;
 
+        // 6: FSR constant buffer
         writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[2].dstSet          = computeFrameSets[i];
         writes[2].dstBinding      = 6;
@@ -2846,6 +2674,7 @@ void ShowcaseApp::updateComputeDescriptor()
         writes[2].descriptorCount = 1;
         writes[2].pBufferInfo     = &fsrBuf;
 
+        // 7: FSR input sampler (denoised + combined image)
         writes[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[3].dstSet          = computeFrameSets[i];
         writes[3].dstBinding      = 7;
@@ -2853,6 +2682,7 @@ void ShowcaseApp::updateComputeDescriptor()
         writes[3].descriptorCount = 1;
         writes[3].pImageInfo      = &fsrInputSamplerInfo;
 
+        // 8: RCAS input sampler
         writes[4].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[4].dstSet          = computeFrameSets[i];
         writes[4].dstBinding      = 8;
@@ -2860,10 +2690,27 @@ void ShowcaseApp::updateComputeDescriptor()
         writes[4].descriptorCount = 1;
         writes[4].pImageInfo      = &rcasInput;
 
+        // 14: NRD OUT_DIFF_RADIANCE_HITDIST
+        writes[5].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[5].dstSet          = computeFrameSets[i];
+        writes[5].dstBinding      = 14;
+        writes[5].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[5].descriptorCount = 1;
+        writes[5].pImageInfo      = &nrdDiffInfo;
 
-        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        // 15: NRD OUT_SPEC_RADIANCE_HITDIST
+        writes[6].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[6].dstSet          = computeFrameSets[i];
+        writes[6].dstBinding      = 15;
+        writes[6].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[6].descriptorCount = 1;
+        writes[6].pImageInfo      = &nrdSpecInfo;
+
+        vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
     }
 }
+
+
 
 void ShowcaseApp::writeStaticComputeBindings()
 {
@@ -3338,65 +3185,53 @@ void ShowcaseApp::createFullscreenGraphicsPipeline()
 
 void ShowcaseApp::destroyNRD()
 {
-    if (nrdInstance)
+    // 1) Destroy NRD Integration (this cleans all NRI resources allocated inside)
+    nrdIntegration.Destroy();
+
+    // 2) Destroy NRD OUT_* per-frame images (diff + spec)
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
-        nrd::DestroyInstance(*nrdInstance);
-        nrdInstance = nullptr;
+        auto& frame = nrdFrameImages[i];
+
+        if (frame.diffView)   { vkDestroyImageView(device, frame.diffView,  nullptr); frame.diffView  = VK_NULL_HANDLE; }
+        if (frame.diffImage)  { vkDestroyImage(device,     frame.diffImage, nullptr); frame.diffImage = VK_NULL_HANDLE; }
+        if (frame.diffMemory) { vkFreeMemory(device,       frame.diffMemory,nullptr); frame.diffMemory= VK_NULL_HANDLE; }
+
+        if (frame.specView)   { vkDestroyImageView(device, frame.specView,  nullptr); frame.specView  = VK_NULL_HANDLE; }
+        if (frame.specImage)  { vkDestroyImage(device,     frame.specImage, nullptr); frame.specImage = VK_NULL_HANDLE; }
+        if (frame.specMemory) { vkFreeMemory(device,       frame.specMemory,nullptr); frame.specMemory= VK_NULL_HANDLE; }
+
+        frame.valid = false;
     }
 
-    if (device != VK_NULL_HANDLE)
+    // 3) Destroy NRD IN_* per-frame images, if you have them as NrdTexture arrays
+    auto destroyNrdTexture = [&](NrdTexture& t)
     {
-        for (auto& p : nrdPipelines)
-        {
-            if (p.pipeline)
-                vkDestroyPipeline(device, p.pipeline, nullptr);
-        }
-        nrdPipelines.clear();
+        if (t.view)   { vkDestroyImageView(device, t.view,  nullptr); t.view  = VK_NULL_HANDLE; }
+        if (t.image)  { vkDestroyImage(device,     t.image, nullptr); t.image = VK_NULL_HANDLE; }
+        if (t.memory) { vkFreeMemory(device,       t.memory,nullptr); t.memory= VK_NULL_HANDLE; }
+        t.width  = 0;
+        t.height = 0;
+        t.format = VK_FORMAT_UNDEFINED;
+    };
 
-        if (nrdPipelineLayout)
-        {
-            vkDestroyPipelineLayout(device, nrdPipelineLayout, nullptr);
-            nrdPipelineLayout = VK_NULL_HANDLE;
-        }
-
-        if (nrdDescriptorPool)
-        {
-            vkDestroyDescriptorPool(device, nrdDescriptorPool, nullptr);
-            nrdDescriptorPool = VK_NULL_HANDLE;
-        }
-
-        if (nrdSetLayout)
-        {
-            vkDestroyDescriptorSetLayout(device, nrdSetLayout, nullptr);
-            nrdSetLayout = VK_NULL_HANDLE;
-        }
-
-        if (nrdConstantMapped)
-        {
-            vkUnmapMemory(device, nrdConstantMemory);
-            nrdConstantMapped = nullptr;
-        }
-
-        if (nrdConstantBuffer)
-        {
-            vkDestroyBuffer(device, nrdConstantBuffer, nullptr);
-            nrdConstantBuffer = VK_NULL_HANDLE;
-        }
-
-        if (nrdConstantMemory)
-        {
-            vkFreeMemory(device, nrdConstantMemory, nullptr);
-            nrdConstantMemory = VK_NULL_HANDLE;
-        }
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        destroyNrdTexture(nrdInputs[i].diffRadianceHit);
+        destroyNrdTexture(nrdInputs[i].specRadianceHit);
+        destroyNrdTexture(nrdInputs[i].normalRoughness);
+        destroyNrdTexture(nrdInputs[i].viewZ);
+        destroyNrdTexture(nrdInputs[i].motionVec);
+        // plus any extra IN_* you add later
     }
 
-    if (nrdInstance)
-    {
-        nrd::DestroyInstance(*nrdInstance);
-        nrdInstance = nullptr;
-    }
+    // 4) Reset frame counters / prev sizes if you want
+    nrdFrameIndex          = 0;
+    nrdResourceSizePrev[0] = 0;
+    nrdResourceSizePrev[1] = 0;
+    nrdRectSizePrev[0]     = 0;
+    nrdRectSizePrev[1]     = 0;
 }
-
 
 
 void ShowcaseApp::destroyWavefrontBuffers()
@@ -3552,20 +3387,35 @@ void ShowcaseApp::destroyNrdTargets()
     {
         auto &frame = nrdFrameImages[i];
 
-        if (frame.outputView)
+        if (frame.diffView)
         {
-            vkDestroyImageView(device, frame.outputView, nullptr);
-            frame.outputView = VK_NULL_HANDLE;
+            vkDestroyImageView(device, frame.diffView, nullptr);
+            frame.diffView = VK_NULL_HANDLE;
         }
-        if (frame.outputImage)
+        if (frame.diffImage)
         {
-            vkDestroyImage(device, frame.outputImage, nullptr);
-            frame.outputImage = VK_NULL_HANDLE;
+            vkDestroyImage(device, frame.diffImage, nullptr);
+            frame.diffImage = VK_NULL_HANDLE;
         }
-        if (frame.outputMemory)
+        if (frame.diffMemory)
         {
-            vkFreeMemory(device, frame.outputMemory, nullptr);
-            frame.outputMemory = VK_NULL_HANDLE;
+            vkFreeMemory(device, frame.diffMemory, nullptr);
+            frame.diffMemory = VK_NULL_HANDLE;
+        }
+        if (frame.specView)
+        {
+            vkDestroyImageView(device, frame.specView, nullptr);
+            frame.specView = VK_NULL_HANDLE;
+        }
+        if (frame.specImage)
+        {
+            vkDestroyImage(device, frame.specImage, nullptr);
+            frame.specImage = VK_NULL_HANDLE;
+        }
+        if (frame.specMemory)
+        {
+            vkFreeMemory(device, frame.specMemory, nullptr);
+            frame.specMemory = VK_NULL_HANDLE;
         }
 
         frame.valid = false;

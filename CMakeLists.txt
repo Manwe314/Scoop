@@ -26,6 +26,13 @@ set(GLM_TEST_ENABLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
 FetchContent_Declare(
+  vma
+  GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+  GIT_TAG v3.3.0
+)
+FetchContent_MakeAvailable(vma)
+
+FetchContent_Declare(
   nrd
   GIT_REPOSITORY https://github.com/NVIDIA-RTX/NRD.git
   GIT_TAG v4.16.1
@@ -33,6 +40,7 @@ FetchContent_Declare(
 
 set(NRD_STATIC_LIBRARY        ON  CACHE BOOL "" FORCE)
 set(NRD_EMBEDS_SPIRV_SHADERS  ON  CACHE BOOL "" FORCE)
+set(NRD_NRI                   ON  CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nrd)
 
 if (TARGET NRD)
@@ -101,9 +109,12 @@ target_include_directories(scoop
   PRIVATE
     "${CMAKE_SOURCE_DIR}/includes"
     "${CMAKE_SOURCE_DIR}/external"
+    "${nrd_SOURCE_DIR}/Include"
+    "${nrd_SOURCE_DIR}/Integration"
+    "${nri_SOURCE_DIR}/external"
 )
 
-target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm nfd NRD)
+target_link_libraries(scoop PRIVATE Vulkan::Vulkan glfw glm::glm nfd NRD NRI)
 
 
 if(UNIX AND NOT APPLE)

@@ -6,10 +6,6 @@
 #include "ffx_fsr1.h"
 typedef uint32_t AU4[4];
 
-
-
-
-
 // --------- helpers -----------
 
 constexpr uint32_t FLAG_B            = 1u << 31;
@@ -654,7 +650,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         bindAndDispatch(rayTraceFinalWritePipeline, gx, gy);
         passBarrier();
     
-        dispatchNrd(i, cmd);
+        runNRD(cmd, i);
         passBarrier();
 
         bindAndDispatch(FSRPipeline, (swapChainExtent.width  + 15)/16, (swapChainExtent.height + 15)/16);
@@ -947,16 +943,13 @@ void ShowcaseApp::updateFsrConstants(uint32_t frameIndex)
 
 void ShowcaseApp::updateNRDCommonSettings()
 {
-    assert(nrdInstance);
-
     nrd::CommonSettings common{};
 
     common.isMotionVectorInWorldSpace = false;
 
-    common.frameIndex      = nrdFrameIndex++;
+    common.frameIndex       = nrdFrameIndex++;
     common.accumulationMode = nrd::AccumulationMode::CONTINUE;
 
-    // --- Viewport / resolution ---
     uint16_t currResW = static_cast<uint16_t>(rayTraceExtent.width);
     uint16_t currResH = static_cast<uint16_t>(rayTraceExtent.height);
 
@@ -965,10 +958,10 @@ void ShowcaseApp::updateNRDCommonSettings()
     common.rectSize[0]     = currResW;
     common.rectSize[1]     = currResH;
 
-    uint16_t prevW = nrdResourceSizePrev[0];
-    uint16_t prevH = nrdResourceSizePrev[1];
-    uint16_t prevRectW = nrdRectSizePrev[0];
-    uint16_t prevRectH = nrdRectSizePrev[1];
+    uint16_t prevW      = nrdResourceSizePrev[0];
+    uint16_t prevH      = nrdResourceSizePrev[1];
+    uint16_t prevRectW  = nrdRectSizePrev[0];
+    uint16_t prevRectH  = nrdRectSizePrev[1];
 
     if (prevW == 0 || prevH == 0) {
         prevW = currResW;
@@ -984,9 +977,8 @@ void ShowcaseApp::updateNRDCommonSettings()
     common.rectSizePrev[0]     = prevRectW;
     common.rectSizePrev[1]     = prevRectH;
 
-    nrd::SetCommonSettings(*nrdInstance, common);
+    nrdIntegration.SetCommonSettings(common);
 
-    // Update our stored prev sizes for next frame
     nrdResourceSizePrev[0] = currResW;
     nrdResourceSizePrev[1] = currResH;
     nrdRectSizePrev[0]     = currResW;
@@ -994,160 +986,67 @@ void ShowcaseApp::updateNRDCommonSettings()
 }
 
 
-VkImageView ShowcaseApp::getNrdImageViewForResource(const nrd::ResourceDesc& r, uint32_t frameIndex)
-{
-    switch (r.type)
-    {
-        case nrd::ResourceType::PERMANENT_POOL:
-        {
-            if (r.indexInPool < nrdPermanentTextures.size())
-                return nrdPermanentTextures[r.indexInPool].view;
-            break;
-        }
-        case nrd::ResourceType::TRANSIENT_POOL:
-        {
-            if (r.indexInPool < nrdTransientTextures.size())
-                return nrdTransientTextures[r.indexInPool].view;
-            break;
-        }
-
-        default:
-            break;
-    }
-
-    // Fallback: use per-frame NRD output image,
-    // or offscreen image if that is not ready.
-    if (nrdFrameImages[frameIndex].outputView)
-        return nrdFrameImages[frameIndex].outputView;
-
-    return offscreenView[frameIndex];
-}
-
-void ShowcaseApp::updateNrdDescriptorsForDispatch(uint32_t frameIndex, const nrd::DispatchDesc& dispatch)
-{
-    const auto& offsets = nrdLibDesc->spirvBindingOffsets;
-
-    uint32_t srvBinding = offsets.textureOffset;
-    uint32_t uavBinding = offsets.storageTextureAndBufferOffset;
-
-    std::vector<VkWriteDescriptorSet> writes;
-    std::vector<VkDescriptorImageInfo> imageInfos;
-    writes.reserve(dispatch.resourcesNum);
-    imageInfos.reserve(dispatch.resourcesNum);
-
-    for (uint32_t i = 0; i < dispatch.resourcesNum; ++i)
-    {
-        const nrd::ResourceDesc& r = dispatch.resources[i];
-
-        VkImageView view = getNrdImageViewForResource(r, frameIndex);
-        if (!view)
-            continue;
-
-        VkDescriptorImageInfo img{};
-        img.imageView   = view;
-        img.sampler     = VK_NULL_HANDLE;
-        img.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        imageInfos.push_back(img);
-
-        VkWriteDescriptorSet w{};
-        w.sType          = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet         = nrdSet;
-        w.descriptorType = (r.descriptorType == nrd::DescriptorType::TEXTURE)
-                           ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-                           : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w.descriptorCount = 1;
-        w.pImageInfo      = &imageInfos.back();
-
-        if (r.descriptorType == nrd::DescriptorType::TEXTURE)
-            w.dstBinding = srvBinding++;
-        else
-            w.dstBinding = uavBinding++;
-
-        writes.push_back(w);
-    }
-
-    if (!writes.empty())
-        vkUpdateDescriptorSets(device,
-                               static_cast<uint32_t>(writes.size()),
-                               writes.data(),
-                               0, nullptr);
-}
-
-void ShowcaseApp::dispatchNrd(uint32_t frameIndex, VkCommandBuffer cmd)
-{
-    if (!nrdInstance)
-        return;
-
-    // Update common settings (frame index, sizes, etc.)
-    updateNRDCommonSettings();
-
-    // Get dispatches for RELAX_DIFFUSE_SPECULAR
-    nrd::Identifier ids[] = { nrdRelaxId };
-    const nrd::DispatchDesc* dispatches = nullptr;
-    uint32_t dispatchCount = 0;
-
-    if (nrd::GetComputeDispatches(*nrdInstance, ids, 1, dispatches, dispatchCount) != nrd::Result::SUCCESS)
-        return;
-
-    for (uint32_t i = 0; i < dispatchCount; ++i)
-    {
-        const nrd::DispatchDesc& d = dispatches[i];
-
-        // Update constant buffer, if any
-        if (d.constantBufferData && d.constantBufferDataSize > 0 && nrdConstantMapped)
-        {
-            std::memcpy(nrdConstantMapped,
-                        d.constantBufferData,
-                        d.constantBufferDataSize);
-            // HOST_COHERENT, so no flush needed
-        }
-
-        // Update SRV / UAV descriptors
-        updateNrdDescriptorsForDispatch(frameIndex, d);
-
-        // Bind pipeline
-        const NrdPipeline& pipe = nrdPipelines[d.pipelineIndex];
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline);
-        vkCmdBindDescriptorSets(cmd,
-                                VK_PIPELINE_BIND_POINT_COMPUTE,
-                                nrdPipelineLayout,
-                                0, 1, &nrdSet,
-                                0, nullptr);
-
-        // Dispatch
-        vkCmdDispatch(cmd, d.gridWidth, d.gridHeight, 1);
-    }
-}
-
-
 
 void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
 {
-    auto &frame = nrdFrameImages[frameIndex];
+    // 1) Tell NRD it's a new frame
+    nrdIntegration.NewFrame();
 
-    if (!frame.valid)
-        return;
+    // 2) Common settings (resolution, accumulation, frame index, etc.)
+    updateNRDCommonSettings();
 
-    // transitionImage(
-    //     cmd,
-    //     frame.outputImage,
-    //     VK_IMAGE_LAYOUT_UNDEFINED,                    // previous (if you never use it)
-    //     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,     // FSR expects this
-    //     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-    //     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    //     0,
-    //     VK_ACCESS_SHADER_READ_BIT,
-    //     0, 1
-    // );
+    nrd::RelaxSettings relax{};
+    relax.enableAntiFirefly = true;
+    nrdIntegration.SetDenoiserSettings(nrdRelaxId, &relax);
 
-    // Later: instead of this dummy transition,
-    // we will ask NRD for its dispatches and record them here,
-    // with frame.outputImage as the OUT_* target.
+    // 4) Build ResourceSnapshot with IN_* and OUT_* resources
+    nrd::ResourceSnapshot snapshot{};
+
+    auto makeResourceVK = [](VkImage image, VkFormat format) -> nrd::Resource
+    {
+        nrd::Resource r{};
+
+        r.vk.image  = reinterpret_cast<VKNonDispatchableHandle>(image);
+        r.vk.format = static_cast<VKEnum>(format);
+
+        r.state.access = nri::AccessBits::NONE;
+        r.state.layout = nri::Layout::UNDEFINED;
+        r.state.stages = nri::StageBits::NONE;
+
+        return r;
+    };
+    // ---------- IN_ resources ----------
+    nrd::Resource inDiff   = makeResourceVK(nrdInputs[frameIndex].diffRadianceHit.image,  nrdInputs[frameIndex].diffRadianceHit.format);
+    nrd::Resource inSpec   = makeResourceVK(nrdInputs[frameIndex].specRadianceHit.image,  nrdInputs[frameIndex].specRadianceHit.format);
+    nrd::Resource inNR     = makeResourceVK(nrdInputs[frameIndex].normalRoughness.image,  nrdInputs[frameIndex].normalRoughness.format);
+    nrd::Resource inViewZ  = makeResourceVK(nrdInputs[frameIndex].viewZ.image,            nrdInputs[frameIndex].viewZ.format);
+    nrd::Resource inMotion = makeResourceVK(nrdInputs[frameIndex].motionVec.image,        nrdInputs[frameIndex].motionVec.format);
+
+    snapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, inDiff);
+    snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, inSpec);
+    snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS,      inNR);
+    snapshot.SetResource(nrd::ResourceType::IN_VIEWZ,                 inViewZ);
+    snapshot.SetResource(nrd::ResourceType::IN_MV,                    inMotion);
+
+    // ---------- OUT_ resources ----------
+    nrd::Resource outDiff = makeResourceVK(nrdFrameImages[frameIndex].diffImage, VK_FORMAT_R16G16B16A16_SFLOAT);
+    nrd::Resource outSpec = makeResourceVK(nrdFrameImages[frameIndex].specImage, VK_FORMAT_R16G16B16A16_SFLOAT);
+
+    snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
+    snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
+
+    // We manage final Vulkan resource states ourselves; no need for NRD to restore.
+    // snapshot.restoreInitialState = false;
+
+    // 5) Wrap the VkCommandBuffer into NRI's CommandBufferVKDesc and denoise
+    nri::CommandBufferVKDesc cbDesc{};
+    cbDesc.vkCommandBuffer = cmd;
+    cbDesc.queueType       = nri::QueueType::COMPUTE;
+
+    const nrd::Identifier denoisers[] = { nrdRelaxId };
+
+    nrdIntegration.DenoiseVK(denoisers, 1, cbDesc, snapshot);
 }
-
-
-
 
 void ShowcaseApp::run()
 {
