@@ -243,7 +243,9 @@ inline ParamsGPU makeParamsForVulkan(
                 float      fovY_deg  = 60.0f,
                 float      zNear     = 0.1f,
                 float      zFar      = 2000.0f, 
-                uint32_t flags = 0)
+                uint32_t flags = 0,
+                Mat4* outViewProj = nullptr,
+                Mat4* outViewProjInv = nullptr)
 {
     const float aspect = float(extent.width) / float(std::max(1u, extent.height));
 
@@ -255,6 +257,8 @@ inline ParamsGPU makeParamsForVulkan(
     Mat4 viewProj    = proj * view;
     Mat4 viewProjInv;
     inverse(viewProj, viewProjInv);
+    if (outViewProj)     *outViewProj    = viewProj;
+    if (outViewProjInv)  *outViewProjInv = viewProjInv;
 
     ParamsGPU p{};
     p.viewProjInv = viewProjInv;
@@ -344,6 +348,28 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     copyIf(tlasNodesBuf[frameIndex], nodesBytes, nodesOff);
     copyIf(tlasInstBuf[frameIndex],  instBytes,  instOff);
     copyIf(tlasIdxBuf[frameIndex],   idxBytes,   idxOff);
+
+    if constexpr (!SimpleRayTrace)
+    {
+        if (!prevViewZInitialized[frameIndex])
+        {
+            imageBarrier(frame.uploadCB, prevViewZImage[frameIndex],
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            VkClearColorValue clear{};
+            clear.float32[0] = 1e30f;
+            VkImageSubresourceRange range{};
+            range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            range.baseMipLevel = 0;
+            range.levelCount = 1;
+            range.baseArrayLayer = 0;
+            range.layerCount = 1;
+            vkCmdClearColorImage(frame.uploadCB, prevViewZImage[frameIndex], VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+            prevViewZInitialized[frameIndex] = true;
+        }
+    }
 
     if (hasDedicatedTransfer && computeFamily != transferFamily)
     {
@@ -737,6 +763,27 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     }
     else
     {
+        // Ensure NRD input images are writable this frame (last frame they were sampled by NRD)
+        if (nrdInputsSampled[i])
+        {
+            auto transitionToGeneral = [&](VkImage img)
+            {
+                if (img == VK_NULL_HANDLE)
+                    return;
+                imageBarrier(cmd, img,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            };
+            transitionToGeneral(nrdInputs[i].diffRadianceHit.image);
+            transitionToGeneral(nrdInputs[i].specRadianceHit.image);
+            transitionToGeneral(nrdInputs[i].normalRoughness.image);
+            transitionToGeneral(nrdInputs[i].viewZ.image);
+            transitionToGeneral(nrdInputs[i].motionVec.image);
+            nrdInputsSampled[i] = false;
+        }
+
         VkDescriptorSet sets[3] = {
             computeStaticSet,
             computeFrameSets[i],
@@ -783,6 +830,13 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
         vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
         vkCmdFillBuffer(cmd, pixelStatsBuf[i], 0, bufferSize2, 0u);
+        // Primary path initialization: new path, extend, write NRD inputs
+        bindAndDispatch(rayTracePrimaryNewPathPipeline, gx, gy);
+        passBarrier();
+        bindAndDispatch(rayTracePrimaryExtendRayPipeline, gx, gy);
+        passBarrier();
+        bindAndDispatch(rayTraceWritePrimaryNRDPipeline, gx, gy);
+        passBarrier();
 
 
         for (uint32_t bounce = 0; bounce < 64; bounce++)
@@ -793,7 +847,9 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             bindAndDispatch(rayTraceExtendRayPipeline, gx, gy);
             passBarrier();
     
-            bindAndDispatch(rayTraceMaterialPipeline, gx, gy);
+            bindAndDispatch(rayTraceMaterialDiffusePipeline, gx, gy);
+            passBarrier();
+            bindAndDispatch(rayTraceMaterialSpecularPipeline, gx, gy);
             passBarrier();
             
             bindAndDispatch(rayTraceShadowRayPipeline, gx, gy);
@@ -822,6 +878,60 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
         bindAndDispatch(FSRSharpenPipeline, (swapChainExtent.width  + 15)/16, (swapChainExtent.height + 15)/16);
         passBarrier();
+
+        // Copy current viewZ into prevViewZ image for next frame motion vectors
+        VkImageMemoryBarrier copyBarriers[2]{};
+        copyBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        copyBarriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        copyBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        copyBarriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        copyBarriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[0].image = nrdInputs[i].viewZ.image;
+        copyBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        copyBarriers[1] = copyBarriers[0];
+        copyBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copyBarriers[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        copyBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        copyBarriers[1].image = prevViewZImage[i];
+
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0,
+                             0, nullptr,
+                             0, nullptr,
+                             2, copyBarriers);
+
+        VkImageCopy copy{};
+        copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.extent = { rayTraceExtent.width, rayTraceExtent.height, 1 };
+        vkCmdCopyImage(cmd,
+                       nrdInputs[i].viewZ.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       prevViewZImage[i],        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &copy);
+
+        // Return layouts: keep NRD input viewZ as sampled, prevViewZ as writable
+        copyBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        copyBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        copyBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        copyBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copyBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        copyBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        copyBarriers[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0,
+                             0, nullptr,
+                             0, nullptr,
+                             2, copyBarriers);
     }
     
 
@@ -1220,21 +1330,21 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
     nrd::Resource inViewZ  = makeResourceVK(nrdInputs[frameIndex].viewZ.image,            nrdInputs[frameIndex].viewZ.format,           nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
     nrd::Resource inMotion = makeResourceVK(nrdInputs[frameIndex].motionVec.image,        nrdInputs[frameIndex].motionVec.format,       nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
 
-    // snapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, inDiff);
-    // snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, inSpec);
-    // snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS,      inNR);
-    // snapshot.SetResource(nrd::ResourceType::IN_VIEWZ,                 inViewZ);
-    // snapshot.SetResource(nrd::ResourceType::IN_MV,                    inMotion);
+    snapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, inDiff);
+    snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, inSpec);
+    snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS,      inNR);
+    snapshot.SetResource(nrd::ResourceType::IN_VIEWZ,                 inViewZ);
+    snapshot.SetResource(nrd::ResourceType::IN_MV,                    inMotion);
 
     // ---------- OUT_ resources ----------
     nrd::Resource outDiff = makeResourceVK(nrdFrameImages[frameIndex].diffImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
     nrd::Resource outSpec = makeResourceVK(nrdFrameImages[frameIndex].specImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
 
-    // snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
-    // snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
+    snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
+    snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
 
     // We manage final Vulkan resource states ourselves; no need for NRD to restore.
-    // snapshot.restoreInitialState = false;
+    snapshot.restoreInitialState = false;
 
     // 5) Wrap the VkCommandBuffer into NRI's CommandBufferVKDesc and denoise
     nri::CommandBufferVKDesc cbDesc{};
@@ -1243,7 +1353,7 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
 
     const nrd::Identifier denoisers[] = { nrdRelaxId };
 
-    //nrdIntegration.DenoiseVK(denoisers, 1, cbDesc, snapshot);
+    nrdIntegration.DenoiseVK(denoisers, 1, cbDesc, snapshot);
     transitionNrdOutputsForSampling(cmd, frameIndex);
 }
 
@@ -1363,6 +1473,8 @@ void ShowcaseApp::run()
         if (bInterpInt > 0)
             flags |= (bInterpInt << B_INTERP_SHIFT) & B_INTERP_MASK;
         
+        Mat4 currViewProj{};
+        Mat4 currViewProjInv{};
         ParamsGPU params = makeParamsForVulkan(
                             rayTraceExtent,
                             /*rootIndex*/ topLevelAS.root,       
@@ -1373,10 +1485,22 @@ void ShowcaseApp::run()
                             /*fov*/ scene.camera.vfovDeg,
                             /*near*/ scene.camera.nearPlane,
                             /*far*/ scene.camera.farPlane,
-                            flags
+                            flags,
+                            &currViewProj,
+                            &currViewProjInv
                         );
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);
+        if constexpr (!SimpleRayTrace)
+        {
+            PrevCamData prev;
+            bool hasPrev = !(lastViewProjInv[0][0] == 0.0f && lastViewProjInv[1][1] == 0.0f && lastViewProjInv[2][2] == 0.0f);
+            prev.prevVP    = hasPrev ? lastViewProj    : currViewProj;
+            prev.prevVPInv = hasPrev ? lastViewProjInv : currViewProjInv;
+            prev.currVP    = currViewProj;
+            if (prevCamMapped[currentFrame])
+                std::memcpy(prevCamMapped[currentFrame], &prev, sizeof(PrevCamData));
+        }
 
         if constexpr (!SimpleRayTrace)
             updateFsrConstants(currentFrame);
@@ -1385,6 +1509,11 @@ void ShowcaseApp::run()
         queryPrimed[currentFrame] = true;
 
         vkResetFences(device, 1, &computeFences[currentFrame]);
+        if constexpr (!SimpleRayTrace)
+        {
+            lastViewProj    = currViewProj;
+            lastViewProjInv = currViewProjInv;
+        }
         
         VkSubmitInfo submitCompute{};
         submitCompute.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;

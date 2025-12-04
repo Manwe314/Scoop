@@ -162,6 +162,13 @@ struct PathQueue {
     uint pad2;
 };
 
+struct PixelStats {
+    uvec4 sum;
+    uvec4 sumSq;
+    uint sampleCount;
+    uint flags;
+};
+
 layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
 layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
 layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
@@ -172,15 +179,26 @@ layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    light
 layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
 layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
 layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
+layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint highVarPixelIndices[]; };
+layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
+    uint highVarCount;
+    uint rescheduleCounter;
+};
+layout(set = 2, binding = 13, std430) readonly buffer PrimaryRayBuf     { RayData   primaryRays[];     };
+layout(set = 2, binding = 14, std430) readonly buffer PrimaryHitIdsBuf  { HitIds    primaryHitIds[];   };
+layout(set = 2, binding = 15, std430) readonly buffer PrimaryHitdataBuf { Hitdata   primaryHitdata[];  };
 
 // ---------- Path state flags ----------
 
+const uint PATH_STATE_INIT        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
 const uint PATH_STATE_NEED_SHADE  = 2u;
 const uint PATH_STATE_NEED_SHADOW = 3u;
 const uint PATH_STATE_NEED_MIS    = 4u;
 const uint PATH_STATE_DEAD_WRITTEN= 5u;
 const uint PATH_STATE_DEAD        = 7u;
+const uint PATH_STATE_NEED_RAY    = 8u;
 
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;
@@ -250,6 +268,9 @@ bool badFloat(float x)
 {
     return isnan(x) || isinf(x) || x < 0.0;
 }
+
+// Force specular toggle
+bool gForceSpecular = false;
 
 // ~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
 
@@ -600,7 +621,7 @@ void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
         return;
 
     vec3 Fview = fresnel_Schlick(cosineTheta, F0);
-    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
+    float specular_weight = gForceSpecular ? 1.0 : clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
     float diffuse_weight  = 1.0 - specular_weight;
 
     vec3 candidate_wi = vec3(0.0);
@@ -638,7 +659,7 @@ void evaluateBRDF_and_PDF(const in vec3 normal, const in vec3 outgoing_dir, cons
         return;
 
     vec3 Fview = fresnel_Schlick(cosThetaOut, F0);
-    float specular_weight = clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
+    float specular_weight = gForceSpecular ? 1.0 : clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
     float diffuse_weight  = 1.0 - specular_weight;
 
     float s_pdf = getGGXPDF(normal, outgoing_dir, roughness, incoming_dir);
@@ -995,6 +1016,40 @@ void main()
     uint pathId = gid.x + gid.y * Params.imageSize.x;
 
     PathHeader pathHeader = pathHeaders[pathId];
+    if (pathHeader.flags == PATH_STATE_INIT)
+    {
+        uint frameIndex = floatBitsToUint(Params.camPos_time.w);
+        pathHeader.pixelIndex = pathId;
+        pathHeader.rngState   = wang_hash((pathId + 320452039u) ^ frameIndex);
+        setDepth(pathHeader.depth, 0u);
+
+        rays[pathId]    = primaryRays[pathId];
+        hitIds[pathId]  = primaryHitIds[pathId];
+        hitData[pathId] = primaryHitdata[pathId];
+
+        RadianceState rad;
+        rad.throughput  = vec4(1.0, 1.0, 1.0, 0.0);
+        rad.radiance    = vec4(0.0);
+        rad.prevBsdfPdf = 0.0;
+        rad.pad0 = rad.pad1 = rad.pad2 = 0.0;
+        radianceStates[pathId] = rad;
+
+        bsdfSamples[pathId] = BsdfSample(vec4(0.0), vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+        lightSamples[pathId] = LightSample(vec4(0.0), vec4(0.0), 0.0, 0.0, 0.0, 0u, 0u);
+        shadowRays[pathId]   = ShadowRay(vec4(0.0), vec4(0.0), 0u, 0u, 0u, 0u);
+        shadowResults[pathId].visible = 0u;
+        shadowResults[pathId].pad0 = shadowResults[pathId].pad1 = shadowResults[pathId].pad2 = 0u;
+
+        if (pathId == 0)
+        {
+            highVarCount      = 0u;
+            rescheduleCounter = 0u;
+        }
+
+        pathHeader.flags = PATH_STATE_NEED_SHADE;
+        pathHeaders[pathId] = pathHeader;
+    }
+
     if (pathHeader.flags != PATH_STATE_NEED_SHADE)
         return;
 
@@ -1004,6 +1059,7 @@ void main()
 
     uint depth    = getDepth(pathHeader.depth);
     uint rngState = pathHeader.rngState;
+    gForceSpecular = (depth == 0u);
 
     RayData rd = rays[pathId];
     Ray ray;

@@ -1,0 +1,1074 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// ------ Cpu side passed Objects -------
+
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 vertex_0;
+    vec4 edge_vec1;
+    vec4 edge_vec2;
+};
+
+struct ShadingTriangle {
+    vec4 vertexNormal0_uv;
+    vec4 vertexNormal1_uv;
+    vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
+};
+
+struct MaterialGPU {
+    vec4 baseColor_opacity;
+    vec4 F0_ior_rough;
+    vec4 emission_flags;
+    vec4 textureId;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+
+struct TLASNodeGPU {
+    vec4  bbMin;           
+    vec4  bbMax;          
+    uvec4 meta;            // x=first, y=count, z=left, w=right
+};
+
+struct InstanceDataGPU {
+    vec4 modelToWorld0;
+    vec4 modelToWorld1;
+    vec4 modelToWorld2;
+
+    vec4 worldToModel0;
+    vec4 worldToModel1;
+    vec4 worldToModel2;
+
+    vec4 aabbMin;
+    vec4 aabbMax;
+
+    uvec4 bases0; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases1; // x=textureBase, y=sbvhRoot, w=triLightOffset
+};
+
+struct EmisiveTrinagle {
+    uint primitiveIndex;
+    uint instanceIndex;
+    uint materialIndex;
+    uint padding;
+};
+
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf   { uint             instanceIndices[]; };
+
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  flags;
+} Params;
+
+layout(set = 0, binding = 9) uniform sampler2D textures2D[];
+layout(set = 0, binding = 4, std430) readonly buffer EmissiveTriBuf {EmisiveTrinagle emissiveTrinagles[]; };
+layout(set = 0, binding = 5, std430) readonly buffer LightProb { float lightProbability[]; };
+layout(set = 0, binding = 6, std430) readonly buffer LightPdf { float lightPDF[]; };
+layout(set = 0, binding = 7, std430) readonly buffer LightAli { uint LightAlias[]; };
+layout(set = 0, binding = 8, std430) readonly buffer triToLightIdxBuffer { uint triToLightIdx[]; };
+
+// ---------- DYNAMIC WAVEFRONT (SET 2) ----------
+
+struct PathHeader {
+    uint pixelIndex;
+    uint rngState;
+    uint depth;
+    uint flags;
+};
+
+struct RayData {
+    vec4 origin;
+    vec4 direction;
+};
+
+struct HitIds {
+    uint instanceIndex;
+    uint primitiveIndex;
+};
+
+struct Hitdata {
+    float worldT;
+    float localT;
+    float baryU;
+    float baryV;
+};
+
+struct RadianceState {
+    vec4  throughput;
+    vec4  radiance;
+    float prevBsdfPdf;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct BsdfSample {
+    vec4 dir;
+    vec4 f;
+    float pdf;
+    float cosTheta;
+    float pdf_L_B;
+    float pad0;
+};
+
+struct LightSample {
+    vec4 dir;
+    vec4 Li_fL;
+    float pdf;
+    float cosTheta;
+    float pdf_B_L;
+    uint  lightId;
+    uint  pad0;
+};
+
+struct ShadowRay {
+    vec4 origin;
+    vec4 direction;
+    uint lightId;
+    uint primitiveId;
+    uint pad0;
+    uint pad1;
+};
+
+struct ShadowResult {
+    uint visible;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct PathQueue {
+    uint count;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct PixelStats {
+    uvec4 sum;
+    uvec4 sumSq;
+    uint sampleCount;
+    uint flags;
+};
+
+layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
+layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
+layout(set = 2, binding = 2, std430) buffer HitIdsBuf     { HitIds         hitIds[];        };
+layout(set = 2, binding = 3, std430) buffer HitdataBuf    { Hitdata        hitData[];       };
+layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
+layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfSamples[];   };
+layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
+layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
+layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
+layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
+layout(set = 2, binding = 10, std430) buffer PixelStatsBuf { PixelStats     pixelStats[];    };
+layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint highVarPixelIndices[]; };
+layout(set = 2, binding = 12, std430) buffer AdaptiveCounters {
+    uint highVarCount;
+    uint rescheduleCounter;
+};
+layout(set = 2, binding = 13, std430) readonly buffer PrimaryRayBuf     { RayData   primaryRays[];     };
+layout(set = 2, binding = 14, std430) readonly buffer PrimaryHitIdsBuf  { HitIds    primaryHitIds[];   };
+layout(set = 2, binding = 15, std430) readonly buffer PrimaryHitdataBuf { Hitdata   primaryHitdata[];  };
+
+// ---------- Path state flags ----------
+
+const uint PATH_STATE_INIT        = 0u;
+const uint PATH_STATE_NEED_HIT    = 1u;
+const uint PATH_STATE_NEED_SHADE  = 2u;
+const uint PATH_STATE_NEED_SHADOW = 3u;
+const uint PATH_STATE_NEED_MIS    = 4u;
+const uint PATH_STATE_DEAD_WRITTEN= 5u;
+const uint PATH_STATE_DEAD        = 7u;
+const uint PATH_STATE_NEED_RAY    = 8u;
+
+// ---------- CONSTS ----------
+const float PI      = 3.14159265358979323846;
+const float INV_PI  = 0.31830988618379067154;
+const uint DEPTH_BITS = 16u;
+const uint DEPTH_MASK = 0x0000FFFFu;
+const uint SPP_MASK   = 0xFFFF0000u;
+
+// ~~~~~~~~~~~~~ RNG ~~~~~~~~~~~~~
+
+uint getDepth(uint packed)
+{
+    return packed & DEPTH_MASK;
+}
+
+uint getSPP(uint packed)
+{
+    return packed >> DEPTH_BITS;
+}
+
+void setDepth(inout uint packed, uint depth)
+{
+    packed = (packed & SPP_MASK) | (depth & DEPTH_MASK);
+}
+
+void setSPP(inout uint packed, uint spp)
+{
+    packed = (packed & DEPTH_MASK) | ((spp & DEPTH_MASK) << DEPTH_BITS);
+}
+
+uint wang_hash(uint s)
+{
+    s = (s ^ 61u) ^ (s >> 16);
+    s *= 9u;
+    s = s ^ (s >> 4);
+    s *= 0x27d4eb2du;
+    s = s ^ (s >> 15);
+    return s;
+}
+
+uint xorshift(inout uint state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+float floatConstruct(uint state)
+{
+    const uint ieeeMantissa = 0x007FFFFFu;
+    const uint ieeeOne      = 0x3F800000u;
+
+    state &= ieeeMantissa;
+    state |= ieeeOne;
+
+    float  f = uintBitsToFloat(state);
+    return f - 1.0;
+}
+
+float rand(inout uint state)
+{
+    return floatConstruct(wang_hash(xorshift(state)));
+}
+
+bool badFloat(float x)
+{
+    return isnan(x) || isinf(x) || x < 0.0;
+}
+
+// Force-diffuse toggle (set per-dispatch)
+bool gForceDiffuse = false;
+
+// ~~~~~~~~~~~~~ helpers ~~~~~~~~~~~~~
+
+void swap(inout float a, inout float b)
+{
+    float temp = a;
+    a = b;
+    b = temp;
+}
+
+float safeSqrt(float x) {
+    return sqrt(max(x, 0.0));
+}
+
+float angleBetween(vec3 a, vec3 b) {
+    return acos(clamp(dot(a, b), -1.0, 1.0));
+}
+
+vec3 gramSchmidt(vec3 v, vec3 n) {
+    return normalize(v - n * dot(v, n));
+}
+
+float differenceOfProducts(float a, float b, float c, float d) {
+    return a * b - c * d;
+}
+
+float sumOfProducts(float a, float b, float c, float d) {
+    return a * b + c * d;
+}
+
+vec3 affineTransformPoint(const in vec3 point, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, point) + row0.w,
+                dot(row1.xyz, point) + row1.w,
+                dot(row2.xyz, point) + row2.w);
+}
+
+vec3 affineTransformDirection(const in vec3 direction, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    return vec3(dot(row0.xyz, direction),
+                dot(row1.xyz, direction),
+                dot(row2.xyz, direction));
+}
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+vec3 interpNormal(const in vec3 normal0, const in vec3 normal1, const in vec3 normal2, const in float u, const in float v)
+{
+    float w = 1.0 - u - v;
+    vec3 normal = w * normal0 + u * normal1 + v * normal2;
+    return normalize(normal);
+}
+
+float intersectPlane(const in Ray ray, const in vec3 P0, const in vec3 N)
+{
+    float denom = dot(ray.direction, N);
+    if (denom == 0)
+        denom = 1e-8;
+    return dot(P0 - ray.origin, N) / denom;
+}
+
+Ray affineTransformRay(const in Ray ray, const in vec4 row0, const in vec4 row1, const in vec4 row2)
+{
+    Ray newRay;
+    newRay.origin = affineTransformPoint(ray.origin, row0, row1, row2); 
+    newRay.direction = affineTransformDirection(ray.direction, row0, row1, row2);
+    return newRay;
+}
+
+struct Hit {
+    float dist_to_hit;
+    float world_dist_to_hit;
+    uint instanceIndex;
+    uint primitiveIndex;
+    vec2 barrycentricUV;
+};
+
+// ~~~~~~~~~~~~~ texture differentials / ray gens ~~~~~~~~~~~~~
+
+Ray generateRay(const in uvec2 pixel)
+{
+    vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
+
+    vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
+
+    vec4 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
+    vec4 farPoint  = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
+
+    vec3 point0 = nearPoint.xyz / nearPoint.w;
+    vec3 point1 = farPoint.xyz  / farPoint.w;
+
+    Ray ray;
+    ray.origin    = Params.camPos_time.xyz;
+    ray.direction = normalize(point1 - point0);
+    return ray;
+}
+
+vec4 computeTextureDifferential(const in Ray ray, const in Ray rayDX, const in Ray rayDY, const in float tHit, const in vec3 v0, const in vec3 e1, const in vec3 e2, const in vec2 uv0, const in vec2 uv1, const in vec2 uv2)
+{
+    vec3 normal = normalize(cross(e1, e2));
+    
+    vec3 P = ray.origin + tHit * ray.direction;
+    
+    float tHitDx = intersectPlane(rayDX, v0, normal);
+    float tHitDy = intersectPlane(rayDY, v0, normal);
+    
+    vec3 Px = rayDX.origin + tHitDx * rayDX.direction;
+    vec3 Py = rayDY.origin + tHitDy * rayDY.direction;
+   
+    vec3 dPdx = Px - P;
+    vec3 dPdy = Py - P;
+    
+    vec2 duv1 = uv1 - uv0;
+    vec2 duv2 = uv2 - uv0;
+    
+    float r = 1.0 / (duv1.x * duv2.y - duv1.y * duv2.x);
+    vec3 dPdu = (e1 * duv2.y - e2 * duv1.y) * r;
+    vec3 dPdv = (e2 * duv1.x - e1 * duv2.x) * r;
+
+    float a = dot(dPdu, dPdu);
+    float b = dot(dPdu, dPdv);
+    float c = dot(dPdv, dPdv);
+
+    float det = a * c - b * b;
+    if (abs(det) < 1E-8)
+        return vec4(0.0, 0.0, 0.0, 0.0);
+    float ex = dot(dPdu, dPdx);
+    float fx = dot(dPdv, dPdx);
+
+    float dudx = (c * ex - b * fx) / det;
+    float dvdx = (-b * ex + a * fx) / det;
+
+    float ey = dot(dPdu, dPdy);
+    float fy = dot(dPdv, dPdy);
+
+    float dudy = (c * ey - b * fy) / det;
+    float dvdy = (-b * ey + a * fy) / det;
+
+    vec2 dTdx = vec2(dudx, dvdx);
+    vec2 dTdy = vec2(dudy, dvdy);
+
+    dTdx.y = -dTdx.y;
+    dTdy.y = -dTdy.y;
+
+    return vec4(dTdx, dTdy);
+}
+
+vec4 getTextureSample(const in uint textureIndex, const in Hit hit, const in vec2 vt0, const in vec2 vt1, const in vec2 vt2, const in Ray ray, const in uvec2 pixel)
+{
+    vec2 UV = (1.0 - hit.barrycentricUV.x - hit.barrycentricUV.y) * vt0 + hit.barrycentricUV.x * vt1 + hit.barrycentricUV.y * vt2;
+    UV.y = 1.0 - UV.y;
+
+    Ray rayDX = generateRay(pixel + uvec2(1, 0));
+    Ray rayDY = generateRay(pixel + uvec2(0, 1));
+
+    Ray modelRay = affineTransformRay(ray, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+    rayDX = affineTransformRay(rayDX, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+    rayDY = affineTransformRay(rayDY, instances[hit.instanceIndex].worldToModel0, instances[hit.instanceIndex].worldToModel1, instances[hit.instanceIndex].worldToModel2);
+
+    MollerTriangle trinagle = triangles[hit.primitiveIndex];
+
+    vec4 textureDifferential = computeTextureDifferential(modelRay, rayDX, rayDY, hit.dist_to_hit,
+                                                vec3(trinagle.vertex_0), vec3(trinagle.edge_vec1), vec3(trinagle.edge_vec2),
+                                                vt0, vt1, vt2);
+
+    return textureGrad(textures2D[nonuniformEXT(textureIndex)], UV, vec2(textureDifferential.xy), vec2(textureDifferential.zw));
+}
+
+// ~~~~~~~~~~~~~ BSDF / lights – identical to your code ~~~~~~~~~~~~~
+
+vec3 fresnel_Schlick(const in float cosTheta, const in vec3 F0)
+{
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+float GGX_D(const in float NdotH,const in float alpha)
+{
+    float a2 = alpha * alpha;
+    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float GGX_G1(const in float NdotX,const in float alpha)
+{
+    if (NdotX <= 0.0) return 0.0;
+    float a2 = alpha * alpha;
+    float NdotX2 = NdotX * NdotX;
+    float denom = NdotX + sqrt(a2 + (1.0 - a2) * NdotX2);
+    return (2.0 * NdotX) / max(denom, 1e-6);
+}
+
+void buildOrthonormalBasis(const in vec3 normal, out vec3 T1, out vec3 T2)
+{
+    if (abs(normal.z) < 0.999)
+        T1 = normalize(cross(normal, vec3(0.0, 0.0, 1.0)));
+    else
+        T1 = normalize(cross(normal, vec3(1.0, 0.0, 0.0)));
+
+    T2 = cross(normal, T1);
+}
+
+vec3 SampleVndf_Hemisphere(const in vec2 rand,const in vec3 incoming_dir)
+{
+    float phi = 2.0f * PI * rand.x;
+    float z = fma((1.0f - rand.y), (1.0f + incoming_dir.z), -incoming_dir.z);
+    float sinTheta = sqrt(clamp(1.0f - z * z, 0.0f, 1.0f));
+    float x = sinTheta * cos(phi);
+    float y = sinTheta * sin(phi);
+    vec3 c = vec3(x, y, z);
+    vec3 h = c + incoming_dir;
+    return h;
+}
+
+vec3 SampleVndf_GGX(const in vec2 rand, const in vec3 incoming_dir, const in vec2 alpha)
+{
+    vec3 incoming_dir_std = normalize(vec3(incoming_dir.xy * alpha, incoming_dir.z));
+    vec3 wmStd = SampleVndf_Hemisphere(rand, incoming_dir_std);
+    vec3 wm = normalize(vec3(wmStd.xy * alpha, wmStd.z));
+    return wm;
+}
+
+uint getLightIndexFromHit(const in uint instanceIndex, const in uint primitiveIndex)
+{
+    uint localIdx = primitiveIndex - instances[instanceIndex].bases0.z;
+    return triToLightIdx[instances[instanceIndex].bases1.w + localIdx];
+}
+
+float getGGXPDF(const in vec3 normal, const in vec3 outgoing_dir, const in float roughness, const in vec3 candidate_wi)
+{
+    float Ndotw_o = dot(normal, outgoing_dir);
+    float Ndotw_i = dot(normal, candidate_wi);
+    if (Ndotw_o <= 1e-6 || Ndotw_i <= 1e-6)
+        return 0.0;
+
+    vec3 H = normalize(candidate_wi + outgoing_dir);
+    float NdotH = max(dot(normal, H), 0.0);
+    float w_odotH = max(dot(outgoing_dir, H), 0.0);
+
+    float alpha = roughness * roughness;
+
+    float D   = GGX_D(NdotH, alpha);
+    float G1v = GGX_G1(Ndotw_o, alpha);
+
+    float pdf_h = (D * G1v * w_odotH) / Ndotw_o;
+
+    float pdf_wi = pdf_h / max(4.0 * w_odotH, 1e-6);
+
+    return pdf_wi;
+}
+
+void sampleGGX(const in vec3 normal,const in vec3 outgoing_dir, const in float roughness, const in float rand1, const in float rand2, out vec3 incoming_dir, out float PDF)
+{
+    PDF = 0.0;
+
+    float NdotV = dot(normal, outgoing_dir);
+    if (NdotV <= 1e-6)
+        return;
+
+    vec3 T, T2;
+    buildOrthonormalBasis(normal, T, T2);
+
+    vec3 Vlocal = vec3(dot(outgoing_dir, T), dot(outgoing_dir, T2), dot(outgoing_dir, normal));
+
+    float alpha = roughness * roughness;
+
+    vec3 hLocal = SampleVndf_GGX(vec2(rand1, rand2), normalize(Vlocal), vec2(alpha, alpha));
+    hLocal = normalize(hLocal);
+
+    vec3 incoming_local = reflect(-Vlocal, hLocal);
+    if (incoming_local.z <= 0.0)
+        return;
+
+    vec3 H = normalize(hLocal.x * T + hLocal.y * T2 + hLocal.z * normal);
+
+    incoming_dir = normalize(incoming_local.x * T + incoming_local.y * T2 + incoming_local.z * normal);
+
+    PDF = getGGXPDF(normal, outgoing_dir, roughness, incoming_dir);
+}
+
+float getDiffusePDF(const in vec3 normal, const in vec3 candidate_wi)
+{
+    float cosine = dot(normal, candidate_wi);
+    return (cosine > 0.0) ? (cosine * INV_PI) : 0.0;
+}
+
+void sampleDiffuse(const in vec3 normal,const in float rand1, const in float rand2 ,out vec3 incoming_dir, out float PDF)
+{
+    PDF = 0.0;
+
+    float phi = 2.0 * PI * rand1;
+    float r   = sqrt(rand2);
+    float x   = r * cos(phi);
+    float y   = r * sin(phi);
+    float z   = sqrt(1.0 - rand2);
+
+    vec3 local_direction = vec3(x, y, z);
+
+    vec3 T1;
+    vec3 T2;
+    buildOrthonormalBasis(normal, T1, T2);
+
+    incoming_dir = normalize(local_direction.x * T1 + local_direction.y * T2 + local_direction.z * normal);
+
+    PDF = getDiffusePDF(normal, incoming_dir);
+}
+
+vec3 evaluateBRDF(const in vec3 normal, const in vec3 incoming_dir, const in vec3 outgoing_dir, const in vec3 baseColor, const in vec3 F0, const in float roughness)
+{
+    float Ndotw_i = dot(normal, incoming_dir);
+    float Ndotw_o = dot(normal, outgoing_dir);
+    if (Ndotw_i <= 1e-6|| Ndotw_o <= 1e-6)
+        return vec3(0.0);
+
+    vec3 f_diffuse = baseColor * INV_PI;
+
+    vec3 H = normalize(incoming_dir + outgoing_dir);
+    float NdotH = max(dot(normal, H), 0.0);
+    float w_odotH = max(dot(outgoing_dir, H), 0.0);
+
+    float alpha = roughness * roughness;
+
+    float D   = GGX_D(NdotH, alpha);
+    float G1v = GGX_G1(Ndotw_o, alpha);
+    float G1l = GGX_G1(Ndotw_i, alpha);
+    float G   = G1v * G1l;
+
+    vec3 F = fresnel_Schlick(w_odotH, F0);
+
+    vec3 f_specular = (D * G * F) / max(4.0 * Ndotw_i * Ndotw_o, 1e-6);
+
+    return f_diffuse + f_specular;
+}
+
+void BRDF(const in vec3 normal, const in vec3 outgoing_dir,
+          const in vec3 baseColor, const in vec3 F0, const in float roughness,
+          const in float randLobe, const in float rand1, const in float rand2,
+          out vec3 incoming_dir, out vec3 BRDF_value, out float BRDF_PDF)
+{
+    incoming_dir = vec3(0.0);
+    BRDF_value   = vec3(0.0);
+    BRDF_PDF     = 0.0;
+
+    float cosineTheta = dot(normal, outgoing_dir);
+    if (cosineTheta <= 1e-6)
+        return;
+
+    vec3 Fview = fresnel_Schlick(cosineTheta, F0);
+    float specular_weight = gForceDiffuse ? 0.0 : clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
+    float diffuse_weight  = 1.0 - specular_weight;
+
+    vec3 candidate_wi = vec3(0.0);
+    float s_pdf = 0.0;
+    float d_pdf = 0.0;
+    if (!gForceDiffuse && randLobe < specular_weight)
+    {
+        sampleGGX(normal, outgoing_dir, roughness, rand1, rand2 ,candidate_wi, s_pdf);
+        d_pdf = getDiffusePDF(normal,candidate_wi);
+    }
+    else
+    {
+        sampleDiffuse(normal,rand1, rand2, candidate_wi, d_pdf);
+        s_pdf = getGGXPDF(normal, outgoing_dir, roughness, candidate_wi);
+    }
+
+    float pdf = specular_weight * s_pdf + diffuse_weight * d_pdf;
+
+    if (pdf <= 1e-4)
+        return;
+    incoming_dir = candidate_wi;
+    BRDF_value   = evaluateBRDF(normal, candidate_wi, outgoing_dir, baseColor, F0, roughness);
+    BRDF_PDF     = pdf;
+}
+
+void evaluateBRDF_and_PDF(const in vec3 normal, const in vec3 outgoing_dir, const in vec3 incoming_dir, const in vec3 baseColor, const in vec3 F0, const in float roughness,
+                          out vec3 f,
+                          out float pdf)
+{
+    f   = vec3(0.0);
+    pdf = 0.0;
+
+    float cosThetaOut = dot(normal, outgoing_dir);
+    if (cosThetaOut <= 1e-6)
+        return;
+
+    vec3 Fview = fresnel_Schlick(cosThetaOut, F0);
+    float specular_weight = gForceDiffuse ? 0.0 : clamp(max(max(Fview.r, Fview.g), Fview.b), 0.0, 1.0);
+    float diffuse_weight  = 1.0 - specular_weight;
+
+    float s_pdf = getGGXPDF(normal, outgoing_dir, roughness, incoming_dir);
+    float d_pdf = getDiffusePDF(normal, incoming_dir);
+
+    pdf = specular_weight * s_pdf + diffuse_weight * d_pdf;
+    if (pdf <= 0.0)
+        return;
+
+    f = evaluateBRDF(normal, incoming_dir, outgoing_dir, baseColor, F0, roughness);
+}
+
+void BSDF(const in vec3 normal, const in vec3 outgoing_dir, inout uint rngState,
+          const in vec3 baseColor, const in vec3 F0, const in float roughness, const in vec3 emission,
+          out vec3 incoming_dir, out vec3 BSDF_value, out float BSDF_PDF)
+{
+    incoming_dir = vec3(0.0);
+    BSDF_value   = vec3(0.0);
+    BSDF_PDF     = 0.0;
+
+    float randLobe = rand(rngState);
+    float rand1    = rand(rngState);
+    float rand2    = rand(rngState);
+
+    vec3 w_i_BRDF;
+    vec3 BRDF_value;
+    float BRDF_PDF;
+
+    BRDF(normal, outgoing_dir, baseColor, F0, roughness, randLobe, rand1, rand2, w_i_BRDF, BRDF_value, BRDF_PDF);
+    
+    if (BRDF_PDF <= 0.0)
+        return;
+    
+    incoming_dir = w_i_BRDF;
+    BSDF_value   = BRDF_value;
+    BSDF_PDF     = BRDF_PDF;
+}
+
+// --- spherical triangle sampling / lights (unchanged from your code) ---
+
+float sphericalTrianglePDF(vec3 v0, vec3 v1, vec3 v2, vec3 refP)
+{
+    vec3 a = normalize(v0 - refP);
+    vec3 b = normalize(v1 - refP);
+    vec3 c = normalize(v2 - refP);
+
+    if (length(a) == 0.0 || length(b) == 0.0 || length(c) == 0.0)
+        return 0.0;
+
+    vec3 n_ab = cross(a, b);
+    vec3 n_bc = cross(b, c);
+    vec3 n_ca = cross(c, a);
+
+    if (dot(n_ab, n_ab) == 0.0 ||
+        dot(n_bc, n_bc) == 0.0 ||
+        dot(n_ca, n_ca) == 0.0)
+        return 0.0;
+
+    n_ab = normalize(n_ab);
+    n_bc = normalize(n_bc);
+    n_ca = normalize(n_ca);
+
+    float alpha = angleBetween(n_ab, -n_ca);
+    float beta  = angleBetween(n_bc, -n_ab);
+    float gamma = angleBetween(n_ca, -n_bc);
+
+    float A_pi  = alpha + beta + gamma;
+    float A     = A_pi - PI;
+    if (A <= 0.0)
+        return 0.0;
+
+    return 1.0 / A;
+}
+
+bool sampleSphericalTriangle( vec3 v0, vec3 v1, vec3 v2,
+                              vec3 refP, vec2 u, 
+                              out vec3 out_w, out float out_pdf)
+{
+    vec3 a = normalize(v0 - refP);
+    vec3 b = normalize(v1 - refP);
+    vec3 c = normalize(v2 - refP);
+
+    if (length(a) == 0.0 || length(b) == 0.0 || length(c) == 0.0)
+        return false;
+
+    vec3 n_ab = cross(a, b);
+    vec3 n_bc = cross(b, c);
+    vec3 n_ca = cross(c, a);
+
+    if (dot(n_ab, n_ab) == 0.0 ||
+        dot(n_bc, n_bc) == 0.0 ||
+        dot(n_ca, n_ca) == 0.0)
+        return false;
+
+    n_ab = normalize(n_ab);
+    n_bc = normalize(n_bc);
+    n_ca = normalize(n_ca);
+
+    float alpha = angleBetween(n_ab, -n_ca);
+    float beta  = angleBetween(n_bc, -n_ab);
+    float gamma = angleBetween(n_ca, -n_bc);
+
+    float A_pi  = alpha + beta + gamma;
+    float A     = A_pi - PI;
+    if (A <= 0.0) return false;
+
+    out_pdf = 1.0 / A;
+
+    float Ap = u.x * A;
+    float Ap_pi = Ap + PI;
+
+    float cosAlpha = cos(alpha);
+    float sinAlpha = sin(alpha);
+
+    float sinAp   = sin(Ap_pi);
+    float cosAp   = cos(Ap_pi);
+
+    float sinPhi = sinAp * cosAlpha - cosAp * sinAlpha;
+    float cosPhi = cosAp * cosAlpha + sinAp * sinAlpha;
+
+    float k1 = cosPhi + cosAlpha;
+    float cos_c = dot(a, b);
+    float k2 = sinPhi - sinAlpha * cos_c;
+
+    float num   = k2 + differenceOfProducts(k2, cosPhi, k1, sinPhi) * cosAlpha;
+    float denom = (sumOfProducts(k2, sinPhi, k1, cosPhi)) * sinAlpha;
+
+    if (abs(denom) < 1e-8)
+        return false;
+
+    float cosBp = num / denom;
+    cosBp = clamp(cosBp, -1.0, 1.0);
+    float sinBp = safeSqrt(1.0 - cosBp * cosBp);
+
+    vec3 c_ortho = gramSchmidt(c, a);
+    vec3 cp = cosBp * a + sinBp * normalize(c_ortho);
+
+    float dot_bc = dot(b, cp);
+    float cosTheta = 1.0 - u.y * (1.0 - dot_bc);
+    cosTheta = clamp(cosTheta, -1.0, 1.0);
+    float sinTheta = safeSqrt(1.0 - cosTheta * cosTheta);
+
+    vec3 axis = gramSchmidt(cp, b);
+    vec3 w = cosTheta * b + sinTheta * normalize(axis);
+
+    out_w = normalize(w);
+    return true;
+}
+
+float lightDirectionalPDF(const in vec3 hitPoint, const in uint lightIdx)
+{
+    uint instIdx = emissiveTrinagles[lightIdx].instanceIndex;
+    uint primIdx = emissiveTrinagles[lightIdx].primitiveIndex;
+    MollerTriangle tri = triangles[primIdx];
+
+    vec3 v0_model = vec3(tri.vertex_0);
+    vec3 v1_model = v0_model + vec3(tri.edge_vec1);
+    vec3 v2_model = v0_model + vec3(tri.edge_vec2);
+
+    vec3 v0_world = affineTransformPoint(v0_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v1_world = affineTransformPoint(v1_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v2_world = affineTransformPoint(v2_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+
+    float pdfSolidAngle = sphericalTrianglePDF(v0_world, v1_world, v2_world, hitPoint);
+
+    if (pdfSolidAngle <= 0.0)
+        return 0.0;
+
+    return lightPDF[lightIdx] * pdfSolidAngle;
+}
+
+bool lightSample(vec3 hitPoint, vec3 normal, inout uint rngState,
+                 out vec3 incoming_dir, out vec3 emission, out float pdfDir, out float cosTheta, out uint lightI)
+{
+    incoming_dir = vec3(0.0);
+    emission     = vec3(0.0);
+    pdfDir       = 0.0;
+    cosTheta     = 0.0;
+
+    uint numberOfLights = emissiveTrinagles[0].padding;
+    if (numberOfLights == 0u)
+        return false;
+
+    float u1 = rand(rngState);
+    float u2 = rand(rngState);
+
+    uint k = uint(u1 * float(numberOfLights));
+    if (k >= numberOfLights)
+        k = numberOfLights - 1u;
+
+    uint lightIdx = (u2 < lightProbability[k]) ? k : LightAlias[k];
+    lightI = lightIdx;
+
+    if (lightPDF[lightIdx] <= 0.0)
+        return false;
+
+    MollerTriangle tri = triangles[emissiveTrinagles[lightIdx].primitiveIndex];
+
+    uint instIdx = emissiveTrinagles[lightIdx].instanceIndex;
+
+    vec3 v0_model = vec3(tri.vertex_0);
+    vec3 v1_model = v0_model + vec3(tri.edge_vec1);
+    vec3 v2_model = v0_model + vec3(tri.edge_vec2);
+
+    vec3 v0_world = affineTransformPoint(v0_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v1_world = affineTransformPoint(v1_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+    vec3 v2_world = affineTransformPoint(v2_model,
+                                         instances[instIdx].modelToWorld0,
+                                         instances[instIdx].modelToWorld1,
+                                         instances[instIdx].modelToWorld2);
+
+    vec2 u = vec2(rand(rngState), rand(rngState));
+    float pdfSolidAngle;
+
+    if (!sampleSphericalTriangle(v0_world, v1_world, v2_world, hitPoint, u, incoming_dir, pdfSolidAngle))
+        return false;
+
+    if (pdfSolidAngle <= 0.0)
+        return false;
+
+    pdfDir = lightPDF[lightIdx] * pdfSolidAngle;
+    if (pdfDir <= 0.0)
+        return false;
+
+
+    cosTheta = max(dot(normal, incoming_dir), 0.0);
+    if (cosTheta <= 0.0)
+        return false;
+
+    emission = materials[emissiveTrinagles[lightIdx].materialIndex].emission_flags.xyz;
+
+    return true;
+}
+
+// ~~~~~~~~~~~~~ solveRenderingEquation (per-bounce) ~~~~~~~~~~~~~
+
+void solveRenderingEquation(const in Ray ray, const in Hit hit, inout uint rngState, const in uvec2 pixel, const in uint pathId, const in uint bounce)
+{
+    vec3 luminance = vec3(0.0);
+
+    ShadingTriangle trinagle = shadingTris[hit.primitiveIndex];
+    vec4 vertex0_data = trinagle.vertexNormal0_uv;
+    vec4 vertex1_data = trinagle.vertexNormal1_uv;
+    vec4 vertex2_data = trinagle.vertexNormal2_uv;
+
+    vec4 texture_material = trinagle.texture_materialId;
+    uint materialIndex = floatBitsToUint(texture_material.w);
+    materialIndex += instances[hit.instanceIndex].bases0.w;
+    MaterialGPU material = materials[materialIndex];
+    uint textureIndex = floatBitsToUint(material.textureId.x);
+
+    vec3 baseColor = material.baseColor_opacity.xyz;
+    if (textureIndex != 0xFFFFFFFFu)
+    {
+        vec2 vt0 = vec2(vertex0_data.w, texture_material.x);
+        vec2 vt1 = vec2(vertex1_data.w, texture_material.y);
+        vec2 vt2 = vec2(vertex2_data.w, texture_material.z);
+        
+        baseColor *= vec3(getTextureSample(textureIndex, hit, vt0, vt1, vt2, ray, pixel));
+    }
+
+    vec3 normal = interpNormal(vertex0_data.xyz, vertex1_data.xyz, vertex2_data.xyz, hit.barrycentricUV.x, hit.barrycentricUV.y);
+    normal = affineTransformDirection(normal, instances[hit.instanceIndex].modelToWorld0, instances[hit.instanceIndex].modelToWorld1, instances[hit.instanceIndex].modelToWorld2);
+    normal = normalize(normal);
+    bool frontFace = dot(normal, -ray.direction) > 0.0;
+    normal = frontFace ? normal : -normal;
+
+    vec3 hitPoint = ray.origin + hit.world_dist_to_hit * ray.direction;
+
+    uint lightIndex;
+    vec3 wi_L, Li_L;
+    float pdf_L, cosTheta_L;
+    if (lightSample(hitPoint, normal, rngState, wi_L, Li_L, pdf_L, cosTheta_L, lightIndex))
+    {
+        vec3 f_L;
+        float pdf_B_L;
+        evaluateBRDF_and_PDF(normal, -ray.direction, wi_L, baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w , f_L, pdf_B_L);
+
+        LightSample smpl;
+        smpl.dir = vec4(wi_L, 0.0);
+        smpl.Li_fL = vec4((Li_L * f_L), 0.0);
+        smpl.pdf = pdf_L;
+        smpl.cosTheta = cosTheta_L;
+        smpl.pdf_B_L = pdf_B_L;
+        smpl.lightId = lightIndex;
+        lightSamples[pathId] = smpl;
+
+        ShadowRay shadow;
+        shadow.origin = vec4(hitPoint + 1e-4 * wi_L, 0.0);
+        shadow.direction = vec4(wi_L, 0.0);
+        shadow.lightId = lightIndex;
+        shadow.primitiveId = emissiveTrinagles[lightIndex].primitiveIndex;
+        shadowRays[pathId] = shadow;
+        pathHeaders[pathId].flags = PATH_STATE_NEED_SHADOW;
+    }
+
+    uint lightIdx = getLightIndexFromHit(hit.instanceIndex, hit.primitiveIndex);
+    float pdf_L_B;
+    if (bounce != 0 && lightIdx != 0xFFFFFFFFu)
+        pdf_L_B = lightDirectionalPDF((ray.origin - (1e-4 * -ray.direction)) ,lightIdx);
+    else
+        pdf_L_B = 0.0;
+    vec3 wi_B, f_B;
+    float pdf_B;
+
+    BSDF(normal, -ray.direction, rngState,
+         baseColor, material.F0_ior_rough.xyz, material.F0_ior_rough.w, material.emission_flags.xyz,
+         wi_B, f_B, pdf_B);
+    float cosTheta_B = max(dot(normal, wi_B), 0.0);
+    if (pdf_B <= 0.0 || cosTheta_B <= 0.0)
+    {
+        radianceStates[pathId].throughput = vec4(0.0);
+        pathHeaders[pathId].flags = PATH_STATE_DEAD;
+        return;
+    }
+
+    BsdfSample bsdfSample;
+    bsdfSample.dir = vec4(wi_B, 0.0);
+    bsdfSample.f = vec4(f_B, 0.0);
+    bsdfSample.pdf = pdf_B;
+    bsdfSample.cosTheta = cosTheta_B;
+    bsdfSample.pdf_L_B = pdf_L_B;
+    bsdfSamples[pathId] = bsdfSample;
+    pathHeaders[pathId].rngState = rngState;
+    if (pathHeaders[pathId].flags != PATH_STATE_NEED_SHADOW)
+        pathHeaders[pathId].flags = PATH_STATE_NEED_MIS;
+
+}
+
+// ~~~~~~~~~~~~~ main: one bounce of shading per active path ~~~~~~~~~~~~~
+
+void main()
+{
+    uvec2 gid = gl_GlobalInvocationID.xy;
+
+    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
+        return;
+
+    uint pathId = gid.x + gid.y * Params.imageSize.x;
+
+    PathHeader pathHeader = pathHeaders[pathId];
+    if (pathHeader.flags == PATH_STATE_INIT)
+    {
+        // Seed RNG and pixel index
+        uint frameIndex = floatBitsToUint(Params.camPos_time.w);
+        pathHeader.pixelIndex = pathId;
+        pathHeader.rngState   = wang_hash((pathId + 320452039u) ^ frameIndex);
+        setDepth(pathHeader.depth, 0u);
+
+        // Copy primary hit results into wavefront buffers
+        rays[pathId]    = primaryRays[pathId];
+        hitIds[pathId]  = primaryHitIds[pathId];
+        hitData[pathId] = primaryHitdata[pathId];
+
+        RadianceState rad;
+        rad.throughput  = vec4(1.0, 1.0, 1.0, 0.0);
+        rad.radiance    = vec4(0.0);
+        rad.prevBsdfPdf = 0.0;
+        rad.pad0 = rad.pad1 = rad.pad2 = 0.0;
+        radianceStates[pathId] = rad;
+
+        bsdfSamples[pathId] = BsdfSample(vec4(0.0), vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+        lightSamples[pathId] = LightSample(vec4(0.0), vec4(0.0), 0.0, 0.0, 0.0, 0u, 0u);
+        shadowRays[pathId]   = ShadowRay(vec4(0.0), vec4(0.0), 0u, 0u, 0u, 0u);
+        shadowResults[pathId].visible = 0u;
+        shadowResults[pathId].pad0 = shadowResults[pathId].pad1 = shadowResults[pathId].pad2 = 0u;
+
+        if (pathId == 0)
+        {
+            highVarCount      = 0u;
+            rescheduleCounter = 0u;
+        }
+
+        pathHeader.flags = PATH_STATE_NEED_SHADE;
+        pathHeaders[pathId] = pathHeader;
+    }
+
+    if (pathHeader.flags != PATH_STATE_NEED_SHADE)
+        return;
+
+    uint pixelIndex = pathHeader.pixelIndex;
+    uvec2 pixel = uvec2(pixelIndex % Params.imageSize.x,
+                        pixelIndex / Params.imageSize.x);
+
+    uint depth    = getDepth(pathHeader.depth);
+    uint rngState = pathHeader.rngState;
+    gForceDiffuse = (depth == 0u);
+
+    RayData rd = rays[pathId];
+    Ray ray;
+    ray.origin    = rd.origin.xyz;
+    ray.direction = rd.direction.xyz;
+    HitIds hid = hitIds[pathId];
+    Hitdata hd = hitData[pathId];
+    Hit hit = Hit(hd.localT, hd.worldT, hid.instanceIndex, hid.primitiveIndex, vec2(hd.baryU, hd.baryV));
+    solveRenderingEquation(ray, hit,rngState, pixel, pathId ,depth);
+}

@@ -280,6 +280,18 @@ void ShowcaseApp::createOrResizeWavefrontBuffers()
         ensureBufferCapacity(adaptiveCountersBuf[frame], adaptiveCountersMem[frame],
                              sizeof(AdaptiveCountersGPU),
                              usage, memFlags);
+
+        ensureBufferCapacity(primaryRayBuf[frame], primaryRayMem[frame],
+                             pathCount * sizeof(Ray),
+                             usage, memFlags);
+
+        ensureBufferCapacity(primaryHitIdsBuf[frame], primaryHitIdsMem[frame],
+                             pathCount * sizeof(HitIds),
+                             usage, memFlags);
+
+        ensureBufferCapacity(primaryHitDataBuf[frame], primaryHitDataMem[frame],
+                             pathCount * sizeof(Hitdata),
+                             usage, memFlags);
     }
 }
 
@@ -763,6 +775,11 @@ ShowcaseApp::ShowcaseApp(VkPhysicalDevice gpu, VkInstance inst, Scene scene) : w
     }
     createParamsBuffers();
     if constexpr (!SimpleRayTrace)
+    {
+        createPrevCameraBuffers();
+        createPrevViewZImages();
+    }
+    if constexpr (!SimpleRayTrace)
         createFsrConstBuffers();
     createComputeDescriptors();
     createGraphicsDescriptors();
@@ -801,14 +818,22 @@ ShowcaseApp::~ShowcaseApp()
         vkDestroyPipeline(device, rayTraceLogicPipeline, nullptr);
     if (rayTraceNewPathPipeline)
         vkDestroyPipeline(device, rayTraceNewPathPipeline, nullptr);
-    if (rayTraceMaterialPipeline)
-        vkDestroyPipeline(device, rayTraceMaterialPipeline, nullptr);
+    if (rayTraceMaterialDiffusePipeline)
+        vkDestroyPipeline(device, rayTraceMaterialDiffusePipeline, nullptr);
+    if (rayTraceMaterialSpecularPipeline)
+        vkDestroyPipeline(device, rayTraceMaterialSpecularPipeline, nullptr);
     if (rayTraceExtendRayPipeline)
         vkDestroyPipeline(device, rayTraceExtendRayPipeline, nullptr);
     if (rayTraceShadowRayPipeline)
         vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
     if (rayTraceFinalWritePipeline)
         vkDestroyPipeline(device, rayTraceFinalWritePipeline, nullptr);
+    if (rayTracePrimaryNewPathPipeline)
+        vkDestroyPipeline(device, rayTracePrimaryNewPathPipeline, nullptr);
+    if (rayTracePrimaryExtendRayPipeline)
+        vkDestroyPipeline(device, rayTracePrimaryExtendRayPipeline, nullptr);
+    if (rayTraceWritePrimaryNRDPipeline)
+        vkDestroyPipeline(device, rayTraceWritePrimaryNRDPipeline, nullptr);
     if (FSRPipeline)
         vkDestroyPipeline(device, FSRPipeline, nullptr);
     if (FSRSharpenPipeline)
@@ -823,6 +848,8 @@ ShowcaseApp::~ShowcaseApp()
         destroyFSRTarget();
         destroyNrdTargets();
         destroyNRD();
+        destroyPrevCameraBuffers();
+        destroyPrevViewZImages();
     }
 
     if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
@@ -930,8 +957,11 @@ void ShowcaseApp::createWavefrontBuffers()
         VkDescriptorBufferInfo b10{ pixelStatsBuf[i],        0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo b11{ highVarPixelBuf[i],      0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo b12{ adaptiveCountersBuf[i],  0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b13{ primaryRayBuf[i],        0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b14{ primaryHitIdsBuf[i],     0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo b15{ primaryHitDataBuf[i],    0, VK_WHOLE_SIZE };
 
-        VkWriteDescriptorSet writes[13]{};
+        VkWriteDescriptorSet writes[16]{};
 
         auto initWrite = [&](VkWriteDescriptorSet& w, uint32_t binding, const VkDescriptorBufferInfo* info)
         {
@@ -957,8 +987,11 @@ void ShowcaseApp::createWavefrontBuffers()
         initWrite(writes[10], 10, &b10);
         initWrite(writes[11], 11, &b11);
         initWrite(writes[12], 12, &b12);
+        initWrite(writes[13], 13, &b13);
+        initWrite(writes[14], 14, &b14);
+        initWrite(writes[15], 15, &b15);
 
-        vkUpdateDescriptorSets(device, 13, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 16, writes, 0, nullptr);
     }
 }
 
@@ -1735,6 +1768,8 @@ void ShowcaseApp::recreateSwapchain()
     {
         destroyFSRTarget();
         destroyNrdTargets();
+        destroyPrevViewZImages();
+        destroyPrevCameraBuffers();
     }
 
     createSwapchain();
@@ -1747,6 +1782,8 @@ void ShowcaseApp::recreateSwapchain()
         createFSRTargets();
         createNrdTargets();
         createNrdInputTargets();
+        createPrevCameraBuffers();
+        createPrevViewZImages();
     }
 
     updateComputeDescriptor();
@@ -2540,7 +2577,7 @@ void ShowcaseApp::createComputeDescriptors()
     }
     else
     {
-        set1.resize(16);
+        set1.resize(18);
         initSet1(set1[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS nodes
         initSet1(set1[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS instances
         initSet1(set1[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS indices
@@ -2557,6 +2594,8 @@ void ShowcaseApp::createComputeDescriptors()
         initSet1(set1[13], 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // motion vectors
         initSet1(set1[14], 14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
         initSet1(set1[15], 15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+        initSet1(set1[16], 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev view/proj data
+        initSet1(set1[17], 17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // prev viewZ image
     }
 
     VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
@@ -2584,7 +2623,7 @@ void ShowcaseApp::createComputeDescriptors()
     //  11: HighVarPixelIndices[]
     //  12: AdaptiveCounters
 
-    VkDescriptorSetLayoutBinding d[13]{};
+    VkDescriptorSetLayoutBinding d[16]{};
 
     auto initSet2 = [](VkDescriptorSetLayoutBinding& b, uint32_t binding)
     {
@@ -2595,12 +2634,12 @@ void ShowcaseApp::createComputeDescriptors()
         b.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
     };
 
-    for (uint32_t b = 0; b < 13; ++b)
+    for (uint32_t b = 0; b < 16; ++b)
         initSet2(d[b], b);
 
     VkDescriptorSetLayoutCreateInfo dynamicLayoutCreateInfo{ };
     dynamicLayoutCreateInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dynamicLayoutCreateInfo.bindingCount = 13;
+    dynamicLayoutCreateInfo.bindingCount = 16;
     dynamicLayoutCreateInfo.pBindings    = d;
 
     if (vkCreateDescriptorSetLayout(device, &dynamicLayoutCreateInfo, nullptr, &computeDynamicSetLayout) != VK_SUCCESS)
@@ -2610,10 +2649,10 @@ void ShowcaseApp::createComputeDescriptors()
     VkDescriptorPoolSize poolSizes[4]{};
 
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 9 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[0].descriptorCount = 10 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[1].descriptorCount = 27 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[1].descriptorCount = 35 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[2].descriptorCount = maxTextures + 2 * SwapChain::MAX_FRAMES_IN_FLIGHT;
@@ -2794,10 +2833,20 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             inViewZInfo.imageView   = nrdInputs[i].viewZ.view;
             inViewZInfo.sampler     = VK_NULL_HANDLE;
 
-            VkDescriptorImageInfo inMotionInfo{};
-            inMotionInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            inMotionInfo.imageView   = nrdInputs[i].motionVec.view;
-            inMotionInfo.sampler     = VK_NULL_HANDLE;
+        VkDescriptorImageInfo inMotionInfo{};
+        inMotionInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        inMotionInfo.imageView   = nrdInputs[i].motionVec.view;
+        inMotionInfo.sampler     = VK_NULL_HANDLE;
+
+        VkDescriptorImageInfo prevViewZInfo{};
+        prevViewZInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        prevViewZInfo.imageView   = prevViewZView[i];
+        prevViewZInfo.sampler     = VK_NULL_HANDLE;
+
+        VkDescriptorBufferInfo prevCamInfo{};
+        prevCamInfo.buffer = prevCamBuffer[i];
+        prevCamInfo.offset = 0;
+        prevCamInfo.range  = sizeof(PrevCamData);
 
             VkWriteDescriptorSet writes[12]{};
 
@@ -2896,8 +2945,28 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             writes[11].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[11].descriptorCount = 1;
             writes[11].pImageInfo      = &inMotionInfo;
-                
-            vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
+
+            VkWriteDescriptorSet extra[2]{};
+            extra[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            extra[0].dstSet          = computeFrameSets[i];
+            extra[0].dstBinding      = 16;
+            extra[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            extra[0].descriptorCount = 1;
+            extra[0].pBufferInfo     = &prevCamInfo;
+
+            extra[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            extra[1].dstSet          = computeFrameSets[i];
+            extra[1].dstBinding      = 17;
+            extra[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            extra[1].descriptorCount = 1;
+            extra[1].pImageInfo      = &prevViewZInfo;
+
+            std::array<VkWriteDescriptorSet, 14> allWrites{};
+            for (int w = 0; w < 12; ++w) allWrites[w] = writes[w];
+            allWrites[12] = extra[0];
+            allWrites[13] = extra[1];
+
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
         }
     };
 
@@ -3006,6 +3075,110 @@ void ShowcaseApp::createParamsBuffers()
     }
 }
 
+void ShowcaseApp::createPrevCameraBuffers()
+{
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        createBuffer(device, physicalDevice, sizeof(PrevCamData),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            prevCamBuffer[i], prevCamMemory[i]);
+
+        VkResult result = vkMapMemory(device, prevCamMemory[i], 0, sizeof(PrevCamData), 0, &prevCamMapped[i]);
+        if (result != VK_SUCCESS)
+            throw std::runtime_error("Map prev camera buffer failed");
+    }
+}
+
+void ShowcaseApp::destroyPrevCameraBuffers()
+{
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        if (prevCamMapped[i])
+        {
+            vkUnmapMemory(device, prevCamMemory[i]);
+            prevCamMapped[i] = nullptr;
+        }
+        if (prevCamBuffer[i]) { vkDestroyBuffer(device, prevCamBuffer[i], nullptr); prevCamBuffer[i] = VK_NULL_HANDLE; }
+        if (prevCamMemory[i]) { vkFreeMemory(device, prevCamMemory[i], nullptr);   prevCamMemory[i] = VK_NULL_HANDLE; }
+    }
+}
+
+void ShowcaseApp::createPrevViewZImages()
+{
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        prevViewZInitialized[i] = false;
+        VkExtent3D extent3D{ rayTraceExtent.width, rayTraceExtent.height, 1 };
+
+        VkImageCreateInfo ci{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ci.imageType     = VK_IMAGE_TYPE_2D;
+        ci.format        = VK_FORMAT_R32_SFLOAT;
+        ci.extent        = extent3D;
+        ci.mipLevels     = 1;
+        ci.arrayLayers   = 1;
+        ci.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (vkCreateImage(device, &ci, nullptr, &prevViewZImage[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create prevViewZ image");
+
+        VkMemoryRequirements memReq{};
+        vkGetImageMemoryRequirements(device, prevViewZImage[i], &memReq);
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+        uint32_t memoryTypeIndex = UINT32_MAX;
+        for (uint32_t m = 0; m < memProps.memoryTypeCount; ++m)
+        {
+            bool typeOk  = (memReq.memoryTypeBits & (1u << m)) != 0;
+            bool flagsOk = (memProps.memoryTypes[m].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            if (typeOk && flagsOk)
+            {
+                memoryTypeIndex = m;
+                break;
+            }
+        }
+        if (memoryTypeIndex == UINT32_MAX)
+            throw std::runtime_error("Showcase: no suitable memory type for prevViewZ image!");
+
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = memReq.size;
+        mai.memoryTypeIndex = memoryTypeIndex;
+
+        if (vkAllocateMemory(device, &mai, nullptr, &prevViewZMemory[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to allocate prevViewZ image memory!");
+
+        vkBindImageMemory(device, prevViewZImage[i], prevViewZMemory[i], 0);
+
+        VkImageViewCreateInfo viewCI{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        viewCI.image    = prevViewZImage[i];
+        viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCI.format   = ci.format;
+        viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCI.subresourceRange.baseMipLevel   = 0;
+        viewCI.subresourceRange.levelCount     = 1;
+        viewCI.subresourceRange.baseArrayLayer = 0;
+        viewCI.subresourceRange.layerCount     = 1;
+
+        if (vkCreateImageView(device, &viewCI, nullptr, &prevViewZView[i]) != VK_SUCCESS)
+            throw std::runtime_error("Showcase: failed to create prevViewZ image view!");
+    }
+}
+
+void ShowcaseApp::destroyPrevViewZImages()
+{
+    for (uint32_t i = 0; i < (uint32_t)SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        if (prevViewZView[i])   { vkDestroyImageView(device, prevViewZView[i], nullptr); prevViewZView[i] = VK_NULL_HANDLE; }
+        if (prevViewZImage[i])  { vkDestroyImage(device, prevViewZImage[i], nullptr);    prevViewZImage[i] = VK_NULL_HANDLE; }
+        if (prevViewZMemory[i]) { vkFreeMemory(device, prevViewZMemory[i], nullptr);     prevViewZMemory[i] = VK_NULL_HANDLE; }
+        prevViewZInitialized[i] = false;
+    }
+}
+
 void ShowcaseApp::createFsrConstBuffers()
 {
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
@@ -3031,46 +3204,27 @@ void ShowcaseApp::createComputePipeline()
         computePipeline = VK_NULL_HANDLE;
     }
 
-    if (rayTraceLogicPipeline)
+    auto destroyPipe = [&](VkPipeline& p)
     {
-        vkDestroyPipeline(device, rayTraceLogicPipeline, nullptr);
-        rayTraceLogicPipeline = VK_NULL_HANDLE;
-    }
-    if (rayTraceNewPathPipeline)
-    {
-        vkDestroyPipeline(device, rayTraceNewPathPipeline, nullptr);
-        rayTraceNewPathPipeline = VK_NULL_HANDLE;
-    }
-    if (rayTraceMaterialPipeline)
-    {
-        vkDestroyPipeline(device, rayTraceMaterialPipeline, nullptr);
-        rayTraceMaterialPipeline = VK_NULL_HANDLE;
-    }
-    if (rayTraceExtendRayPipeline)
-    {
-        vkDestroyPipeline(device, rayTraceExtendRayPipeline, nullptr);
-        rayTraceExtendRayPipeline = VK_NULL_HANDLE;
-    }
-    if (rayTraceShadowRayPipeline)
-    {
-        vkDestroyPipeline(device, rayTraceShadowRayPipeline, nullptr);
-        rayTraceShadowRayPipeline = VK_NULL_HANDLE;
-    }
-    if (rayTraceFinalWritePipeline)
-    {
-        vkDestroyPipeline(device, rayTraceFinalWritePipeline, nullptr);
-        rayTraceFinalWritePipeline = VK_NULL_HANDLE;
-    }
-    if (FSRPipeline)
-    {
-        vkDestroyPipeline(device, FSRPipeline, nullptr);
-        FSRPipeline = VK_NULL_HANDLE;
-    }
-    if (FSRSharpenPipeline)
-    {
-        vkDestroyPipeline(device, FSRSharpenPipeline, nullptr);
-        FSRSharpenPipeline = VK_NULL_HANDLE;
-    }
+        if (p)
+        {
+            vkDestroyPipeline(device, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
+    };
+
+    destroyPipe(rayTraceLogicPipeline);
+    destroyPipe(rayTraceNewPathPipeline);
+    destroyPipe(rayTraceMaterialDiffusePipeline);
+    destroyPipe(rayTraceMaterialSpecularPipeline);
+    destroyPipe(rayTraceExtendRayPipeline);
+    destroyPipe(rayTraceShadowRayPipeline);
+    destroyPipe(rayTraceFinalWritePipeline);
+    destroyPipe(rayTracePrimaryNewPathPipeline);
+    destroyPipe(rayTracePrimaryExtendRayPipeline);
+    destroyPipe(rayTraceWritePrimaryNRDPipeline);
+    destroyPipe(FSRPipeline);
+    destroyPipe(FSRSharpenPipeline);
 
     if (computePipelineLayout)
     {
@@ -3133,9 +3287,13 @@ void ShowcaseApp::createComputePipeline()
     else
     {
         // Wavefront path: multiple kernels
+        makeComputePipeline("build/shaders/rayTracePrimaryNewPath.comp.spv",   rayTracePrimaryNewPathPipeline);
+        makeComputePipeline("build/shaders/rayTracePrimaryExtendRay.comp.spv", rayTracePrimaryExtendRayPipeline);
+        makeComputePipeline("build/shaders/rayTraceWritePrimaryNRD.comp.spv",  rayTraceWritePrimaryNRDPipeline);
         makeComputePipeline("build/shaders/rayTraceLogic.comp.spv",           rayTraceLogicPipeline);
         makeComputePipeline("build/shaders/rayTraceNewPath.comp.spv",       rayTraceNewPathPipeline);
-        makeComputePipeline("build/shaders/rayTraceMaterial.comp.spv",     rayTraceMaterialPipeline);
+        makeComputePipeline("build/shaders/rayTraceMaterialDiffuse.comp.spv",  rayTraceMaterialDiffusePipeline);
+        makeComputePipeline("build/shaders/rayTraceMaterialSpecular.comp.spv", rayTraceMaterialSpecularPipeline);
         makeComputePipeline("build/shaders/rayTraceExtendRay.comp.spv",   rayTraceExtendRayPipeline);
         makeComputePipeline("build/shaders/rayTraceShadowRay.comp.spv",   rayTraceShadowRayPipeline);
         makeComputePipeline("build/shaders/rayTraceFinalWrite.comp.spv", rayTraceFinalWritePipeline);
@@ -3465,6 +3623,9 @@ void ShowcaseApp::destroyWavefrontBuffers()
         destroy(pixelStatsBuf[i],      pixelStatsMem[i]);
         destroy(highVarPixelBuf[i],    highVarPixelMem[i]);
         destroy(adaptiveCountersBuf[i], adaptiveCountersMem[i]);
+        destroy(primaryRayBuf[i],       primaryRayMem[i]);
+        destroy(primaryHitIdsBuf[i],    primaryHitIdsMem[i]);
+        destroy(primaryHitDataBuf[i],   primaryHitDataMem[i]);
     }
 }
 

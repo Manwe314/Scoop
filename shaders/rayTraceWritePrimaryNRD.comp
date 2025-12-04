@@ -1,0 +1,202 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// --------- Scene data (set 0) ----------
+struct SBVHNode {
+    vec4 bbMin_left__left_start;
+    vec4 bbMax_left__left_count;
+    vec4 bbMin_right__right_start;
+    vec4 bbMax_right__right_count;
+};
+
+struct MollerTriangle {
+    vec4 vertex_0;
+    vec4 edge_vec1;
+    vec4 edge_vec2;
+};
+
+struct ShadingTriangle {
+    vec4 vertexNormal0_uv;
+    vec4 vertexNormal1_uv;
+    vec4 vertexNormal2_uv;
+    vec4 texture_materialId;
+};
+
+struct MaterialGPU {
+    vec4 baseColor_opacity;
+    vec4 F0_ior_rough;
+    vec4 emission_flags;
+    vec4 textureId;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer BVHNodesBuf { SBVHNode        bvhNodes[]; };
+layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangle  triangles[]; };
+layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
+layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
+
+// --------- TLAS / instances (set 1) ----------
+struct TLASNodeGPU {
+    vec4  bbMin;           
+    vec4  bbMax;          
+    uvec4 meta;            // x=first, y=count, z=left, w=right
+};
+
+struct InstanceDataGPU {
+    vec4 modelToWorld0;
+    vec4 modelToWorld1;
+    vec4 modelToWorld2;
+
+    vec4 worldToModel0;
+    vec4 worldToModel1;
+    vec4 worldToModel2;
+
+    vec4 aabbMin;
+    vec4 aabbMax;
+
+    uvec4 bases0; // x=nodeBase, y=triBase, z=shadeTriBase, w=materialBase
+    uvec4 bases1; // x=textureBase, y=sbvhRoot, w=triLightOffset
+};
+
+layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
+layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
+layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf   { uint             instanceIndices[]; };
+
+layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
+    mat4  viewProjInv;
+    vec4  camPos_time;
+    uvec2 imageSize;
+    uint  rootIndex;
+    uint  flags;
+} Params;
+
+// NRD input storage images (set 1)
+layout(set = 1, binding = 11, rgba16_snorm)  uniform image2D nrdNormalRoughness;
+layout(set = 1, binding = 12, r32f)          uniform image2D nrdViewZ;
+layout(set = 1, binding = 13, rg16_snorm)    uniform image2D nrdMotionVec;
+
+// prev camera data + prev viewZ (set 1)
+layout(set = 1, binding = 16, std430) readonly buffer PrevCamBuf {
+    mat4 prevVP;
+    mat4 prevVPInv;
+    mat4 currVP;
+};
+layout(set = 1, binding = 17, r32f) uniform readonly image2D prevViewZImage;
+
+// --------- Dynamic buffers (set 2) ----------
+struct RayData {
+    vec4 origin;
+    vec4 direction;
+};
+
+struct HitIds {
+    uint instanceIndex;
+    uint primitiveIndex;
+};
+
+struct Hitdata {
+    float worldT;
+    float localT;
+    float baryU;
+    float baryV;
+};
+
+layout(set = 2, binding = 13, std430) buffer PrimaryRayBuf     { RayData   primaryRays[];     };
+layout(set = 2, binding = 14, std430) buffer PrimaryHitIdsBuf  { HitIds    primaryHitIds[];   };
+layout(set = 2, binding = 15, std430) buffer PrimaryHitdataBuf { Hitdata   primaryHitdata[];  };
+
+// ---------- Helpers ----------
+
+mat3 mat3FromRows(vec4 r0, vec4 r1, vec4 r2)
+{
+    return mat3(r0.xyz, r1.xyz, r2.xyz);
+}
+
+vec3 transformDir(mat3 m, vec3 v) { return m * v; }
+
+vec3 computeNormal(uint instIdx, uint primIdx, float baryU, float baryV)
+{
+    ShadingTriangle tri = shadingTris[primIdx];
+    vec3 n0 = tri.vertexNormal0_uv.xyz;
+    vec3 n1 = tri.vertexNormal1_uv.xyz;
+    vec3 n2 = tri.vertexNormal2_uv.xyz;
+    float w = 1.0 - baryU - baryV;
+    vec3 n = normalize(n0 * w + n1 * baryU + n2 * baryV);
+    mat3 modelToWorld = mat3FromRows(instances[instIdx].modelToWorld0,
+                                     instances[instIdx].modelToWorld1,
+                                     instances[instIdx].modelToWorld2);
+    return normalize(transformDir(modelToWorld, n));
+}
+
+float getRoughness(uint instIdx, uint primIdx)
+{
+    ShadingTriangle tri = shadingTris[primIdx];
+    vec4 texMat = tri.texture_materialId;
+    uint materialIndex = floatBitsToUint(texMat.w) + instances[instIdx].bases0.w;
+    MaterialGPU m = materials[materialIndex];
+    return m.F0_ior_rough.w;
+}
+
+vec2 encodeMotion(vec4 currClip, vec4 prevClip, vec2 viewport)
+{
+    // Perspective divide
+    vec2 currNDC = currClip.xy / currClip.w;
+    vec2 prevNDC = prevClip.xy / prevClip.w;
+    // Convert to pixel space motion (curr -> prev)
+    vec2 currPix = (currNDC * 0.5 + 0.5) * viewport;
+    vec2 prevPix = (prevNDC * 0.5 + 0.5) * viewport;
+    return currPix - prevPix;
+}
+
+void main()
+{
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
+        return;
+
+    uint idx = gid.x + gid.y * Params.imageSize.x;
+
+    RayData rd   = primaryRays[idx];
+    HitIds hid   = primaryHitIds[idx];
+    Hitdata hd   = primaryHitdata[idx];
+
+    // If no hit (primitiveIndex == 0xFFFFFFFF), write sky defaults
+    bool missed = (hid.primitiveIndex == 0xFFFFFFFFu);
+
+    // viewZ
+    float viewZ = missed ? 1e30 : hd.worldT;
+    imageStore(nrdViewZ, ivec2(gid), vec4(viewZ, 0, 0, 0));
+
+    // Normal/Roughness
+    vec4 nrOut = vec4(0.0);
+    if (!missed)
+    {
+        vec3 n = computeNormal(hid.instanceIndex, hid.primitiveIndex, hd.baryU, hd.baryV);
+        float rough = getRoughness(hid.instanceIndex, hid.primitiveIndex);
+        nrOut = vec4(normalize(n), rough);
+    }
+    imageStore(nrdNormalRoughness, ivec2(gid), nrOut);
+
+    // Motion vectors: require prevVP and prev viewZ
+    vec2 mv = vec2(0.0);
+    if (!missed)
+    {
+        vec3 worldPos = vec3(rd.origin) + vec3(rd.direction) * hd.worldT;
+        vec4 worldPos4 = vec4(worldPos, 1.0);
+        vec4 currClip = currVP * worldPos4;
+        vec4 prevClip = prevVP * worldPos4;
+
+        // Project to pixel space
+        vec2 prevPix = (prevClip.xy / prevClip.w * 0.5 + 0.5) * vec2(Params.imageSize);
+        vec2 mvCandidate = encodeMotion(currClip, prevClip, vec2(Params.imageSize));
+
+        // Sample previous frame depth at the previous pixel to validate the motion vector.
+        ivec2 prevPixI = ivec2(clamp(prevPix, vec2(0.0), vec2(Params.imageSize) - vec2(1.0)));
+        float prevZSample = imageLoad(prevViewZImage, prevPixI).x;
+
+        if (prevZSample < 1e29)
+            mv = mvCandidate;
+    }
+    imageStore(nrdMotionVec, ivec2(gid), vec4(mv, 0, 0));
+}

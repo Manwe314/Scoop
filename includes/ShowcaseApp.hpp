@@ -37,6 +37,11 @@
 #define FPS false
 static constexpr bool SimpleRayTrace = false;
 
+struct alignas(16) PrevCamData {
+    Mat4 prevVP;
+    Mat4 prevVPInv;
+    Mat4 currVP;
+};
 
 struct NrdFrameImage
 {
@@ -269,6 +274,8 @@ private:
     std::vector<NrdPipeline> nrdPipelines;
     std::vector<NrdTexture> nrdPermanentTextures;
     std::vector<NrdTexture> nrdTransientTextures;
+    Mat4 lastViewProj{0.0f};
+    Mat4 lastViewProjInv{0.0f};
 
     NrdFrameImage nrdFrameImages[SwapChain::MAX_FRAMES_IN_FLIGHT];
 
@@ -303,10 +310,14 @@ private:
 
     VkPipeline rayTraceLogicPipeline      = VK_NULL_HANDLE;
     VkPipeline rayTraceNewPathPipeline    = VK_NULL_HANDLE;
-    VkPipeline rayTraceMaterialPipeline   = VK_NULL_HANDLE;
+    VkPipeline rayTraceMaterialDiffusePipeline = VK_NULL_HANDLE;
+    VkPipeline rayTraceMaterialSpecularPipeline = VK_NULL_HANDLE;
     VkPipeline rayTraceExtendRayPipeline  = VK_NULL_HANDLE;
     VkPipeline rayTraceShadowRayPipeline  = VK_NULL_HANDLE;
     VkPipeline rayTraceFinalWritePipeline = VK_NULL_HANDLE;
+    VkPipeline rayTracePrimaryNewPathPipeline   = VK_NULL_HANDLE;
+    VkPipeline rayTracePrimaryExtendRayPipeline = VK_NULL_HANDLE;
+    VkPipeline rayTraceWritePrimaryNRDPipeline  = VK_NULL_HANDLE;
     VkPipeline FSRPipeline                = VK_NULL_HANDLE;
     VkPipeline FSRSharpenPipeline         = VK_NULL_HANDLE; 
 
@@ -392,11 +403,23 @@ private:
 
     VkBuffer      adaptiveCountersBuf   [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
     VkDeviceMemory adaptiveCountersMem  [SwapChain::MAX_FRAMES_IN_FLIGHT] = {};
-
+    VkBuffer       primaryRayBuf    [SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory primaryRayMem    [SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkBuffer       primaryHitIdsBuf [SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory primaryHitIdsMem [SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkBuffer       primaryHitDataBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory primaryHitDataMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkBuffer       paramsBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory paramsMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     void*          paramsMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkBuffer       prevCamBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory prevCamMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    void*          prevCamMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkImage        prevViewZImage[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory prevViewZMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkImageView    prevViewZView[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    bool           prevViewZInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT]{false};
 
     VkBuffer        fsrConstBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory  fsrConstMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -506,6 +529,10 @@ private:
     void createFSRTargets();
     void createNrdTargets();
     void destroyOffscreenTarget();
+    void createPrevCameraBuffers();
+    void destroyPrevCameraBuffers();
+    void createPrevViewZImages();
+    void destroyPrevViewZImages();
     void destroyNrdTargets();
     void createComputeDescriptors();
     void updateComputeDescriptor(int frameIndex = -1);
