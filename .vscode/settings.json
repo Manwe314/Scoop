@@ -74,6 +74,7 @@
         "thread": "cpp",
         "codecvt": "cpp",
         "csignal": "cpp",
-        "regex": "cpp"
+        "regex": "cpp",
+        "shared_mutex": "cpp"
     }
 }

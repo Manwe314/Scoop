@@ -257,6 +257,11 @@ private:
     nrd::Integration nrdIntegration;
     nrd::InstanceCreationDesc nrdInstanceCreationDesc{};
     std::array<NrdInputFrame, SwapChain::MAX_FRAMES_IN_FLIGHT> nrdInputs;
+    bool nrdInputsInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+    bool nrdOutputsInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+    bool nrdInputsSampled[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+    bool nrdOutputsSampled[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
+
 
 
 
@@ -395,7 +400,7 @@ private:
 
     VkBuffer        fsrConstBuffer[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory  fsrConstMemory[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
-    void*    fsrConstMapped[SwapChain::MAX_FRAMES_IN_FLIGHT];
+    void*           fsrConstMapped[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
 
     VkBuffer       tlasNodesBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -432,7 +437,12 @@ private:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkSurfaceKHR surface;
     const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
-    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
+    const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, 
+                                                        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+                                                        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+                                                        VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, 
+                                                        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, 
+                                                        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
 
     FrameUpload frameUpload[SwapChain::MAX_FRAMES_IN_FLIGHT];
     VkFence computeFences[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
@@ -498,7 +508,7 @@ private:
     void destroyOffscreenTarget();
     void destroyNrdTargets();
     void createComputeDescriptors();
-    void updateComputeDescriptor();
+    void updateComputeDescriptor(int frameIndex = -1);
     void destroyComputeDescriptors();
     void createComputePipeline();
     void createRenderPass();
@@ -517,6 +527,8 @@ private:
     void createParamsBuffers();
     void createFsrConstBuffers();
     void writeStaticComputeBindings();
+    void transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t frameIndex);
+    void transitionNrdInputsForDenoising(VkCommandBuffer cmd, uint32_t frameIndex);
     void writeParamsBindingForFrame(uint32_t frameIndex);
     void createTextureSampler(VkPhysicalDevice phys, float requestedAniso = 8.0f);
     void recordComputeCommands(uint32_t i);
@@ -542,6 +554,9 @@ private:
     void destroyNRD();
     void runNRD(VkCommandBuffer cmd, uint32_t frameIndex);
     void updateNRDCommonSettings();
+    void setObjectName(VkObjectType type, uint64_t handle, const char* name);
+    void setImageName(VkImage image, const char* name);
+    void setDescriptorSetName(VkDescriptorSet set, const char* name);
 
 
 

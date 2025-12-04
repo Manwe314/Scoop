@@ -5,6 +5,7 @@
 #define FSR_EASU_F 1
 #include "ffx_fsr1.h"
 typedef uint32_t AU4[4];
+#include <cstdio>
 
 // --------- helpers -----------
 
@@ -28,6 +29,37 @@ static VkDeviceSize alignUp(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1)
 static inline VkDeviceSize nonZero(VkDeviceSize v, VkDeviceSize min = 16)
 {
     return v ? v : min;
+}
+
+void ShowcaseApp::setObjectName(VkObjectType type, uint64_t handle, const char* name)
+{
+    if (device == VK_NULL_HANDLE || handle == 0 || name == nullptr)
+        return;
+    auto func = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
+    if (!func)
+        return;
+
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType        = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType   = type;
+    info.objectHandle = handle;
+    info.pObjectName  = name;
+    func(device, &info);
+}
+
+void ShowcaseApp::setImageName(VkImage image, const char* name)
+{
+    setObjectName(VK_OBJECT_TYPE_IMAGE,
+                  reinterpret_cast<uint64_t>(image),
+                  name);
+}
+
+void ShowcaseApp::setDescriptorSetName(VkDescriptorSet set, const char* name)
+{
+    setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET,
+                  reinterpret_cast<uint64_t>(set),
+                  name);
 }
 
 inline AABB boundsOfRange(const std::vector<InstanceData>& inst, const std::vector<uint32_t>& idx, uint32_t first, uint32_t count)
@@ -458,6 +490,29 @@ void ShowcaseApp::imageBarrier(VkCommandBuffer cmd, VkImage image,
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &memoryBarrier);
 }
 
+void ShowcaseApp::transitionNrdInputsForDenoising(VkCommandBuffer cmd, uint32_t frameIndex)
+{
+    auto transitionInput = [&](VkImage img)
+    {
+        if (img == VK_NULL_HANDLE)
+            return;
+
+        imageBarrier(cmd, img,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    };
+
+    transitionInput(nrdInputs[frameIndex].diffRadianceHit.image);
+    transitionInput(nrdInputs[frameIndex].specRadianceHit.image);
+    transitionInput(nrdInputs[frameIndex].normalRoughness.image);
+    transitionInput(nrdInputs[frameIndex].viewZ.image);
+    transitionInput(nrdInputs[frameIndex].motionVec.image);
+
+    nrdInputsSampled[frameIndex] = true;
+}
+
 void ShowcaseApp::recordComputeCommands(uint32_t i)
 {
     VkCommandBuffer cmd = computeCommandBuffers[i];
@@ -479,24 +534,119 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
         offscreenInitialized[i] = true;
     }
-    
-    if (!fsrInitialized[i])
-    {
-        imageBarrier(cmd, fsrImage[i],
-                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
-                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
-        fsrInitialized[i] = true;
-    }
     else
     {
-        imageBarrier(cmd, fsrImage[i],
-                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        imageBarrier(cmd, offscreenImage[i],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
     }
+    
+    if constexpr (!SimpleRayTrace)
+    {
+        if (!fsrInitialized[i])
+        {
+            imageBarrier(cmd, fsrImage[i],
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            fsrInitialized[i] = true;
+        }
+        else
+        {
+            imageBarrier(cmd, fsrImage[i],
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        }
+
+        if (!nrdInputsInitialized[i])
+        {
+            auto initNrdInImage = [&](VkImage img)
+            {
+                if (img == VK_NULL_HANDLE)
+                    return;
+
+                imageBarrier(cmd, img,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            };
+
+            initNrdInImage(nrdInputs[i].diffRadianceHit.image);
+            initNrdInImage(nrdInputs[i].specRadianceHit.image);
+            initNrdInImage(nrdInputs[i].normalRoughness.image);
+            initNrdInImage(nrdInputs[i].viewZ.image);
+            initNrdInImage(nrdInputs[i].motionVec.image);
+
+            nrdInputsInitialized[i] = true;
+        }
+        else if (nrdInputsSampled[i])
+        {
+            auto makeWritable = [&](VkImage img)
+            {
+                if (img == VK_NULL_HANDLE)
+                    return;
+
+                imageBarrier(cmd, img,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            };
+
+            makeWritable(nrdInputs[i].diffRadianceHit.image);
+            makeWritable(nrdInputs[i].specRadianceHit.image);
+            makeWritable(nrdInputs[i].normalRoughness.image);
+            makeWritable(nrdInputs[i].viewZ.image);
+            makeWritable(nrdInputs[i].motionVec.image);
+
+            nrdInputsSampled[i] = false;
+        }
+
+        if (!nrdOutputsInitialized[i])
+        {
+            auto initNrdOutImage = [&](VkImage img)
+            {
+                if (img == VK_NULL_HANDLE)
+                    return;
+
+                imageBarrier(cmd, img,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            };
+
+            initNrdOutImage(nrdFrameImages[i].diffImage);
+            initNrdOutImage(nrdFrameImages[i].specImage);
+
+            nrdOutputsInitialized[i] = true;
+        }
+        else if (nrdOutputsSampled[i])
+        {
+            auto makeWritable = [&](VkImage img)
+            {
+                if (img == VK_NULL_HANDLE)
+                    return;
+
+                imageBarrier(cmd, img,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            };
+
+            makeWritable(nrdFrameImages[i].diffImage);
+            makeWritable(nrdFrameImages[i].specImage);
+            nrdOutputsSampled[i] = false;
+        }
+    }
+
 
     if (hasDedicatedTransfer && computeFamily != transferFamily)
     {
@@ -578,6 +728,12 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
                                 0, nullptr);
 
         vkCmdDispatch(cmd, gx, gy, 1);
+
+        imageBarrier(cmd, offscreenImage[i],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
     }
     else
     {
@@ -649,9 +805,17 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
         bindAndDispatch(rayTraceFinalWritePipeline, gx, gy);
         passBarrier();
-    
+
+        transitionNrdInputsForDenoising(cmd, i);
         runNRD(cmd, i);
         passBarrier();
+
+        // Prepare offscreen for sampling in FSR
+        imageBarrier(cmd, offscreenImage[i],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
 
         bindAndDispatch(FSRPipeline, (swapChainExtent.width  + 15)/16, (swapChainExtent.height + 15)/16);
         passBarrier();
@@ -661,11 +825,14 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     }
     
 
-    imageBarrier(cmd, fsrImage[i],
-                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
-                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    if constexpr (!SimpleRayTrace)
+    {
+        imageBarrier(cmd, fsrImage[i],
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    }
 
 
 
@@ -985,7 +1152,38 @@ void ShowcaseApp::updateNRDCommonSettings()
     nrdRectSizePrev[1]     = currResH;
 }
 
+void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t frameIndex)
+{
+    const NrdFrameImage& frame = nrdFrameImages[frameIndex];
 
+    VkImageMemoryBarrier2 barriers[2]{};
+
+    // Diffuse (NRD OUT_DIFF_RADIANCE_HITDIST)
+    barriers[0].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barriers[0].srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    barriers[0].dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    barriers[0].oldLayout     = VK_IMAGE_LAYOUT_GENERAL;
+    barriers[0].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barriers[0].image         = frame.diffImage;
+    barriers[0].subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[0].subresourceRange.baseMipLevel   = 0;
+    barriers[0].subresourceRange.levelCount     = 1;
+    barriers[0].subresourceRange.baseArrayLayer = 0;
+    barriers[0].subresourceRange.layerCount     = 1;
+
+    barriers[1]               = barriers[0];
+    barriers[1].image         = frame.specImage;
+
+    VkDependencyInfo dep{};
+    dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 2;
+    dep.pImageMemoryBarriers    = barriers;
+
+    vkCmdPipelineBarrier2(cmd, &dep);
+    nrdOutputsSampled[frameIndex] = true;
+}
 
 void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
 {
@@ -1002,38 +1200,38 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
     // 4) Build ResourceSnapshot with IN_* and OUT_* resources
     nrd::ResourceSnapshot snapshot{};
 
-    auto makeResourceVK = [](VkImage image, VkFormat format) -> nrd::Resource
+    auto makeResourceVK = [](VkImage image, VkFormat format, nri::Layout layout, nri::AccessBits access) -> nrd::Resource
     {
         nrd::Resource r{};
 
         r.vk.image  = reinterpret_cast<VKNonDispatchableHandle>(image);
         r.vk.format = static_cast<VKEnum>(format);
 
-        r.state.access = nri::AccessBits::NONE;
-        r.state.layout = nri::Layout::UNDEFINED;
-        r.state.stages = nri::StageBits::NONE;
+        r.state.access = access;
+        r.state.layout = layout;
+        r.state.stages = nri::StageBits::COMPUTE_SHADER;
 
         return r;
     };
     // ---------- IN_ resources ----------
-    nrd::Resource inDiff   = makeResourceVK(nrdInputs[frameIndex].diffRadianceHit.image,  nrdInputs[frameIndex].diffRadianceHit.format);
-    nrd::Resource inSpec   = makeResourceVK(nrdInputs[frameIndex].specRadianceHit.image,  nrdInputs[frameIndex].specRadianceHit.format);
-    nrd::Resource inNR     = makeResourceVK(nrdInputs[frameIndex].normalRoughness.image,  nrdInputs[frameIndex].normalRoughness.format);
-    nrd::Resource inViewZ  = makeResourceVK(nrdInputs[frameIndex].viewZ.image,            nrdInputs[frameIndex].viewZ.format);
-    nrd::Resource inMotion = makeResourceVK(nrdInputs[frameIndex].motionVec.image,        nrdInputs[frameIndex].motionVec.format);
+    nrd::Resource inDiff   = makeResourceVK(nrdInputs[frameIndex].diffRadianceHit.image,  nrdInputs[frameIndex].diffRadianceHit.format, nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
+    nrd::Resource inSpec   = makeResourceVK(nrdInputs[frameIndex].specRadianceHit.image,  nrdInputs[frameIndex].specRadianceHit.format, nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
+    nrd::Resource inNR     = makeResourceVK(nrdInputs[frameIndex].normalRoughness.image,  nrdInputs[frameIndex].normalRoughness.format, nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
+    nrd::Resource inViewZ  = makeResourceVK(nrdInputs[frameIndex].viewZ.image,            nrdInputs[frameIndex].viewZ.format,           nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
+    nrd::Resource inMotion = makeResourceVK(nrdInputs[frameIndex].motionVec.image,        nrdInputs[frameIndex].motionVec.format,       nri::Layout::SHADER_RESOURCE, nri::AccessBits::SHADER_RESOURCE);
 
-    snapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, inDiff);
-    snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, inSpec);
-    snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS,      inNR);
-    snapshot.SetResource(nrd::ResourceType::IN_VIEWZ,                 inViewZ);
-    snapshot.SetResource(nrd::ResourceType::IN_MV,                    inMotion);
+    // snapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, inDiff);
+    // snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, inSpec);
+    // snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS,      inNR);
+    // snapshot.SetResource(nrd::ResourceType::IN_VIEWZ,                 inViewZ);
+    // snapshot.SetResource(nrd::ResourceType::IN_MV,                    inMotion);
 
     // ---------- OUT_ resources ----------
-    nrd::Resource outDiff = makeResourceVK(nrdFrameImages[frameIndex].diffImage, VK_FORMAT_R16G16B16A16_SFLOAT);
-    nrd::Resource outSpec = makeResourceVK(nrdFrameImages[frameIndex].specImage, VK_FORMAT_R16G16B16A16_SFLOAT);
+    nrd::Resource outDiff = makeResourceVK(nrdFrameImages[frameIndex].diffImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
+    nrd::Resource outSpec = makeResourceVK(nrdFrameImages[frameIndex].specImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
 
-    snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
-    snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
+    // snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
+    // snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
 
     // We manage final Vulkan resource states ourselves; no need for NRD to restore.
     // snapshot.restoreInitialState = false;
@@ -1045,7 +1243,8 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
 
     const nrd::Identifier denoisers[] = { nrdRelaxId };
 
-    nrdIntegration.DenoiseVK(denoisers, 1, cbDesc, snapshot);
+    //nrdIntegration.DenoiseVK(denoisers, 1, cbDesc, snapshot);
+    transitionNrdOutputsForSampling(cmd, frameIndex);
 }
 
 void ShowcaseApp::run()
@@ -1147,6 +1346,9 @@ void ShowcaseApp::run()
         if (vkQueueSubmit(uploadQ, 1, &up, frameUpload[currentFrame].uploadFence) != VK_SUCCESS)
             throw std::runtime_error("Showcase App: failed to subbmit TLAS upload");
 
+        // Update per-frame descriptors after TLAS buffers are (re)allocated.
+        updateComputeDescriptor(static_cast<int>(currentFrame));
+
         uint32_t flags = 0;
 
         if (viewFaces)
@@ -1176,7 +1378,8 @@ void ShowcaseApp::run()
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);
 
-        updateFsrConstants(currentFrame);
+        if constexpr (!SimpleRayTrace)
+            updateFsrConstants(currentFrame);
         recordComputeCommands(currentFrame);
         recordGraphicsCommands(currentFrame, imageIndex);
         queryPrimed[currentFrame] = true;
@@ -1255,4 +1458,3 @@ void ShowcaseApp::run()
     vkDeviceWaitIdle(device);
     destroyCommandPoolAndBuffers();
 }
-
