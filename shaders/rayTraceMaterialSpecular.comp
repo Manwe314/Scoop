@@ -76,6 +76,8 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 layout(set = 0, binding = 9) uniform sampler2D textures2D[];
@@ -162,12 +164,7 @@ struct PathQueue {
     uint pad2;
 };
 
-struct PixelStats {
-    uvec4 sum;
-    uvec4 sumSq;
-    uint sampleCount;
-    uint flags;
-};
+
 
 layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
 layout(set = 2, binding = 1, std430) buffer RayBuf        { RayData        rays[];          };
@@ -178,13 +175,6 @@ layout(set = 2, binding = 5, std430) buffer BsdfSampleBuf { BsdfSample     bsdfS
 layout(set = 2, binding = 6, std430) buffer LightSampleBuf{ LightSample    lightSamples[];  };
 layout(set = 2, binding = 7, std430) buffer ShadowRayBuf  { ShadowRay      shadowRays[];    };
 layout(set = 2, binding = 8, std430) buffer ShadowResBuf  { ShadowResult   shadowResults[]; };
-layout(set = 2, binding = 9, std430) buffer PathQueueBuf  { PathQueue      pathQueues[];    };
-layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
-layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint highVarPixelIndices[]; };
-layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
-    uint highVarCount;
-    uint rescheduleCounter;
-};
 layout(set = 2, binding = 13, std430) readonly buffer PrimaryRayBuf     { RayData   primaryRays[];     };
 layout(set = 2, binding = 14, std430) readonly buffer PrimaryHitIdsBuf  { HitIds    primaryHitIds[];   };
 layout(set = 2, binding = 15, std430) readonly buffer PrimaryHitdataBuf { Hitdata   primaryHitdata[];  };
@@ -1026,6 +1016,10 @@ void main()
         rays[pathId]    = primaryRays[pathId];
         hitIds[pathId]  = primaryHitIds[pathId];
         hitData[pathId] = primaryHitdata[pathId];
+        if (hitIds[pathId].instanceIndex == 0xFFFFFFFFu)
+            pathHeader.flags = PATH_STATE_DEAD;
+        else
+            pathHeader.flags = PATH_STATE_NEED_SHADE;
 
         RadianceState rad;
         rad.throughput  = vec4(1.0, 1.0, 1.0, 0.0);
@@ -1040,13 +1034,6 @@ void main()
         shadowResults[pathId].visible = 0u;
         shadowResults[pathId].pad0 = shadowResults[pathId].pad1 = shadowResults[pathId].pad2 = 0u;
 
-        if (pathId == 0)
-        {
-            highVarCount      = 0u;
-            rescheduleCounter = 0u;
-        }
-
-        pathHeader.flags = PATH_STATE_NEED_SHADE;
         pathHeaders[pathId] = pathHeader;
     }
 

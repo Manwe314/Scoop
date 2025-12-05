@@ -814,8 +814,10 @@ ShowcaseApp::~ShowcaseApp()
     if (computePipeline)
         vkDestroyPipeline(device, computePipeline, nullptr);
 
-    if (rayTraceLogicPipeline)
-        vkDestroyPipeline(device, rayTraceLogicPipeline, nullptr);
+    if (rayTraceLogicDiffusePipeline)
+        vkDestroyPipeline(device, rayTraceLogicDiffusePipeline, nullptr);
+    if (rayTraceLogicSpecularPipeline)
+        vkDestroyPipeline(device, rayTraceLogicSpecularPipeline, nullptr);
     if (rayTraceNewPathPipeline)
         vkDestroyPipeline(device, rayTraceNewPathPipeline, nullptr);
     if (rayTraceMaterialDiffusePipeline)
@@ -853,7 +855,6 @@ ShowcaseApp::~ShowcaseApp()
     }
 
     if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
-    destroySceneTextures();
     if (textureSampler)
     {
         vkDestroySampler(device, textureSampler, nullptr);
@@ -2592,8 +2593,8 @@ void ShowcaseApp::createComputeDescriptors()
         initSet1(set1[11], 11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // normal + roughness
         initSet1(set1[12], 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // viewZ
         initSet1(set1[13], 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // motion vectors
-        initSet1(set1[14], 14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
-        initSet1(set1[15], 15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+        initSet1(set1[14], 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+        initSet1(set1[15], 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
         initSet1(set1[16], 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev view/proj data
         initSet1(set1[17], 17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // prev viewZ image
     }
@@ -2655,7 +2656,7 @@ void ShowcaseApp::createComputeDescriptors()
     poolSizes[1].descriptorCount = 35 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[2].descriptorCount = maxTextures + 2 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[2].descriptorCount = maxTextures + 4 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[3].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[3].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
@@ -2804,14 +2805,14 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             rcasInput.sampler     = offscreenSampler;
 
             VkDescriptorImageInfo nrdDiffInfo{};
-            nrdDiffInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            nrdDiffInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             nrdDiffInfo.imageView   = nrdFrameImages[i].diffView;
-            nrdDiffInfo.sampler     = VK_NULL_HANDLE;
+            nrdDiffInfo.sampler     = offscreenSampler;
 
             VkDescriptorImageInfo nrdSpecInfo{};
-            nrdSpecInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            nrdSpecInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             nrdSpecInfo.imageView   = nrdFrameImages[i].specView;
-            nrdSpecInfo.sampler     = VK_NULL_HANDLE;
+            nrdSpecInfo.sampler     = offscreenSampler;
 
             VkDescriptorImageInfo inDiffInfo{};
             inDiffInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2833,20 +2834,20 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             inViewZInfo.imageView   = nrdInputs[i].viewZ.view;
             inViewZInfo.sampler     = VK_NULL_HANDLE;
 
-        VkDescriptorImageInfo inMotionInfo{};
-        inMotionInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        inMotionInfo.imageView   = nrdInputs[i].motionVec.view;
-        inMotionInfo.sampler     = VK_NULL_HANDLE;
-
-        VkDescriptorImageInfo prevViewZInfo{};
-        prevViewZInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        prevViewZInfo.imageView   = prevViewZView[i];
-        prevViewZInfo.sampler     = VK_NULL_HANDLE;
-
-        VkDescriptorBufferInfo prevCamInfo{};
-        prevCamInfo.buffer = prevCamBuffer[i];
-        prevCamInfo.offset = 0;
-        prevCamInfo.range  = sizeof(PrevCamData);
+            VkDescriptorImageInfo inMotionInfo{};
+            inMotionInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            inMotionInfo.imageView   = nrdInputs[i].motionVec.view;
+            inMotionInfo.sampler     = VK_NULL_HANDLE;
+            
+            VkDescriptorImageInfo prevViewZInfo{};
+            prevViewZInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            prevViewZInfo.imageView   = prevViewZView[i];
+            prevViewZInfo.sampler     = VK_NULL_HANDLE;
+            
+            VkDescriptorBufferInfo prevCamInfo{};
+            prevCamInfo.buffer = prevCamBuffer[i];
+            prevCamInfo.offset = 0;
+            prevCamInfo.range  = sizeof(PrevCamData);
 
             VkWriteDescriptorSet writes[12]{};
 
@@ -2890,19 +2891,19 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             writes[4].descriptorCount = 1;
             writes[4].pImageInfo      = &rcasInput;
 
-            // 14: NRD OUT_DIFF_RADIANCE_HITDIST
+            // 14: NRD OUT_DIFF_RADIANCE_HITDIST (sampled)
             writes[5].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[5].dstSet          = computeFrameSets[i];
             writes[5].dstBinding      = 14;
-            writes[5].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[5].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[5].descriptorCount = 1;
             writes[5].pImageInfo      = &nrdDiffInfo;
 
-            // 15: NRD OUT_SPEC_RADIANCE_HITDIST
+            // 15: NRD OUT_SPEC_RADIANCE_HITDIST (sampled)
             writes[6].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[6].dstSet          = computeFrameSets[i];
             writes[6].dstBinding      = 15;
-            writes[6].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[6].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[6].descriptorCount = 1;
             writes[6].pImageInfo      = &nrdSpecInfo;
 
@@ -3213,7 +3214,8 @@ void ShowcaseApp::createComputePipeline()
         }
     };
 
-    destroyPipe(rayTraceLogicPipeline);
+    destroyPipe(rayTraceLogicDiffusePipeline);
+    destroyPipe(rayTraceLogicSpecularPipeline);
     destroyPipe(rayTraceNewPathPipeline);
     destroyPipe(rayTraceMaterialDiffusePipeline);
     destroyPipe(rayTraceMaterialSpecularPipeline);
@@ -3290,7 +3292,8 @@ void ShowcaseApp::createComputePipeline()
         makeComputePipeline("build/shaders/rayTracePrimaryNewPath.comp.spv",   rayTracePrimaryNewPathPipeline);
         makeComputePipeline("build/shaders/rayTracePrimaryExtendRay.comp.spv", rayTracePrimaryExtendRayPipeline);
         makeComputePipeline("build/shaders/rayTraceWritePrimaryNRD.comp.spv",  rayTraceWritePrimaryNRDPipeline);
-        makeComputePipeline("build/shaders/rayTraceLogic.comp.spv",           rayTraceLogicPipeline);
+        makeComputePipeline("build/shaders/rayTraceLogicDiffuse.comp.spv",    rayTraceLogicDiffusePipeline);
+        makeComputePipeline("build/shaders/rayTraceLogicSpecular.comp.spv",   rayTraceLogicSpecularPipeline);
         makeComputePipeline("build/shaders/rayTraceNewPath.comp.spv",       rayTraceNewPathPipeline);
         makeComputePipeline("build/shaders/rayTraceMaterialDiffuse.comp.spv",  rayTraceMaterialDiffusePipeline);
         makeComputePipeline("build/shaders/rayTraceMaterialSpecular.comp.spv", rayTraceMaterialSpecularPipeline);
@@ -3629,21 +3632,6 @@ void ShowcaseApp::destroyWavefrontBuffers()
     }
 }
 
-void ShowcaseApp::destroySceneTextures()
-{
-    if (device == VK_NULL_HANDLE)
-        return;
-    for (auto& texture : gpuTextures)
-        destroyGpuTexture(device, texture);
-    gpuTextures.clear();
-
-    for (auto& t : nrdPermanentTextures)
-        destroyNRDTexture(device, t);
-    for (auto& t : nrdTransientTextures)
-        destroyNRDTexture(device, t);
-    nrdPermanentTextures.clear();
-    nrdTransientTextures.clear();
-}
 
 void ShowcaseApp::destroyGraphicsDescriptors()
 {

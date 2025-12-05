@@ -10,6 +10,8 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 // ---------- Dynamic wavefront buffers (set 2) ----------
@@ -21,6 +23,7 @@ struct RayData {
 
 layout(set = 2, binding = 13, std430) buffer PrimaryRayBuf     { RayData   primaryRays[];     };
 
+
 // ---------- camera ray generation ----------
 
 struct Ray {
@@ -31,18 +34,20 @@ struct Ray {
 
 Ray generateRay(const in uvec2 pixel)
 {
-    vec2 UV = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
+    vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(Params.imageSize);
 
-    vec2 normalisedDeviceCoordinate = UV * 2.0 - 1.0;
+    pixelUv += Params.cameraJitter;
 
-    vec4 nearPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 0.0, 1.0);
-    vec4 farPoint = Params.viewProjInv * vec4(normalisedDeviceCoordinate, 1.0, 1.0);
+    vec2 ndc = pixelUv * 2.0 - 1.0;
+
+    vec4 nearPoint = Params.viewProjInv * vec4(ndc, 0.0, 1.0);
+    vec4 farPoint  = Params.viewProjInv * vec4(ndc, 1.0, 1.0);
 
     vec3 point0 = nearPoint.xyz / nearPoint.w;
     vec3 point1 = farPoint.xyz / farPoint.w;
 
     Ray ray;
-    ray.origin = Params.camPos_time.xyz;
+    ray.origin    = Params.camPos_time.xyz;
     ray.direction = normalize(point1 - point0);
     return ray;
 }

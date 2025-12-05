@@ -64,17 +64,11 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 // ---------- Dynamic WAVEFRONT buffers (SET 2) ----------
-
-struct PathHeader {
-    uint pixelIndex;
-    uint rngState;
-    uint depth;
-    uint flags;
-};
-
 struct RayData {
     vec4 origin;
     vec4 direction;
@@ -92,8 +86,17 @@ struct Hitdata {
     float baryV;
 };
 
+struct RadianceState {
+    vec4  throughput;
+    vec4  radiance;
+    float prevBsdfPdf;
+    float pad0;
+    float pad1;
+    float pad2;
+};
 
-layout(set = 2, binding = 0, std430) buffer PathHeaderBuf { PathHeader     pathHeaders[];   };
+
+layout(set = 2, binding = 4, std430) buffer RadianceBuf   { RadianceState  radianceStates[];};
 layout(set = 2, binding = 13, std430) buffer PrimaryRayBuf     { RayData       primaryRays[];      };
 layout(set = 2, binding = 14, std430) buffer PrimaryHitIdsBuf  { HitIds        primaryHitIds[];    };
 layout(set = 2, binding = 15, std430) buffer PrimaryHitdataBuf { Hitdata       primaryHitdata[];   };
@@ -476,9 +479,6 @@ void main()
 
     Hit hit = Hit(1e30, 1e30, 0xFFFFFFFFu, 0xFFFFFFFFu, vec2(0.0));
     trace(ray, hit);
-
-    if (hit.instanceIndex == 0xFFFFFFFFu || hit.primitiveIndex == 0xFFFFFFFFu)
-        pathHeaders[pathId].flags = PATH_STATE_DEAD;
 
     HitIds hid;
     hid.instanceIndex  = hit.instanceIndex;

@@ -69,18 +69,21 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 // NRD input storage images (set 1)
 layout(set = 1, binding = 11, rgba16_snorm)  uniform image2D nrdNormalRoughness;
 layout(set = 1, binding = 12, r32f)          uniform image2D nrdViewZ;
-layout(set = 1, binding = 13, rg16_snorm)    uniform image2D nrdMotionVec;
+layout(set = 1, binding = 13, rgba16f)    uniform image2D nrdMotionVec;
 
 // prev camera data + prev viewZ (set 1)
 layout(set = 1, binding = 16, std430) readonly buffer PrevCamBuf {
+    mat4 prevV;
     mat4 prevVP;
-    mat4 prevVPInv;
     mat4 currVP;
+    mat4 currV;
 };
 layout(set = 1, binding = 17, r32f) uniform readonly image2D prevViewZImage;
 
@@ -140,14 +143,21 @@ float getRoughness(uint instIdx, uint primIdx)
 
 vec2 encodeMotion(vec4 currClip, vec4 prevClip, vec2 viewport)
 {
-    // Perspective divide
+    // NDC
     vec2 currNDC = currClip.xy / currClip.w;
     vec2 prevNDC = prevClip.xy / prevClip.w;
-    // Convert to pixel space motion (curr -> prev)
+
+    // Pixel coordinates
     vec2 currPix = (currNDC * 0.5 + 0.5) * viewport;
     vec2 prevPix = (prevNDC * 0.5 + 0.5) * viewport;
-    return currPix - prevPix;
+
+    // NRD expects MV.xy such that:
+    //   uvPrev = uvCurr + MV.xy * motionVectorScale.xy
+    // So we store (prev - curr) in pixels.
+    return prevPix - currPix;
 }
+
+const float SKY_VIEWZ = 25000;
 
 void main()
 {
@@ -161,14 +171,27 @@ void main()
     HitIds hid   = primaryHitIds[idx];
     Hitdata hd   = primaryHitdata[idx];
 
-    // If no hit (primitiveIndex == 0xFFFFFFFF), write sky defaults
     bool missed = (hid.primitiveIndex == 0xFFFFFFFFu);
 
-    // viewZ
-    float viewZ = missed ? 1e30 : hd.worldT;
-    imageStore(nrdViewZ, ivec2(gid), vec4(viewZ, 0, 0, 0));
+    // ---- WORLD POS (for hits) ----
+    vec3 worldPos = vec3(rd.origin) + vec3(rd.direction) * hd.worldT;
+    vec4 worldPos4 = vec4(worldPos, 1.0);
 
-    // Normal/Roughness
+    // ---- VIEW Z (current frame) ----
+    float viewZ;
+    if (!missed)
+    {
+        vec4 viewPos = currV * worldPos4;
+        viewZ = -viewPos.z;     // positive in front of camera
+    }
+    else
+    {
+        viewZ = SKY_VIEWZ;
+    }
+
+    imageStore(nrdViewZ, ivec2(gid), vec4(viewZ, 0.0, 0.0, 0.0));
+
+    // ---- NORMAL / ROUGHNESS (unchanged) ----
     vec4 nrOut = vec4(0.0);
     if (!missed)
     {
@@ -178,25 +201,41 @@ void main()
     }
     imageStore(nrdNormalRoughness, ivec2(gid), nrOut);
 
-    // Motion vectors: require prevVP and prev viewZ
-    vec2 mv = vec2(0.0);
+    // ---- 2.5D MOTION (MV.xy, MV.z) ----
+    vec2 mvPixels = vec2(0.0);
+    float zDelta = 0.0;
+
     if (!missed)
     {
-        vec3 worldPos = vec3(rd.origin) + vec3(rd.direction) * hd.worldT;
-        vec4 worldPos4 = vec4(worldPos, 1.0);
+        // Non-jittered clip-space matrices from PrevCamBuf
         vec4 currClip = currVP * worldPos4;
         vec4 prevClip = prevVP * worldPos4;
 
-        // Project to pixel space
-        vec2 prevPix = (prevClip.xy / prevClip.w * 0.5 + 0.5) * vec2(Params.imageSize);
-        vec2 mvCandidate = encodeMotion(currClip, prevClip, vec2(Params.imageSize));
+        // Screen-space motion in pixels: prev - curr
+        vec2 currNDC = currClip.xy / currClip.w;
+        vec2 prevNDC = prevClip.xy / prevClip.w;
+        vec2 currPix = (currNDC * 0.5 + 0.5) * vec2(Params.imageSize);
+        vec2 prevPix = (prevNDC * 0.5 + 0.5) * vec2(Params.imageSize);
 
-        // Sample previous frame depth at the previous pixel to validate the motion vector.
+        mvPixels = prevPix - currPix;
+
+        // Sample previous frame viewZ (same convention as current)
         ivec2 prevPixI = ivec2(clamp(prevPix, vec2(0.0), vec2(Params.imageSize) - vec2(1.0)));
-        float prevZSample = imageLoad(prevViewZImage, prevPixI).x;
+        float prevZ = imageLoad(prevViewZImage, prevPixI).x;
 
-        if (prevZSample < 1e29)
-            mv = mvCandidate;
+        // Validate / skip sky etc.
+        if (prevZ < SKY_VIEWZ * 0.5)   // simple heuristic: treat near SKY_VIEWZ as sky
+        {
+            zDelta = prevZ - viewZ;    // 2.5D: viewZ_prev - viewZ_curr
+        }
+        else
+        {
+            mvPixels = vec2(0.0);
+            zDelta   = 0.0;
+        }
     }
-    imageStore(nrdMotionVec, ivec2(gid), vec4(mv, 0, 0));
+
+    imageStore(nrdMotionVec, ivec2(gid), vec4(mvPixels, zDelta, 0.0));
 }
+
+

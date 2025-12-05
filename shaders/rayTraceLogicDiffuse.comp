@@ -37,7 +37,7 @@ layout(set = 0, binding = 1, std430) readonly buffer MollerBuf   { MollerTriangl
 layout(set = 0, binding = 2, std430) readonly buffer ShadeBuf    { ShadingTriangle shadingTris[]; };
 layout(set = 0, binding = 3, std430) readonly buffer MtlBuf      { MaterialGPU     materials[];  };
 
-layout(set = 1, binding = 4, rgba16f) uniform image2D outImage;
+layout(set = 1, binding = 9, rgba16f) uniform image2D nrdDiffHitdist;
 
 struct TLASNodeGPU {
     vec4  bbMin;           
@@ -71,6 +71,8 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 // ---------- DYNAMIC WAVEFRONT (SET 2) ----------
@@ -143,19 +145,7 @@ struct ShadowResult {
     uint pad2;
 };
 
-struct PathQueue {
-    uint count;
-    uint pad0;
-    uint pad1;
-    uint pad2;
-};
 
-struct PixelStats {
-    uvec4 sum;
-    uvec4 sumSq;
-    uint sampleCount;
-    uint flags;
-};
 
 layout(set = 2, binding = 0, std430)  buffer PathHeaderBuf   { PathHeader     pathHeaders[];   };
 layout(set = 2, binding = 1, std430)  buffer RayBuf          { RayData        rays[];          };
@@ -166,13 +156,6 @@ layout(set = 2, binding = 5, std430)  buffer BsdfSampleBuf   { BsdfSample     bs
 layout(set = 2, binding = 6, std430)  buffer LightSampleBuf  { LightSample    lightSamples[];  };
 layout(set = 2, binding = 7, std430)  buffer ShadowRayBuf    { ShadowRay      shadowRays[];    };
 layout(set = 2, binding = 8, std430)  buffer ShadowResBuf    { ShadowResult   shadowResults[]; };
-layout(set = 2, binding = 9, std430)  buffer PathQueueBuf    { PathQueue      pathQueues[];    };
-layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
-layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint     highVarPixelIndices[]; };
-layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
-    uint highVarCount;
-    uint rescheduleCounter;
-};
 
 
 // ---------- Path state flags ----------
@@ -194,6 +177,7 @@ const uint FLAG_INSTANCE_SEL = 1u << 30;
 const uint B_INTERP_SHIFT    = 20u;
 const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
 const uint MASK_INSTANCE_IDX = 0xFu;
+const uint FLAG_DEBUG_NRD_INPUTS = 1u << 19;
 
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;
@@ -206,7 +190,7 @@ const vec3 LUM_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
 const uint PIXEL_FLAG_IN_HIGHVAR = 1u << 0;
 const uint  MIN_SAMPLES_FOR_ADAPT = 3u;
 const float ERROR_THRESHOLD       = 0.25; 
-const uint MAX_SPP_PER_PATH = 4u;
+const uint MAX_SPP_PER_PATH = 1u;
 
 
 // ---------- RNG (same as before) ----------
@@ -318,113 +302,13 @@ uvec2 pixelCoordsFromIndex(uint pixIdx)
 }
 
 
-
-void accumulateSampleForPixel(uint pixelIdx, vec3 sampleRadiance)
-{
-    float lum = dot(sampleRadiance, LUM_WEIGHTS);
-
-    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.x, sampleRadiance.r);
-    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.y, sampleRadiance.g);
-    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.z, sampleRadiance.b);
-
-    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sum.w,   lum);
-    ATOMIC_ADD_FLOAT(pixelStats[pixelIdx].sumSq.x, lum * lum);
-
-    atomicAdd(pixelStats[pixelIdx].sampleCount, 1u);
-}
-
-void maybeMarkPixelHighVar(uint pixelIdx)
-{
-    PixelStats ps = pixelStats[pixelIdx];
-
-    uint nSamp = ps.sampleCount;
-    if (nSamp < MIN_SAMPLES_FOR_ADAPT)
-        return;
-
-    float n        = float(nSamp);
-    float sumLum   = uintBitsToFloat(ps.sum.w);
-    float sumLum2  = uintBitsToFloat(ps.sumSq.x);
-
-    float meanLum  = max(sumLum / max(n, 1.0), 1e-5);
-
-    // Var(X) = E[X^2] - (E[X])^2
-    float ex2      = sumLum2 / n;
-    float var      = max(ex2 - meanLum * meanLum, 0.0);
-    float relError = sqrt(var / n) / meanLum;
-
-    bool highNow = (relError > ERROR_THRESHOLD);
-    bool wasHigh = (ps.flags & PIXEL_FLAG_IN_HIGHVAR) != 0u;
-
-    if (highNow && !wasHigh)
-    {
-        // Set flag atomically
-        uint oldFlags = atomicOr(pixelStats[pixelIdx].flags, PIXEL_FLAG_IN_HIGHVAR);
-        if ((oldFlags & PIXEL_FLAG_IN_HIGHVAR) == 0u)
-        {
-            uint idx = atomicAdd(highVarCount, 1u);
-            highVarPixelIndices[idx] = pixelIdx;
-        }
-    }
-    else if (!highNow && wasHigh)
-        atomicAnd(pixelStats[pixelIdx].flags, ~PIXEL_FLAG_IN_HIGHVAR);
-}
-
-
-
-void reusePathIfPossible(uint pathId, inout PathHeader header)
-{
-    uint packed = header.depth;
-    uint spp    = getSPP(packed);
-
-    if (spp >= MAX_SPP_PER_PATH)
-    {
-        header.flags = PATH_STATE_COMPLETE;
-        return;
-    }
-
-    uint totalHigh = highVarCount;
-
-    if (totalHigh == 0u)
-    {
-        setDepth(header.depth, 0u);
-        header.flags = PATH_STATE_NEED_RAY;
-        return;
-    }
-
-    const int MAX_TRIES = 4;
-    for (int i = 0; i < MAX_TRIES; ++i)
-    {
-        uint idx      = atomicAdd(rescheduleCounter, 1u);
-        uint pixelIdx = highVarPixelIndices[idx % totalHigh];
-
-        uint flags = pixelStats[pixelIdx].flags;
-        if ((flags & PIXEL_FLAG_IN_HIGHVAR) != 0u)
-        {
-            header.pixelIndex = pixelIdx;
-            setDepth(header.depth, 0u);
-            header.flags = PATH_STATE_NEED_RAY;
-            return;
-        }
-    }
-
-    setDepth(header.depth, 0u);
-    header.flags = PATH_STATE_NEED_RAY;
-}
-
-
-
 // ---------- main logic ----------
 
-void writeFinalPixel(uint pathId, PathHeader pathHeader, vec3 rad)
+void writeNrdDiff(uint pixelIndex, vec3 rad, float hitDist)
 {
-    uint pixelIndex = pathHeader.pixelIndex;
     uvec2 pixel = uvec2(pixelIndex % Params.imageSize.x,
                         pixelIndex / Params.imageSize.x);
-
-    imageStore(outImage, ivec2(pixel), vec4(rad, 1.0));
-    
-    pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
-    pathHeaders[pathId] = pathHeader;
+    imageStore(nrdDiffHitdist, ivec2(pixel), vec4(rad, hitDist));
 }
 
 
@@ -443,25 +327,21 @@ void main()
     if (state == PATH_STATE_COMPLETE)
         return;
 
+    uint packed = pathHeader.depth;
     if (state == PATH_STATE_DEAD)
     {
-        uint pixelIdx = pathHeader.pixelIndex;
-        vec3 L = radianceStates[pathId].radiance.xyz;
-
-        accumulateSampleForPixel(pixelIdx, L);
-        maybeMarkPixelHighVar(pixelIdx);
-
-        uint packed = pathHeader.depth;
+        RadianceState r = radianceStates[pathId];
+        writeNrdDiff(pathHeader.pixelIndex, r.radiance.xyz, r.pad0);
         uint spp    = getSPP(packed);
         setSPP(packed, spp + 1u);
         pathHeader.depth = packed;
-
         pathHeader.flags = PATH_STATE_DEAD_WRITTEN;
     }
 
     if (pathHeader.flags == PATH_STATE_DEAD_WRITTEN)
     {
-        reusePathIfPossible(pathId, pathHeader);
+        if (getSPP(packed) > 0)
+            pathHeader.flags = PATH_STATE_COMPLETE;
         pathHeaders[pathId] = pathHeader;
         return;
     }
@@ -495,6 +375,12 @@ void main()
     hit.instanceIndex    = hid.instanceIndex;
     hit.primitiveIndex   = hid.primitiveIndex;
     hit.barrycentricUV   = vec2(hd.baryU, hd.baryV);
+
+    if (depth == 1u && rad.pad0 == 0.0)
+    {
+        radianceStates[pathId].pad0 = hit.world_dist_to_hit;
+        rad.pad0 = hit.world_dist_to_hit;
+    }
 
     vec4 tex_mtl             = shadingTris[hit.primitiveIndex].texture_materialId;
     uint localMtlIdx         = floatBitsToUint(tex_mtl.w);
@@ -555,6 +441,12 @@ void main()
         rad.radiance.xyz = mix(rad.radiance.xyz, vec3(1.0, 1.0, 0.0), 0.4);
     }
 
+    // Write NRD diffuse radiance + hitdist after first bounce (depth == 1)
+    if (depth == 1u)
+    {
+        writeNrdDiff(pathHeader.pixelIndex, rad.radiance.xyz, hit.world_dist_to_hit);
+    }
+
     // ----- 4) Throughput update & BSDF pdf bookkeeping -----
 
     vec3  T_prev      = rad.throughput.xyz;
@@ -569,7 +461,7 @@ void main()
 
     // ----- 5) Russian roulette -----
 
-    const uint MAX_DEPTH = 64u;
+    const uint MAX_DEPTH = 32u;
     bool terminate = false;
 
     uint rngState = pathHeader.rngState;
@@ -609,17 +501,7 @@ void main()
     if (terminate)
     {
         radianceStates[pathId] = rad;
-        float L = dot(rad.radiance.xyz, LUM_WEIGHTS);
-        uint n = pixelStats[pathHeader.pixelIndex].sampleCount;
-        if (n > 0u)
-        {
-            float meanLum = uintBitsToFloat(pixelStats[pathHeader.pixelIndex].sum.w) / float(n);
-            float maxLum  = meanLum * 15;
-            if (L > maxLum)
-                rad.radiance.xyz *= maxLum / max(L, 1e-6);
-        }
-        accumulateSampleForPixel(pathHeader.pixelIndex, rad.radiance.xyz);
-        maybeMarkPixelHighVar(pathHeader.pixelIndex);
+        writeNrdDiff(pathHeader.pixelIndex, rad.radiance.xyz, rad.pad0);
         uint packed = pathHeader.depth;
         uint spp    = getSPP(packed);
         setSPP(packed, spp + 1u);

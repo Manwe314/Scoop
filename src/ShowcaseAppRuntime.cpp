@@ -16,6 +16,7 @@ constexpr uint32_t B_INTERP_BITS     = 10;
 constexpr uint32_t B_INTERP_MAX      = (1u << B_INTERP_BITS) - 1u;
 constexpr uint32_t B_INTERP_MASK     = B_INTERP_MAX << B_INTERP_SHIFT;
 constexpr uint32_t MASK_INSTANCE_IDX = 0xFu; 
+constexpr uint32_t FLAG_DEBUG_NRD_INPUTS = 1u << 19;
 
 static inline uint32_t qpBase(uint32_t fi) { return fi * 4u; }
 static inline uint32_t qpGfxBegin(uint32_t fi){ return qpBase(fi) + 0; }
@@ -46,6 +47,29 @@ void ShowcaseApp::setObjectName(VkObjectType type, uint64_t handle, const char* 
     info.objectHandle = handle;
     info.pObjectName  = name;
     func(device, &info);
+}
+
+static float halton(uint32_t index, uint32_t base)
+{
+    float f = 1.0f;
+    float r = 0.0f;
+    uint32_t i = index;
+
+    while (i > 0)
+    {
+        f /= float(base);
+        r += f * float(i % base);
+        i /= base;
+    }
+
+    return r;
+}
+
+static glm::vec2 getHaltonJitterPx(uint32_t index)
+{
+    float jx = halton(index + 1, 2) - 0.5f;
+    float jy = halton(index + 1, 3) - 0.5f;
+    return glm::vec2(jx, jy);
 }
 
 void ShowcaseApp::setImageName(VkImage image, const char* name)
@@ -234,40 +258,49 @@ inline Mat4 PerspectiveRH_ZO(float fovY, float aspect, float zNear, float zFar)
 
 
 inline ParamsGPU makeParamsForVulkan(
-                VkExtent2D extent,
-                uint32_t   rootIndex,
-                float      time,
-                glm::vec3  camPos,
-                glm::vec3  camTarget = glm::vec3(0.0f, 0.0f, 0.0f),
-                glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
-                float      fovY_deg  = 60.0f,
-                float      zNear     = 0.1f,
-                float      zFar      = 2000.0f, 
-                uint32_t flags = 0,
-                Mat4* outViewProj = nullptr,
-                Mat4* outViewProjInv = nullptr)
+    VkExtent2D extent,
+    uint32_t   rootIndex,
+    float      time,
+    glm::vec3  camPos,
+    glm::vec3  camTarget = glm::vec3(0.0f, 0.0f, 0.0f),
+    glm::vec3  camUp     = glm::vec3(0.0f, 1.0f, 0.0f),
+    float      fovY_deg  = 60.0f,
+    float      zNear     = 0.1f,
+    float      zFar      = 2000.0f,
+    uint32_t   flags     = 0,
+    uint32_t   frameIndex = 1,
+    Mat4* outViewProj    = nullptr,
+    Mat4* outViewProjInv = nullptr,
+    Mat4* outView        = nullptr,
+    Mat4* outProj        = nullptr
+)
 {
     const float aspect = float(extent.width) / float(std::max(1u, extent.height));
 
     Mat4 view = LookAtRH(camPos, camTarget, camUp);
-
     Mat4 proj = PerspectiveRH_ZO(glm::radians(fovY_deg), aspect, zNear, zFar);
 
+    // Vulkan-style projection flip
     proj[1][1] *= -1.0f;
-    Mat4 viewProj    = proj * view;
+
+    Mat4 viewProj = proj * view;
     Mat4 viewProjInv;
     inverse(viewProj, viewProjInv);
+
     if (outViewProj)     *outViewProj    = viewProj;
     if (outViewProjInv)  *outViewProjInv = viewProjInv;
+    if (outView)         *outView        = view;   // NEW
+    if (outProj)         *outProj        = proj;   // NEW
 
     ParamsGPU p{};
     p.viewProjInv = viewProjInv;
-    p.camPos_time = glm::vec4(camPos, time);
+    p.camPos_time = glm::vec4(camPos, float(time * frameIndex));
     p.imageSize   = glm::uvec2(extent.width, extent.height);
     p.rootIndex   = rootIndex;
     p.flags       = flags;
     return p;
 }
+
 
 void ShowcaseApp::ensureBufferCapacity(
     VkBuffer& buf, VkDeviceMemory& mem,
@@ -828,7 +861,6 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         VkDeviceSize bufferSize = pathCount * sizeof(PathHeader);
         VkDeviceSize bufferSize2 = pathCount * sizeof(PixelStatsGPU);
 
-        vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
         vkCmdFillBuffer(cmd, pixelStatsBuf[i], 0, bufferSize2, 0u);
         // Primary path initialization: new path, extend, write NRD inputs
         bindAndDispatch(rayTracePrimaryNewPathPipeline, gx, gy);
@@ -837,34 +869,51 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         passBarrier();
         bindAndDispatch(rayTraceWritePrimaryNRDPipeline, gx, gy);
         passBarrier();
-
-
-        for (uint32_t bounce = 0; bounce < 64; bounce++)
+        
+        vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
+        
+        for (uint32_t bounce = 0; bounce < 32; bounce++)
         {
-            bindAndDispatch(rayTraceNewPathPipeline, gx, gy);
+            bindAndDispatch(rayTraceMaterialDiffusePipeline, gx, gy);
+            passBarrier();
+
+            bindAndDispatch(rayTraceShadowRayPipeline, gx, gy);
+            passBarrier();
+
+            bindAndDispatch(rayTraceLogicDiffusePipeline, gx, gy);
             passBarrier();
 
             bindAndDispatch(rayTraceExtendRayPipeline, gx, gy);
             passBarrier();
-    
-            bindAndDispatch(rayTraceMaterialDiffusePipeline, gx, gy);
-            passBarrier();
+        }
+        
+        vkCmdFillBuffer(cmd, pathHeaderBuf[i], 0, bufferSize, 0u);
+
+        for (uint32_t bounce = 0; bounce < 32; bounce++)
+        {
             bindAndDispatch(rayTraceMaterialSpecularPipeline, gx, gy);
             passBarrier();
-            
+
             bindAndDispatch(rayTraceShadowRayPipeline, gx, gy);
             passBarrier();
-
-            bindAndDispatch(rayTraceLogicPipeline, gx, gy);
+            
+            bindAndDispatch(rayTraceLogicSpecularPipeline, gx, gy);
             passBarrier();
+
+            bindAndDispatch(rayTraceExtendRayPipeline, gx, gy);
+            passBarrier();
+
         }
 
-        bindAndDispatch(rayTraceFinalWritePipeline, gx, gy);
-        passBarrier();
-
+        
         transitionNrdInputsForDenoising(cmd, i);
         runNRD(cmd, i);
         passBarrier();
+
+        bindAndDispatch(rayTraceFinalWritePipeline, gx, gy);
+        passBarrier();
+        transitionNrdInputsForDenoising(cmd, i);
+        
 
         // Prepare offscreen for sampling in FSR
         imageBarrier(cmd, offscreenImage[i],
@@ -893,7 +942,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
         copyBarriers[1] = copyBarriers[0];
         copyBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        copyBarriers[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        copyBarriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         copyBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         copyBarriers[1].image = prevViewZImage[i];
 
@@ -932,6 +981,8 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
                              0, nullptr,
                              0, nullptr,
                              2, copyBarriers);
+
+        nrdInputsSampled[i] = true;
     }
     
 
@@ -1114,21 +1165,25 @@ void ShowcaseApp::update(float dt)
     static bool prevRight = false;
     static bool prevLeft  = false;
     static bool prevEsc   = false;
+    static bool prevDebug = false;
 
     int bState     = glfwGetKey(window.handle(), GLFW_KEY_B);
     int rightState = glfwGetKey(window.handle(), GLFW_KEY_PERIOD);
     int leftState  = glfwGetKey(window.handle(), GLFW_KEY_COMMA);
     int escState   = glfwGetKey(window.handle(), GLFW_KEY_ESCAPE);
+    int debugState = glfwGetKey(window.handle(), GLFW_KEY_N);
 
     bool bPressed     = (bState     == GLFW_PRESS && !prevB);
     bool rightPressed = (rightState == GLFW_PRESS && !prevRight);
     bool leftPressed  = (leftState  == GLFW_PRESS && !prevLeft);
     bool escPressed   = (escState   == GLFW_PRESS && !prevEsc);
+    bool debugPressed = (debugState == GLFW_PRESS && !prevDebug);
 
     prevB     = (bState     == GLFW_PRESS);
     prevRight = (rightState == GLFW_PRESS);
     prevLeft  = (leftState  == GLFW_PRESS);
     prevEsc   = (escState   == GLFW_PRESS);
+    prevDebug = (debugState == GLFW_PRESS);
 
     if (!bTransitionActive && bPressed)
     {
@@ -1165,6 +1220,9 @@ void ShowcaseApp::update(float dt)
 
     if (escPressed)
         selectedInstance = -1;
+
+    if (debugPressed)
+        debugNrdInputs = !debugNrdInputs;
 
     if (rightPressed)
     {
@@ -1218,27 +1276,60 @@ void ShowcaseApp::updateFsrConstants(uint32_t frameIndex)
     memcpy(fsrConstMapped[frameIndex], &data, sizeof(FsrConstants));
 }
 
-void ShowcaseApp::updateNRDCommonSettings()
+void ShowcaseApp::updateNRDCommonSettings(float dt)
 {
     nrd::CommonSettings common{};
 
-    common.isMotionVectorInWorldSpace = false;
-
-    common.frameIndex       = nrdFrameIndex++;
-    common.accumulationMode = nrd::AccumulationMode::CONTINUE;
-
+    // 1) Motion vectors: current shader writes delta in PIXELS.
+    // NRD expects: mv = IN_MV * motionVectorScale; pixelUvPrev = pixelUv + mv.xy
+    // So: motionVectorScale = (1 / resolution) to convert pixels -> UV.
     uint16_t currResW = static_cast<uint16_t>(rayTraceExtent.width);
     uint16_t currResH = static_cast<uint16_t>(rayTraceExtent.height);
 
+    common.isMotionVectorInWorldSpace = false;
+    common.cameraJitter[0]     = currJitterUV.x;
+    common.cameraJitter[1]     = currJitterUV.y;
+    common.cameraJitterPrev[0] = prevJitterUV.x;
+    common.cameraJitterPrev[1] = prevJitterUV.y;
+
+    // 2) Matrices (non-jittered!)
+    auto copyMat = [](const Mat4& src, float dst[16]) {
+        std::memcpy(dst, src.data(), sizeof(float) * 16);
+    };
+
+    // Current
+    copyMat(currProj, common.viewToClipMatrix);
+    copyMat(currView, common.worldToViewMatrix);
+
+    // Previous: if no valid history yet, fall back to current
+    bool hasPrev = !(lastViewProjInv[0][0] == 0.0f &&
+                     lastViewProjInv[1][1] == 0.0f &&
+                     lastViewProjInv[2][2] == 0.0f);
+
+    if (hasPrev)
+    {
+        copyMat(lastProj, common.viewToClipMatrixPrev);
+        copyMat(lastView, common.worldToViewMatrixPrev);
+    }
+    else
+    {
+        copyMat(currProj, common.viewToClipMatrixPrev);
+        copyMat(currView, common.worldToViewMatrixPrev);
+    }
+
+    // worldPrevToWorldMatrix: identity (no special virtual normal space)
+    // common.worldPrevToWorldMatrix already defaults to identity in the header initializer.
+
+    // 3) Resolution / rect
     common.resourceSize[0] = currResW;
     common.resourceSize[1] = currResH;
     common.rectSize[0]     = currResW;
     common.rectSize[1]     = currResH;
 
-    uint16_t prevW      = nrdResourceSizePrev[0];
-    uint16_t prevH      = nrdResourceSizePrev[1];
-    uint16_t prevRectW  = nrdRectSizePrev[0];
-    uint16_t prevRectH  = nrdRectSizePrev[1];
+    uint16_t prevW     = nrdResourceSizePrev[0];
+    uint16_t prevH     = nrdResourceSizePrev[1];
+    uint16_t prevRectW = nrdRectSizePrev[0];
+    uint16_t prevRectH = nrdRectSizePrev[1];
 
     if (prevW == 0 || prevH == 0) {
         prevW = currResW;
@@ -1254,13 +1345,37 @@ void ShowcaseApp::updateNRDCommonSettings()
     common.rectSizePrev[0]     = prevRectW;
     common.rectSizePrev[1]     = prevRectH;
 
+    // 4) Depth / range
+    // Your IN_VIEWZ is world distance (float, r32), so:
+    common.viewZScale = 1.0f;
+
+    // ---- 2.5D motion scaling ----
+    // IN_MV.xy is in *pixels*; NRD wants UV-scale: mv.xy * (1/w, 1/h)
+    common.motionVectorScale[0] = 1.0f / float(currResW);
+    common.motionVectorScale[1] = 1.0f / float(currResH);
+
+    // IN_MV.z is (viewZprev - viewZ) in same units as IN_VIEWZ.
+    // If viewZScale != 1 in the future, this should be 1/viewZScale.
+    common.motionVectorScale[2] = 1.0f;    // non-zero => 2.5D
+
+    // This must be a monotonically increasing frame counter
+    common.frameIndex       = nrdFrameIndex++;
+    common.accumulationMode = nrd::AccumulationMode::CONTINUE;
+
+    // Disocclusion + range – tweak these later
+    common.denoisingRange          = 500000.0f;
+    common.disocclusionThreshold   = 0.01f;
+    common.disocclusionThresholdAlternate = 0.05f;
+
     nrdIntegration.SetCommonSettings(common);
 
+    // Track prev sizes for next frame
     nrdResourceSizePrev[0] = currResW;
     nrdResourceSizePrev[1] = currResH;
     nrdRectSizePrev[0]     = currResW;
     nrdRectSizePrev[1]     = currResH;
 }
+
 
 void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t frameIndex)
 {
@@ -1273,7 +1388,7 @@ void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t 
     barriers[0].srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     barriers[0].dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
     barriers[0].oldLayout     = VK_IMAGE_LAYOUT_GENERAL;
     barriers[0].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barriers[0].image         = frame.diffImage;
@@ -1293,6 +1408,25 @@ void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t 
 
     vkCmdPipelineBarrier2(cmd, &dep);
     nrdOutputsSampled[frameIndex] = true;
+    auto transitionFromShaderReadToGeneral = [&](VkImage img)
+    {
+        if (img == VK_NULL_HANDLE)
+            return;
+
+        imageBarrier(cmd, img,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_QUEUE_FAMILY_IGNORED,
+            VK_QUEUE_FAMILY_IGNORED);
+    };
+
+    transitionFromShaderReadToGeneral(nrdInputs[frameIndex].diffRadianceHit.image);
+    transitionFromShaderReadToGeneral(nrdInputs[frameIndex].specRadianceHit.image);
+    transitionFromShaderReadToGeneral(nrdInputs[frameIndex].normalRoughness.image);
+    transitionFromShaderReadToGeneral(nrdInputs[frameIndex].viewZ.image);
+    transitionFromShaderReadToGeneral(nrdInputs[frameIndex].motionVec.image);
 }
 
 void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
@@ -1301,7 +1435,7 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
     nrdIntegration.NewFrame();
 
     // 2) Common settings (resolution, accumulation, frame index, etc.)
-    updateNRDCommonSettings();
+    updateNRDCommonSettings(dt);
 
     nrd::RelaxSettings relax{};
     relax.enableAntiFirefly = true;
@@ -1376,7 +1510,7 @@ void ShowcaseApp::run()
     {
         auto t0 = clock::now();
         glfwPollEvents();
-        float dt = std::chrono::duration<float>(t0 - prevTime).count();
+        dt = std::chrono::duration<float>(t0 - prevTime).count();
         prevTime = t0;
         if (dt > 0.1f)
             dt = 0.1f;
@@ -1464,6 +1598,9 @@ void ShowcaseApp::run()
         if (viewFaces)
             flags |= FLAG_B;
 
+        if (debugNrdInputs)
+            flags |= FLAG_DEBUG_NRD_INPUTS;
+
         if (selectedInstance >= 0)
         {
             flags |= FLAG_INSTANCE_SEL;
@@ -1473,31 +1610,48 @@ void ShowcaseApp::run()
         if (bInterpInt > 0)
             flags |= (bInterpInt << B_INTERP_SHIFT) & B_INTERP_MASK;
         
+        glm::vec2 jitterPx = getHaltonJitterPx(nrdFrameIndex);
+        glm::vec2 jitterUv = jitterPx / glm::vec2(rayTraceExtent.width, rayTraceExtent.height);
+
+        prevJitterUV = currJitterUV;
+        currJitterUV = jitterUv;
+        
         Mat4 currViewProj{};
         Mat4 currViewProjInv{};
+        Mat4 view{}, proj{};
         ParamsGPU params = makeParamsForVulkan(
-                            rayTraceExtent,
-                            /*rootIndex*/ topLevelAS.root,       
-                            /*time*/ dt,
-                            /*camPos*/ scene.camera.position,
-                            /*camTarget*/ scene.camera.target,
-                            /*up*/ scene.camera.up,
-                            /*fov*/ scene.camera.vfovDeg,
-                            /*near*/ scene.camera.nearPlane,
-                            /*far*/ scene.camera.farPlane,
-                            flags,
-                            &currViewProj,
-                            &currViewProjInv
-                        );
+            rayTraceExtent,
+            topLevelAS.root,
+            dt,
+            scene.camera.position,
+            scene.camera.target,
+            scene.camera.up,
+            scene.camera.vfovDeg,
+            scene.camera.nearPlane,
+            scene.camera.farPlane,
+            flags,
+            nrdFrameIndex,
+            &currViewProj,
+            &currViewProjInv,
+            &view,
+            &proj
+        );
+
+        currView = view;
+        currProj = proj;
+        params.cameraJitter      = currJitterUV;
+        params.cameraJitterPrev  = prevJitterUV;
+
         std::memcpy(paramsMapped[currentFrame], &params, sizeof(ParamsGPU));
         writeParamsBindingForFrame(currentFrame);
         if constexpr (!SimpleRayTrace)
         {
             PrevCamData prev;
             bool hasPrev = !(lastViewProjInv[0][0] == 0.0f && lastViewProjInv[1][1] == 0.0f && lastViewProjInv[2][2] == 0.0f);
-            prev.prevVP    = hasPrev ? lastViewProj    : currViewProj;
-            prev.prevVPInv = hasPrev ? lastViewProjInv : currViewProjInv;
-            prev.currVP    = currViewProj;
+            prev.prevV    = hasPrev ? lastView    : currView;
+            prev.prevVP   = hasPrev ? lastViewProj : currViewProj;
+            prev.currVP   = currViewProj;
+            prev.currV    = currView;
             if (prevCamMapped[currentFrame])
                 std::memcpy(prevCamMapped[currentFrame], &prev, sizeof(PrevCamData));
         }
@@ -1513,6 +1667,8 @@ void ShowcaseApp::run()
         {
             lastViewProj    = currViewProj;
             lastViewProjInv = currViewProjInv;
+            lastView = currView;
+            lastProj = currProj;
         }
         
         VkSubmitInfo submitCompute{};

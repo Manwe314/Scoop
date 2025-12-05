@@ -10,6 +10,8 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     uvec2 imageSize;
     uint  rootIndex;
     uint  flags;
+    vec2  cameraJitter;
+    vec2  cameraJitterPrev;
 } Params;
 
 // ---------- Dynamic wavefront buffers (set 2) ----------
@@ -82,20 +84,6 @@ struct ShadowResult {
     uint pad2;
 };
 
-struct PathQueue {
-    uint count;
-    uint pad0;
-    uint pad1;
-    uint pad2;
-};
-
-struct PixelStats {
-    uvec4 sum;
-    uvec4 sumSq;
-    uint sampleCount;
-    uint flags;
-};
-
 layout(set = 2, binding = 0, std430)  buffer PathHeaderBuf   { PathHeader     pathHeaders[];   };
 layout(set = 2, binding = 1, std430)  buffer RayBuf          { RayData        rays[];          };
 layout(set = 2, binding = 2, std430)  buffer HitIdsBuf       { HitIds         hitIds[];        };
@@ -105,13 +93,7 @@ layout(set = 2, binding = 5, std430)  buffer BsdfSampleBuf   { BsdfSample     bs
 layout(set = 2, binding = 6, std430)  buffer LightSampleBuf  { LightSample    lightSamples[];  };
 layout(set = 2, binding = 7, std430)  buffer ShadowRayBuf    { ShadowRay      shadowRays[];    };
 layout(set = 2, binding = 8, std430)  buffer ShadowResBuf    { ShadowResult   shadowResults[]; };
-layout(set = 2, binding = 9, std430)  buffer PathQueueBuf    { PathQueue      pathQueues[];    };
-layout(set = 2, binding = 10, std430) buffer PixelStatsBuf   { PixelStats     pixelStats[];    };
 layout(set = 2, binding = 11, std430) buffer HighVarPixelBuf { uint     highVarPixelIndices[]; };
-layout(set = 2, binding = 12, std430) buffer AdaptiveCounters{
-    uint highVarCount;
-    uint rescheduleCounter;
-};
 
 const uint PATH_STATE_INIT        = 0u;
 const uint PATH_STATE_NEED_HIT    = 1u;
@@ -227,20 +209,6 @@ void main()
     uint pathId = gid.x + gid.y * Params.imageSize.x;
 
     PathHeader header = pathHeaders[pathId];
-
-    if (header.flags == PATH_STATE_INIT)
-    {
-        header.pixelIndex = pathId;
-
-        if (pathId == 0)
-        {
-            highVarCount      = 0u;
-            rescheduleCounter = 0u;
-        }
-
-        header.flags = PATH_STATE_NEED_RAY;
-        pathHeaders[pathId] = header;
-    }
 
     if (header.flags != PATH_STATE_NEED_RAY)
         return;

@@ -38,9 +38,10 @@
 static constexpr bool SimpleRayTrace = false;
 
 struct alignas(16) PrevCamData {
+    Mat4 prevV;
     Mat4 prevVP;
-    Mat4 prevVPInv;
     Mat4 currVP;
+    Mat4 currV;
 };
 
 struct NrdFrameImage
@@ -154,6 +155,8 @@ struct alignas(16) ParamsGPU {
     glm::uvec2 imageSize;
     uint32_t   rootIndex;
     uint32_t   flags;
+    glm::vec2 cameraJitter;
+    glm::vec2 cameraJitterPrev;
 };
 
 void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue, VkBuffer src, VkBuffer dst, VkDeviceSize size);
@@ -266,16 +269,15 @@ private:
     bool nrdOutputsInitialized[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
     bool nrdInputsSampled[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
     bool nrdOutputsSampled[SwapChain::MAX_FRAMES_IN_FLIGHT] = {false};
-
-
-
-
     
-    std::vector<NrdPipeline> nrdPipelines;
-    std::vector<NrdTexture> nrdPermanentTextures;
-    std::vector<NrdTexture> nrdTransientTextures;
     Mat4 lastViewProj{0.0f};
     Mat4 lastViewProjInv{0.0f};
+    Mat4 currView{0.0f};
+    Mat4 currProj{0.0f};
+    Mat4 lastView{0.0f};
+    Mat4 lastProj{0.0f};
+    glm::vec2 currJitterUV { 0.0f, 0.0f };
+    glm::vec2 prevJitterUV { 0.0f, 0.0f };
 
     NrdFrameImage nrdFrameImages[SwapChain::MAX_FRAMES_IN_FLIGHT];
 
@@ -308,7 +310,8 @@ private:
 
     VkPipeline       computePipeline       = VK_NULL_HANDLE;
 
-    VkPipeline rayTraceLogicPipeline      = VK_NULL_HANDLE;
+    VkPipeline rayTraceLogicDiffusePipeline = VK_NULL_HANDLE;
+    VkPipeline rayTraceLogicSpecularPipeline = VK_NULL_HANDLE;
     VkPipeline rayTraceNewPathPipeline    = VK_NULL_HANDLE;
     VkPipeline rayTraceMaterialDiffusePipeline = VK_NULL_HANDLE;
     VkPipeline rayTraceMaterialSpecularPipeline = VK_NULL_HANDLE;
@@ -496,10 +499,12 @@ private:
     void onChar(uint32_t cp);
     void onKey (int key, int action, int mods);
     bool viewFaces = false;
+    bool debugNrdInputs = false;
     int selectedInstance = -1;
     bool bTransitionActive = false;
     float bInterpTime = 0.0f;
     float bTransitionDuration = 1.5f;
+    float dt = 0.0f;
     uint32_t bInterpInt = 0;
 
     
@@ -580,7 +585,7 @@ private:
     void initNRD();
     void destroyNRD();
     void runNRD(VkCommandBuffer cmd, uint32_t frameIndex);
-    void updateNRDCommonSettings();
+    void updateNRDCommonSettings(float dt);
     void setObjectName(VkObjectType type, uint64_t handle, const char* name);
     void setImageName(VkImage image, const char* name);
     void setDescriptorSetName(VkDescriptorSet set, const char* name);
