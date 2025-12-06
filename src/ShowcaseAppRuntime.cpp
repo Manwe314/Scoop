@@ -79,6 +79,13 @@ void ShowcaseApp::setImageName(VkImage image, const char* name)
                   name);
 }
 
+void ShowcaseApp::setImageViewName(VkImageView view, const char* name)
+{
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW,
+                  reinterpret_cast<uint64_t>(view),
+                  name);
+}
+
 void ShowcaseApp::setDescriptorSetName(VkDescriptorSet set, const char* name)
 {
     setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET,
@@ -683,6 +690,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
             initNrdOutImage(nrdFrameImages[i].diffImage);
             initNrdOutImage(nrdFrameImages[i].specImage);
+            initNrdOutImage(nrdFrameImages[i].validationImage);
 
             nrdOutputsInitialized[i] = true;
         }
@@ -702,6 +710,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
 
             makeWritable(nrdFrameImages[i].diffImage);
             makeWritable(nrdFrameImages[i].specImage);
+            makeWritable(nrdFrameImages[i].validationImage);
             nrdOutputsSampled[i] = false;
         }
     }
@@ -1287,10 +1296,11 @@ void ShowcaseApp::updateNRDCommonSettings(float dt)
     uint16_t currResH = static_cast<uint16_t>(rayTraceExtent.height);
 
     common.isMotionVectorInWorldSpace = false;
-    common.cameraJitter[0]     = currJitterUV.x;
-    common.cameraJitter[1]     = currJitterUV.y;
-    common.cameraJitterPrev[0] = prevJitterUV.x;
-    common.cameraJitterPrev[1] = prevJitterUV.y;
+    // NRD expects jitter in pixel units in range [-0.5, 0.5]
+    common.cameraJitter[0]     = currJitterPx.x;
+    common.cameraJitter[1]     = currJitterPx.y;
+    common.cameraJitterPrev[0] = prevJitterPx.x;
+    common.cameraJitterPrev[1] = prevJitterPx.y;
 
     // 2) Matrices (non-jittered!)
     auto copyMat = [](const Mat4& src, float dst[16]) {
@@ -1367,6 +1377,8 @@ void ShowcaseApp::updateNRDCommonSettings(float dt)
     common.disocclusionThreshold   = 0.01f;
     common.disocclusionThresholdAlternate = 0.05f;
 
+    common.enableValidation = true;
+
     nrdIntegration.SetCommonSettings(common);
 
     // Track prev sizes for next frame
@@ -1381,7 +1393,7 @@ void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t 
 {
     const NrdFrameImage& frame = nrdFrameImages[frameIndex];
 
-    VkImageMemoryBarrier2 barriers[2]{};
+    VkImageMemoryBarrier2 barriers[3]{};
 
     // Diffuse (NRD OUT_DIFF_RADIANCE_HITDIST)
     barriers[0].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -1401,9 +1413,12 @@ void ShowcaseApp::transitionNrdOutputsForSampling(VkCommandBuffer cmd, uint32_t 
     barriers[1]               = barriers[0];
     barriers[1].image         = frame.specImage;
 
+    barriers[2]               = barriers[0];
+    barriers[2].image         = frame.validationImage;
+
     VkDependencyInfo dep{};
     dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 2;
+    dep.imageMemoryBarrierCount = 3;
     dep.pImageMemoryBarriers    = barriers;
 
     vkCmdPipelineBarrier2(cmd, &dep);
@@ -1473,9 +1488,11 @@ void ShowcaseApp::runNRD(VkCommandBuffer cmd, uint32_t frameIndex)
     // ---------- OUT_ resources ----------
     nrd::Resource outDiff = makeResourceVK(nrdFrameImages[frameIndex].diffImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
     nrd::Resource outSpec = makeResourceVK(nrdFrameImages[frameIndex].specImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
+    nrd::Resource outValidation = makeResourceVK(nrdFrameImages[frameIndex].validationImage, VK_FORMAT_R16G16B16A16_SFLOAT, nri::Layout::GENERAL, nri::AccessBits::SHADER_RESOURCE_STORAGE);
 
     snapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, outDiff);
     snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, outSpec);
+    snapshot.SetResource(nrd::ResourceType::OUT_VALIDATION, outValidation);
 
     // We manage final Vulkan resource states ourselves; no need for NRD to restore.
     snapshot.restoreInitialState = false;
@@ -1613,7 +1630,9 @@ void ShowcaseApp::run()
         glm::vec2 jitterPx = getHaltonJitterPx(nrdFrameIndex);
         glm::vec2 jitterUv = jitterPx / glm::vec2(rayTraceExtent.width, rayTraceExtent.height);
 
+        prevJitterPx = currJitterPx;
         prevJitterUV = currJitterUV;
+        currJitterPx = jitterPx;
         currJitterUV = jitterUv;
         
         Mat4 currViewProj{};

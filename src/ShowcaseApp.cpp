@@ -661,6 +661,10 @@ GpuTexture ShowcaseApp::createTextureFromImageRGBA8(const ImageRGBA8& img, VkDev
 
     if (vkCreateImage(device, &createInfo, nullptr, &out.image) != VK_SUCCESS)
         throw std::runtime_error("vkCreateImage failed");
+    {
+        std::string name = img.filePath.empty() ? "Texture" : ("Texture:" + img.filePath);
+        setImageName(out.image, name.c_str());
+    }
 
     VkMemoryRequirements req{};
     vkGetImageMemoryRequirements(device, out.image, &req);
@@ -738,6 +742,10 @@ GpuTexture ShowcaseApp::createTextureFromImageRGBA8(const ImageRGBA8& img, VkDev
 
     if (vkCreateImageView(device, &imageViewCreateInfo, nullptr, &out.view) != VK_SUCCESS)
         throw std::runtime_error("vkCreateImageView failed");
+    {
+        std::string name = img.filePath.empty() ? "TextureView" : ("TextureView:" + img.filePath);
+        setImageViewName(out.view, name.c_str());
+    }
 
     return out;
 }
@@ -860,6 +868,9 @@ ShowcaseApp::~ShowcaseApp()
         vkDestroySampler(device, textureSampler, nullptr);
         textureSampler = VK_NULL_HANDLE;
     }
+    for (auto& tex : gpuTextures)
+        destroyGpuTexture(device, tex);
+    gpuTextures.clear();
 
 
     for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
@@ -1767,10 +1778,22 @@ void ShowcaseApp::recreateSwapchain()
     destroyOffscreenTarget();
     if constexpr (!SimpleRayTrace)
     {
+        destroyNRD(); // also destroys NRD in/out textures and resets NRD state
         destroyFSRTarget();
-        destroyNrdTargets();
         destroyPrevViewZImages();
         destroyPrevCameraBuffers();
+    }
+
+    // Reset per-frame initialization flags so newly recreated images get correct layout transitions.
+    for (uint32_t i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        offscreenInitialized[i]    = false;
+        fsrInitialized[i]          = false;
+        nrdInputsInitialized[i]    = false;
+        nrdInputsSampled[i]        = false;
+        nrdOutputsInitialized[i]   = false;
+        nrdOutputsSampled[i]       = false;
+        prevViewZInitialized[i]    = false;
     }
 
     createSwapchain();
@@ -1782,6 +1805,7 @@ void ShowcaseApp::recreateSwapchain()
     {
         createFSRTargets();
         createNrdTargets();
+        initNRD();
         createNrdInputTargets();
         createPrevCameraBuffers();
         createPrevViewZImages();
@@ -1852,6 +1876,11 @@ void ShowcaseApp::createImageViews()
 
         if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS)
            throw std::runtime_error("Showcase: failed to create image views!");
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "SwapchainView[%zu]", i);
+            setImageViewName(swapChainImageViews[i], name);
+        }
     }
 
 }
@@ -1958,6 +1987,7 @@ void ShowcaseApp::createOffscreenTargets()
 
         if (vkCreateImage(device, &createInfo, nullptr, &offscreenImage[i]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to create offscreen image!");
+        setImageName(offscreenImage[i], ("Offscreen[" + std::to_string(i) + "]").c_str());
         {
             char name[64];
             std::snprintf(name, sizeof(name), "OffscreenImage[%u]", i);
@@ -2012,6 +2042,11 @@ void ShowcaseApp::createOffscreenTargets()
             if (offscreenImage[i])  { vkDestroyImage(device, offscreenImage[i], nullptr);  offscreenImage[i] = VK_NULL_HANDLE; }
             if (offscreenMemory[i]) { vkFreeMemory(device, offscreenMemory[i], nullptr);   offscreenMemory[i] = VK_NULL_HANDLE; }
             throw std::runtime_error("Showcase: failed to create offscreen image view!");
+        }
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "OffscreenView[%u]", i);
+            setImageViewName(offscreenView[i], name);
         }
         VkSemaphoreCreateInfo semCreateInfo{};
         semCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -2134,6 +2169,11 @@ void ShowcaseApp::createFSRTargets()
             if (fsrMemory[i]) { vkFreeMemory(device, fsrMemory[i], nullptr);   fsrMemory[i] = VK_NULL_HANDLE; }
             throw std::runtime_error("Showcase: failed to create fsr image view!");
         }
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "FSRView[%u]", i);
+            setImageViewName(fsrView[i], name);
+        }
         fsrValid[i] = true;
     }
 }
@@ -2158,6 +2198,10 @@ void ShowcaseApp::createNrdTargets()
         if (frame.specView)   { vkDestroyImageView(device, frame.specView,  nullptr); frame.specView  = VK_NULL_HANDLE; }
         if (frame.specImage)  { vkDestroyImage(device,     frame.specImage, nullptr); frame.specImage = VK_NULL_HANDLE; }
         if (frame.specMemory) { vkFreeMemory(device,       frame.specMemory,nullptr); frame.specMemory= VK_NULL_HANDLE; }
+
+        if (frame.validationView)   { vkDestroyImageView(device, frame.validationView,  nullptr); frame.validationView  = VK_NULL_HANDLE; }
+        if (frame.validationImage)  { vkDestroyImage(device,     frame.validationImage, nullptr); frame.validationImage = VK_NULL_HANDLE; }
+        if (frame.validationMemory) { vkFreeMemory(device,       frame.validationMemory,nullptr); frame.validationMemory= VK_NULL_HANDLE; }
 
         frame.valid = false;
 
@@ -2279,8 +2323,14 @@ void ShowcaseApp::createNrdTargets()
         std::snprintf(diffName, sizeof(diffName), "NRD_OUT_Diff[%u]", i);
         char specName[64];
         std::snprintf(specName, sizeof(specName), "NRD_OUT_Spec[%u]", i);
+        char validationName[64];
+        std::snprintf(validationName, sizeof(validationName), "NRD_OUT_Validation[%u]", i);
         allocateImage(frame.diffImage, frame.diffMemory, frame.diffView, diffName);
+        setImageViewName(frame.diffView, diffName);
         allocateImage(frame.specImage, frame.specMemory, frame.specView, specName);
+        setImageViewName(frame.specView, specName);
+        allocateImage(frame.validationImage, frame.validationMemory, frame.validationView, validationName);
+        setImageViewName(frame.validationView, validationName);
 
         frame.valid = true;
     }
@@ -2482,6 +2532,7 @@ void ShowcaseApp::createNrdInputTargets()
 
         if (vkCreateImageView(device, &viewCI, nullptr, &out.view) != VK_SUCCESS)
             throw std::runtime_error("NRD: failed to create input image view!");
+        setImageViewName(out.view, debugName);
     };
 
     for (uint32_t idx = 0; idx < nrdInputs.size(); ++idx)
@@ -2497,7 +2548,7 @@ void ShowcaseApp::createNrdInputTargets()
         createTex(VK_FORMAT_R16G16B16A16_SFLOAT,           w, h, frame.specRadianceHit, specName);
         createTex(VK_FORMAT_R16G16B16A16_SNORM,            w, h, frame.normalRoughness, nrName);
         createTex(VK_FORMAT_R32_SFLOAT,                    w, h, frame.viewZ,            viewZName);
-        createTex(VK_FORMAT_R16G16_SNORM,                  w, h, frame.motionVec,        mvName);
+        createTex(VK_FORMAT_R16G16B16A16_SFLOAT,           w, h, frame.motionVec,        mvName);
 
         frame.valid = true;
     }
@@ -2578,7 +2629,7 @@ void ShowcaseApp::createComputeDescriptors()
     }
     else
     {
-        set1.resize(18);
+        set1.resize(19);
         initSet1(set1[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS nodes
         initSet1(set1[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS instances
         initSet1(set1[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS indices
@@ -2597,6 +2648,7 @@ void ShowcaseApp::createComputeDescriptors()
         initSet1(set1[15], 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
         initSet1(set1[16], 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev view/proj data
         initSet1(set1[17], 17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // prev viewZ image
+        initSet1(set1[18], 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT); // NRD OUT_VALIDATION
     }
 
     VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
@@ -2656,7 +2708,7 @@ void ShowcaseApp::createComputeDescriptors()
     poolSizes[1].descriptorCount = 35 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[2].descriptorCount = maxTextures + 4 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[2].descriptorCount = maxTextures + 5 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[3].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[3].descriptorCount = SwapChain::MAX_FRAMES_IN_FLIGHT;
@@ -2814,6 +2866,11 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             nrdSpecInfo.imageView   = nrdFrameImages[i].specView;
             nrdSpecInfo.sampler     = offscreenSampler;
 
+            VkDescriptorImageInfo nrdValidationInfo{};
+            nrdValidationInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            nrdValidationInfo.imageView   = nrdFrameImages[i].validationView;
+            nrdValidationInfo.sampler     = offscreenSampler;
+
             VkDescriptorImageInfo inDiffInfo{};
             inDiffInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             inDiffInfo.imageView   = nrdInputs[i].diffRadianceHit.view;
@@ -2849,7 +2906,7 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             prevCamInfo.offset = 0;
             prevCamInfo.range  = sizeof(PrevCamData);
 
-            VkWriteDescriptorSet writes[12]{};
+            VkWriteDescriptorSet writes[13]{};
 
             // 4: offscreen image (write-only for main pathtrace / combine)
             writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2907,45 +2964,53 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             writes[6].descriptorCount = 1;
             writes[6].pImageInfo      = &nrdSpecInfo;
 
-            // 9: IN_DIFF_RADIANCE_HITDIST
+            // 18: NRD OUT_VALIDATION (sampled)
             writes[7].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[7].dstSet          = computeFrameSets[i];
-            writes[7].dstBinding      = 9;
-            writes[7].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[7].dstBinding      = 18;
+            writes[7].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[7].descriptorCount = 1;
-            writes[7].pImageInfo      = &inDiffInfo;
-                
-            // 10: IN_SPEC_RADIANCE_HITDIST
+            writes[7].pImageInfo      = &nrdValidationInfo;
+
+            // 9: IN_DIFF_RADIANCE_HITDIST
             writes[8].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[8].dstSet          = computeFrameSets[i];
-            writes[8].dstBinding      = 10;
+            writes[8].dstBinding      = 9;
             writes[8].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[8].descriptorCount = 1;
-            writes[8].pImageInfo      = &inSpecInfo;
+            writes[8].pImageInfo      = &inDiffInfo;
                 
-            // 11: IN_NORMAL_ROUGHNESS
+            // 10: IN_SPEC_RADIANCE_HITDIST
             writes[9].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[9].dstSet          = computeFrameSets[i];
-            writes[9].dstBinding      = 11;
+            writes[9].dstBinding      = 10;
             writes[9].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[9].descriptorCount = 1;
-            writes[9].pImageInfo      = &inNRInfo;
+            writes[9].pImageInfo      = &inSpecInfo;
                 
-            // 12: IN_VIEWZ
+            // 11: IN_NORMAL_ROUGHNESS
             writes[10].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[10].dstSet          = computeFrameSets[i];
-            writes[10].dstBinding      = 12;
+            writes[10].dstBinding      = 11;
             writes[10].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[10].descriptorCount = 1;
-            writes[10].pImageInfo      = &inViewZInfo;
+            writes[10].pImageInfo      = &inNRInfo;
                 
-            // 13: IN_MV
+            // 12: IN_VIEWZ
             writes[11].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[11].dstSet          = computeFrameSets[i];
-            writes[11].dstBinding      = 13;
+            writes[11].dstBinding      = 12;
             writes[11].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[11].descriptorCount = 1;
-            writes[11].pImageInfo      = &inMotionInfo;
+            writes[11].pImageInfo      = &inViewZInfo;
+                
+            // 13: IN_MV
+            writes[12].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[12].dstSet          = computeFrameSets[i];
+            writes[12].dstBinding      = 13;
+            writes[12].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[12].descriptorCount = 1;
+            writes[12].pImageInfo      = &inMotionInfo;
 
             VkWriteDescriptorSet extra[2]{};
             extra[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2962,10 +3027,10 @@ void ShowcaseApp::updateComputeDescriptor(int frameIndex)
             extra[1].descriptorCount = 1;
             extra[1].pImageInfo      = &prevViewZInfo;
 
-            std::array<VkWriteDescriptorSet, 14> allWrites{};
-            for (int w = 0; w < 12; ++w) allWrites[w] = writes[w];
-            allWrites[12] = extra[0];
-            allWrites[13] = extra[1];
+            std::array<VkWriteDescriptorSet, 15> allWrites{};
+            for (int w = 0; w < 13; ++w) allWrites[w] = writes[w];
+            allWrites[13] = extra[0];
+            allWrites[14] = extra[1];
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(allWrites.size()), allWrites.data(), 0, nullptr);
         }
@@ -3125,6 +3190,11 @@ void ShowcaseApp::createPrevViewZImages()
 
         if (vkCreateImage(device, &ci, nullptr, &prevViewZImage[i]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to create prevViewZ image");
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "PrevViewZ[%u]", i);
+            setImageName(prevViewZImage[i], name);
+        }
 
         VkMemoryRequirements memReq{};
         vkGetImageMemoryRequirements(device, prevViewZImage[i], &memReq);
@@ -3166,6 +3236,11 @@ void ShowcaseApp::createPrevViewZImages()
 
         if (vkCreateImageView(device, &viewCI, nullptr, &prevViewZView[i]) != VK_SUCCESS)
             throw std::runtime_error("Showcase: failed to create prevViewZ image view!");
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "PrevViewZView[%u]", i);
+            setImageViewName(prevViewZView[i], name);
+        }
     }
 }
 
@@ -3570,6 +3645,10 @@ void ShowcaseApp::destroyNRD()
         if (frame.specImage)  { vkDestroyImage(device,     frame.specImage, nullptr); frame.specImage = VK_NULL_HANDLE; }
         if (frame.specMemory) { vkFreeMemory(device,       frame.specMemory,nullptr); frame.specMemory= VK_NULL_HANDLE; }
 
+        if (frame.validationView)   { vkDestroyImageView(device, frame.validationView,  nullptr); frame.validationView  = VK_NULL_HANDLE; }
+        if (frame.validationImage)  { vkDestroyImage(device,     frame.validationImage, nullptr); frame.validationImage = VK_NULL_HANDLE; }
+        if (frame.validationMemory) { vkFreeMemory(device,       frame.validationMemory,nullptr); frame.validationMemory= VK_NULL_HANDLE; }
+
         frame.valid = false;
     }
 
@@ -3773,6 +3852,21 @@ void ShowcaseApp::destroyNrdTargets()
         {
             vkFreeMemory(device, frame.specMemory, nullptr);
             frame.specMemory = VK_NULL_HANDLE;
+        }
+        if (frame.validationView)
+        {
+            vkDestroyImageView(device, frame.validationView, nullptr);
+            frame.validationView = VK_NULL_HANDLE;
+        }
+        if (frame.validationImage)
+        {
+            vkDestroyImage(device, frame.validationImage, nullptr);
+            frame.validationImage = VK_NULL_HANDLE;
+        }
+        if (frame.validationMemory)
+        {
+            vkFreeMemory(device, frame.validationMemory, nullptr);
+            frame.validationMemory = VK_NULL_HANDLE;
         }
 
         frame.valid = false;

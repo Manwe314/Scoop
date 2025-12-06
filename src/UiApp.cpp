@@ -11,7 +11,15 @@
 #include <iostream>
 #include <stdexcept>
 #include <array>
+#include <optional>
 #include <printf.h>
+
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#elif defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#endif
+#include <nativefiledialog-extended/src/include/nfd_glfw3.h>
 
 #define CLAY_IMPLEMENTATION
 #include "clay.h"
@@ -149,34 +157,51 @@ static inline bool isObj(std::string& path)
     return path.size() >= 5 && path.compare(path.size() - 4, 4, ".obj") == 0;
 }
 
-static std::string pickObjRelativePath()
+static std::optional<std::string> pickObjRelativePath(GLFWwindow* parentWindow)
 {
-    if (NFD_Init() != NFD_OKAY)
-        throw std::runtime_error("File Dialog Init Failed.");
+    struct NfdScope {
+        bool initialized = false;
+        NfdScope() { initialized = (NFD_Init() == NFD_OKAY); }
+        ~NfdScope() { if (initialized) NFD_Quit(); }
+    } scope;
+
+    if (!scope.initialized)
+        throw std::runtime_error("File dialog init failed.");
 
     nfdfilteritem_t filters[] = {{ "OBJ Models", "obj" }};
 
-    nfdchar_t* outPath = nullptr;
-    const nfdresult_t res = NFD_OpenDialog(&outPath, filters, 1, nullptr); 
+    nfdopendialogu8args_t args{};
+    args.filterList  = filters;
+    args.filterCount = 1;
+    args.defaultPath = nullptr;
 
-    std::string result;
+    if (parentWindow) {
+        nfdwindowhandle_t nativeWindow{};
+        if (NFD_GetNativeWindowFromGLFWWindow(parentWindow, &nativeWindow))
+            args.parentWindow = nativeWindow;
+    }
+
+    nfdchar_t* outPath = nullptr;
+    const nfdresult_t res = NFD_OpenDialogU8_With(&outPath, &args);
 
     if (res == NFD_OKAY && outPath)
     {
         std::filesystem::path abs = outPath;
-        free(outPath);
+        NFD_FreePath(outPath);
 
         std::error_code ec;
         std::filesystem::path base = std::filesystem::current_path();
-        std::filesystem::path rel = std::filesystem::relative(abs, base, ec);
+        std::filesystem::path rel  = std::filesystem::relative(abs, base, ec);
 
-        result = (!ec && !rel.empty()) ? rel.string() : abs.string();
+        return (!ec && !rel.empty()) ? std::optional<std::string>(rel.string()) : std::optional<std::string>(abs.string());
     }
-    else if (res == NFD_ERROR)
-        throw std::runtime_error("Unexpected Error wile using File dialog");
+    else if (res == NFD_CANCEL)
+    {
+        return std::nullopt;
+    }
 
-    NFD_Quit();
-    return result;
+    const char* err = NFD_GetError();
+    throw std::runtime_error(err ? err : "Unexpected error while using File dialog");
 }
 
 static inline bool PressedThis(const Clay_PointerData& p)
@@ -872,6 +897,7 @@ void UiApp::UpdateInput(bool sameIndex)
 
 void UiApp::HandleErrorShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
 {
+    if (fileDialogActive) return;
     if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && ((elementId.id == Clay_GetElementId(CLAY_STRING("backgroundError")).id) || (elementId.id == Clay_GetElementId(CLAY_STRING("Empty1")).id)))
     {
         uiState.showError = false;
@@ -881,6 +907,7 @@ void UiApp::HandleErrorShowing(Clay_ElementId elementId, Clay_PointerData pointe
 
 void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData) 
 {
+    if (fileDialogActive) return;
 
     if (isInput(elementId))
         wanted = cursorIBeam;
@@ -938,10 +965,14 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
     }
     else if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Menu Selector")).id))
     {
+        if (fileDialogActive) return;
         auto eId = Clay_GetElementId(CLAY_STRING("input form"));
         try
         {
-            inputs.get(eId).text = pickObjRelativePath();
+            fileDialogActive = true;
+            fileDialogFuture = std::async(std::launch::async, []() {
+                return pickObjRelativePath(nullptr);
+            });
         }
         catch(const std::exception& e)
         {
@@ -982,6 +1013,7 @@ void UiApp::HandleButtonInteraction(Clay_ElementId elementId, Clay_PointerData p
 
 void UiApp::HandleFloatingShowing(Clay_ElementId elementId, Clay_PointerData pointerData)
 {
+    if (fileDialogActive) return;
     Clay_ElementId rowBase = Clay_GetElementId(CLAY_STRING("picker.row"));
     if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME && (elementId.id == Clay_GetElementId(CLAY_STRING("Device Selector")).id))
     {
@@ -1011,6 +1043,7 @@ void UiApp::HandleFloatingShowing(Clay_ElementId elementId, Clay_PointerData poi
 
 void UiApp::HandleMultiInput(Clay_ElementId elementId, Clay_PointerData pointerData)
 {
+    if (fileDialogActive) return;
     if (!PressedThis(pointerData))
         return;
 
@@ -1123,6 +1156,28 @@ void UiApp::pollBVHBuilders()
     }
 }
 
+void UiApp::pollFileDialog()
+{
+    using namespace std::chrono_literals;
+
+    if (!fileDialogActive || !fileDialogFuture.valid())
+        return;
+
+    if (fileDialogFuture.wait_for(0ms) == std::future_status::ready) {
+        try {
+            auto res = fileDialogFuture.get();
+            if (res) {
+                auto eId = Clay_GetElementId(CLAY_STRING("input form"));
+                inputs.get(eId).text = *res;
+            }
+        } catch (const std::exception& e) {
+            uiState.errorMsg = std::string(e.what());
+            uiState.showError = true;
+        }
+        fileDialogActive = false;
+    }
+}
+
 
 void UiApp::buildUi() 
 {
@@ -1133,6 +1188,7 @@ void UiApp::buildUi()
     clayFrameStrings.clear();
     wanted = cursorArrow;
     bool isReady = allBVHReady();
+    pollFileDialog();
     if (fut.valid())
     {
         using namespace std::chrono_literals;

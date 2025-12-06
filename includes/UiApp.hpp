@@ -133,15 +133,13 @@ class UiApp
         
         static void hoverBridge(Clay_ElementId id, Clay_PointerData pd, intptr_t user) {
             auto* self = reinterpret_cast<UiApp*>(user);
-            if (self)
-            {
-                if (self->uiState.showError)
-                    self->HandleErrorShowing(id, pd);
-                else if (self->uiState.showDevicePicker)
-                    self->HandleFloatingShowing(id, pd);
-                else
-                    self->HandleButtonInteraction(id, pd);
-            }
+            if (!self || self->fileDialogActive) return;
+            if (self->uiState.showError)
+                self->HandleErrorShowing(id, pd);
+            else if (self->uiState.showDevicePicker)
+                self->HandleFloatingShowing(id, pd);
+            else
+                self->HandleButtonInteraction(id, pd);
         }
         void setUierror(std::string msg);
         
@@ -169,6 +167,7 @@ class UiApp
         bool isModelButton(Clay_ElementId elementId);
         void UpdateInput(bool sameIndex = false);
         void pollBVHBuilders();
+        void pollFileDialog();
         void finalizeSceneForLaunch();
         
         TextInputStore inputs;
@@ -218,6 +217,8 @@ class UiApp
         std::vector<ModelTab> models;
         std::unordered_map<Sid, size_t> sidToIndex;
         std::future<Object> fut;
+        std::future<std::optional<std::string>> fileDialogFuture;
+        bool fileDialogActive = false;
         
 
         std::vector<PendingBVH>         pendingBVH;

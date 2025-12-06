@@ -111,6 +111,43 @@ layout(set = 2, binding = 15, std430) buffer PrimaryHitdataBuf { Hitdata   prima
 
 // ---------- Helpers ----------
 
+const float NRD_FP16_MAX = 65504.0;
+
+bool isBad(float v)    { return isnan(v) || isinf(v); }
+bool isBad(vec3 v)     { return any(isnan(v)) || any(isinf(v)); }
+
+float sanitizeViewZ(float z)
+{
+    if (isBad(z))
+        return 0.0;
+    return clamp(z, 0.0, NRD_FP16_MAX);
+}
+
+vec4 sanitizeNormalRoughness(vec4 nr)
+{
+    vec3 n = nr.xyz;
+    if (isBad(n) || length(n) < 1e-6)
+        n = vec3(0.0);
+    else
+        n = normalize(n);
+
+    float rough = nr.w;
+    if (isBad(rough))
+        rough = 0.0;
+    rough = clamp(rough, 0.0, 1.0);
+
+    return vec4(n, rough);
+}
+
+vec4 sanitizeMotion(vec4 mv)
+{
+    if (isBad(mv.xyz))
+        return vec4(0.0);
+    mv.xyz = clamp(mv.xyz, vec3(-NRD_FP16_MAX), vec3(NRD_FP16_MAX));
+    mv.w = 0.0;
+    return mv;
+}
+
 mat3 mat3FromRows(vec4 r0, vec4 r1, vec4 r2)
 {
     return mat3(r0.xyz, r1.xyz, r2.xyz);
@@ -157,7 +194,7 @@ vec2 encodeMotion(vec4 currClip, vec4 prevClip, vec2 viewport)
     return prevPix - currPix;
 }
 
-const float SKY_VIEWZ = 25000;
+const float SKY_VIEWZ = 1e30;
 
 void main()
 {
@@ -189,6 +226,7 @@ void main()
         viewZ = SKY_VIEWZ;
     }
 
+    viewZ = sanitizeViewZ(viewZ);
     imageStore(nrdViewZ, ivec2(gid), vec4(viewZ, 0.0, 0.0, 0.0));
 
     // ---- NORMAL / ROUGHNESS (unchanged) ----
@@ -199,6 +237,7 @@ void main()
         float rough = getRoughness(hid.instanceIndex, hid.primitiveIndex);
         nrOut = vec4(normalize(n), rough);
     }
+    nrOut = sanitizeNormalRoughness(nrOut);
     imageStore(nrdNormalRoughness, ivec2(gid), nrOut);
 
     // ---- 2.5D MOTION (MV.xy, MV.z) ----
@@ -235,7 +274,6 @@ void main()
         }
     }
 
-    imageStore(nrdMotionVec, ivec2(gid), vec4(mvPixels, zDelta, 0.0));
+    vec4 mvOut = sanitizeMotion(vec4(mvPixels, zDelta, 0.0));
+    imageStore(nrdMotionVec, ivec2(gid), mvOut);
 }
-
-

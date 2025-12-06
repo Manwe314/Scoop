@@ -11,6 +11,7 @@ layout(set = 1, binding = 10, rgba16f) uniform readonly image2D inSpec;
 layout(set = 1, binding = 11, rgba16_snorm) uniform readonly image2D inNormalRoughness;
 layout(set = 1, binding = 12, r32f)         uniform readonly image2D inViewZ;
 layout(set = 1, binding = 13, rgba16f)   uniform readonly image2D inMotion;
+layout(set = 1, binding = 18) uniform sampler2D nrdValidation;
 
 layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     mat4  viewProjInv;
@@ -23,6 +24,32 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
 } Params;
 
 const uint FLAG_DEBUG_NRD_INPUTS = 1u << 19;
+
+const float NRD_FP16_MAX = 65504.0;
+
+bool isBad(float v)    { return isnan(v) || isinf(v); }
+bool isBad(vec3 v)     { return any(isnan(v)) || any(isinf(v)); }
+
+vec3 sanitizeVec3(vec3 v, float clampLen)
+{
+    if (isBad(v))
+        return vec3(0.0);
+    return clamp(v, vec3(-clampLen), vec3(clampLen));
+}
+
+vec3 sanitizeNormal(vec3 n)
+{
+    if (isBad(n) || length(n) < 1e-6)
+        return vec3(0.0, 0.0, 1.0);
+    return normalize(n);
+}
+
+float sanitizeViewZ(float z)
+{
+    if (isBad(z))
+        return 0.0;
+    return clamp(z, 0.0, NRD_FP16_MAX);
+}
 
 vec3 visualizeViewZ(float z)
 {
@@ -39,22 +66,22 @@ vec3 visualizeMotion(vec2 mv)
 
 vec3 fetchInput(uint idx, ivec2 samplePx)
 {
-    if (idx == 1u) return imageLoad(inDiff, samplePx).xyz;
-    if (idx == 0u) return imageLoad(inSpec, samplePx).xyz;
+    if (idx == 1u) return sanitizeVec3(imageLoad(inDiff, samplePx).xyz, NRD_FP16_MAX);
+    if (idx == 0u) return sanitizeVec3(imageLoad(inSpec, samplePx).xyz, NRD_FP16_MAX);
     if (idx == 2u)
     {
         vec4 nr = imageLoad(inNormalRoughness, samplePx);
-        vec3 n  = normalize(nr.xyz);
+        vec3 n  = sanitizeNormal(nr.xyz);
         return n * 0.5 + 0.5;
     }
     if (idx == 3u)
     {
-        float z = imageLoad(inViewZ, samplePx).x;
+        float z = sanitizeViewZ(imageLoad(inViewZ, samplePx).x);
         return visualizeViewZ(z);
     }
     if (idx == 4u)
     {
-        vec2 mv = imageLoad(inMotion, samplePx).xy;
+        vec2 mv = sanitizeVec3(imageLoad(inMotion, samplePx).xyz, NRD_FP16_MAX).xy;
         return visualizeMotion(mv);
     }
     return vec3(0.0);
@@ -78,24 +105,7 @@ void main()
     }
     else
     {
-        // 3x2 grid covering the output; first 5 cells show NRD inputs.
-        const uvec2 grid = uvec2(3, 2);
-        uvec2 tileSize = (Params.imageSize + grid - 1u) / grid;
-        uvec2 tile     = gid / tileSize;
-
-        uint tileIndex = tile.x + tile.y * grid.x;
-        if (tile.x >= grid.x || tile.y >= grid.y || tileIndex >= 5u)
-        {
-            color = vec3(0.0);
-        }
-        else
-        {
-            uvec2 local = gid - tile * tileSize;
-            vec2 uv     = (vec2(local) + 0.5) / vec2(tileSize);
-            vec2 samplePos = uv * (vec2(Params.imageSize) - 1.0);
-            ivec2 samplePx = ivec2(clamp(samplePos, vec2(0.0), vec2(Params.imageSize) - 1.0));
-            color = fetchInput(tileIndex, samplePx);
-        }
+        color = texelFetch(nrdValidation, pixel, 0).xyz;
     }
 
     imageStore(outImage, pixel, vec4(color, 1.0));

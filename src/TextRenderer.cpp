@@ -7,9 +7,27 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <cstdio>
 #include <cmath>
 
 // ---- ctor / dtor ------------------------------------------------------------
+
+static void setDebugName(VkDevice dev, VkObjectType type, uint64_t handle, const char* name)
+{
+    if (!dev || handle == 0 || name == nullptr)
+        return;
+    auto func = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(dev, "vkSetDebugUtilsObjectNameEXT"));
+    if (!func)
+        return;
+
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType        = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType   = type;
+    info.objectHandle = handle;
+    info.pObjectName  = name;
+    func(dev, &info);
+}
 
 TextRenderer::TextRenderer(Device& dev, VkCommandPool pool, VkQueue queue, const std::string& ttfPath)
 : device(dev), cmdPool(pool), graphicsQueue(queue)
@@ -318,6 +336,14 @@ void TextRenderer::uploadAtlas(Atlas& A) {
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         A.image, A.memory
     );
+    {
+        int idx = static_cast<int>(&A - atlases.data());
+        char name[64];
+        std::snprintf(name, sizeof(name), "TextAtlasImage[%d]", idx);
+        setDebugName(dev, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(A.image), name);
+        std::snprintf(name, sizeof(name), "TextAtlasMem[%d]", idx);
+        setDebugName(dev, VK_OBJECT_TYPE_DEVICE_MEMORY, reinterpret_cast<uint64_t>(A.memory), name);
+    }
 
     // Staging buffer
     VkBuffer staging = VK_NULL_HANDLE;
@@ -361,6 +387,12 @@ void TextRenderer::uploadAtlas(Atlas& A) {
         A.image, VK_FORMAT_R8_UNORM,
         A.mipLevels, VK_IMAGE_ASPECT_COLOR_BIT, A.view
     );
+    {
+        int idx = static_cast<int>(&A - atlases.data());
+        char name[64];
+        std::snprintf(name, sizeof(name), "TextAtlasView[%d]", idx);
+        setDebugName(dev, VK_OBJECT_TYPE_IMAGE_VIEW, reinterpret_cast<uint64_t>(A.view), name);
+    }
 
     // Sampler: no mips, clamp, linear (or set minFilter = NEAREST if you prefer extra crisp)
     VkSamplerCreateInfo sinfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};

@@ -54,6 +54,10 @@ struct NrdFrameImage
     VkDeviceMemory specMemory = VK_NULL_HANDLE;
     VkImageView    specView   = VK_NULL_HANDLE;
 
+    VkImage        validationImage  = VK_NULL_HANDLE;
+    VkDeviceMemory validationMemory = VK_NULL_HANDLE;
+    VkImageView    validationView   = VK_NULL_HANDLE;
+
     bool           valid      = false;
 };
 
@@ -276,6 +280,8 @@ private:
     Mat4 currProj{0.0f};
     Mat4 lastView{0.0f};
     Mat4 lastProj{0.0f};
+    glm::vec2 currJitterPx { 0.0f, 0.0f };
+    glm::vec2 prevJitterPx { 0.0f, 0.0f };
     glm::vec2 currJitterUV { 0.0f, 0.0f };
     glm::vec2 prevJitterUV { 0.0f, 0.0f };
 
@@ -588,6 +594,7 @@ private:
     void updateNRDCommonSettings(float dt);
     void setObjectName(VkObjectType type, uint64_t handle, const char* name);
     void setImageName(VkImage image, const char* name);
+    void setImageViewName(VkImageView view, const char* name);
     void setDescriptorSetName(VkDescriptorSet set, const char* name);
 
 
