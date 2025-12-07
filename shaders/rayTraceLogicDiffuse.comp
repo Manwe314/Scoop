@@ -177,7 +177,8 @@ const uint FLAG_INSTANCE_SEL = 1u << 30;
 const uint B_INTERP_SHIFT    = 20u;
 const uint B_INTERP_MASK     = 0x3FFu << B_INTERP_SHIFT;
 const uint MASK_INSTANCE_IDX = 0xFu;
-const uint FLAG_DEBUG_NRD_INPUTS = 1u << 19;
+const uint FLAG_DEBUG_NRD_VALIDATION = 1u << 19;
+const uint FLAG_DEBUG_NRD_INPUTS     = 1u << 18;
 
 // ---------- CONSTS ----------
 const float PI      = 3.14159265358979323846;

@@ -62,6 +62,8 @@ struct InstanceDataGPU {
 layout(set = 1, binding = 0, std430) readonly buffer TLASNodesBuf { TLASNodeGPU      tlasNodes[];   };
 layout(set = 1, binding = 1, std430) readonly buffer InstanceBuf  { InstanceDataGPU  instances[];   };
 layout(set = 1, binding = 2, std430) readonly buffer InstIdxBuf   { uint             instanceIndices[]; };
+layout(set = 1, binding = 19, std430) readonly buffer PrevInstanceBuf  { InstanceDataGPU  prevInstances[];   };
+layout(set = 1, binding = 20, std430) readonly buffer PrevInstIdxBuf   { uint             prevInstanceIndices[]; };
 
 layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     mat4  viewProjInv;
@@ -84,7 +86,8 @@ layout(set = 1, binding = 16, std430) readonly buffer PrevCamBuf {
     mat4 prevVP;
     mat4 currVP;
     mat4 currV;
-};
+} prev;
+
 layout(set = 1, binding = 17, r32f) uniform readonly image2D prevViewZImage;
 
 // --------- Dynamic buffers (set 2) ----------
@@ -111,169 +114,162 @@ layout(set = 2, binding = 15, std430) buffer PrimaryHitdataBuf { Hitdata   prima
 
 // ---------- Helpers ----------
 
-const float NRD_FP16_MAX = 65504.0;
+const uint INVALID_INSTANCE_INDEX = 0xFFFFFFFFu;
 
-bool isBad(float v)    { return isnan(v) || isinf(v); }
-bool isBad(vec3 v)     { return any(isnan(v)) || any(isinf(v)); }
-
-float sanitizeViewZ(float z)
+vec3 getWorldPosition(uint idx, out HitIds ids, out Hitdata hit, out RayData ray)
 {
-    if (isBad(z))
-        return 0.0;
-    return clamp(z, 0.0, NRD_FP16_MAX);
+    ids = primaryHitIds[idx];
+    hit = primaryHitdata[idx];
+    ray = primaryRays[idx];
+
+    // World position = traced ray origin + t * direction
+    return ray.origin.xyz + ray.direction.xyz * hit.worldT;
 }
 
-vec4 sanitizeNormalRoughness(vec4 nr)
+vec3 getWorldNormal(uint instIdx, uint primIdx, float baryU, float baryV)
 {
-    vec3 n = nr.xyz;
-    if (isBad(n) || length(n) < 1e-6)
-        n = vec3(0.0);
-    else
-        n = normalize(n);
+    uint shadeIdx = instances[instIdx].bases0.z + primIdx;
+    ShadingTriangle tri = shadingTris[shadeIdx];
 
-    float rough = nr.w;
-    if (isBad(rough))
-        rough = 0.0;
-    rough = clamp(rough, 0.0, 1.0);
-
-    return vec4(n, rough);
-}
-
-vec4 sanitizeMotion(vec4 mv)
-{
-    if (isBad(mv.xyz))
-        return vec4(0.0);
-    mv.xyz = clamp(mv.xyz, vec3(-NRD_FP16_MAX), vec3(NRD_FP16_MAX));
-    mv.w = 0.0;
-    return mv;
-}
-
-mat3 mat3FromRows(vec4 r0, vec4 r1, vec4 r2)
-{
-    return mat3(r0.xyz, r1.xyz, r2.xyz);
-}
-
-vec3 transformDir(mat3 m, vec3 v) { return m * v; }
-
-vec3 computeNormal(uint instIdx, uint primIdx, float baryU, float baryV)
-{
-    ShadingTriangle tri = shadingTris[primIdx];
     vec3 n0 = tri.vertexNormal0_uv.xyz;
     vec3 n1 = tri.vertexNormal1_uv.xyz;
     vec3 n2 = tri.vertexNormal2_uv.xyz;
-    float w = 1.0 - baryU - baryV;
-    vec3 n = normalize(n0 * w + n1 * baryU + n2 * baryV);
-    mat3 modelToWorld = mat3FromRows(instances[instIdx].modelToWorld0,
-                                     instances[instIdx].modelToWorld1,
-                                     instances[instIdx].modelToWorld2);
-    return normalize(transformDir(modelToWorld, n));
+
+    float b0 = 1.0 - baryU - baryV;
+    float b1 = baryU;
+    float b2 = baryV;
+
+    // Interpolated object-space normal
+    vec3 nObj = normalize(n0 * b0 + n1 * b1 + n2 * b2);
+
+    InstanceDataGPU inst = instances[instIdx];
+
+    // Assuming modelToWorld rows hold the 3x3 rotation/scale
+    mat3 m2w = mat3(inst.modelToWorld0.xyz,
+                    inst.modelToWorld1.xyz,
+                    inst.modelToWorld2.xyz);
+
+    vec3 nWorld = normalize(m2w * nObj);
+
+    return nWorld;
 }
 
 float getRoughness(uint instIdx, uint primIdx)
 {
-    ShadingTriangle tri = shadingTris[primIdx];
+    uint shadeIdx = instances[instIdx].bases0.z + primIdx;
+    ShadingTriangle tri = shadingTris[shadeIdx];
     vec4 texMat = tri.texture_materialId;
     uint materialIndex = floatBitsToUint(texMat.w) + instances[instIdx].bases0.w;
     MaterialGPU m = materials[materialIndex];
     return m.F0_ior_rough.w;
 }
 
-vec2 encodeMotion(vec4 currClip, vec4 prevClip, vec2 viewport)
+// Row-major 3x4 affine multiply (instance matrices are stored by rows)
+vec3 transformPointRowMajor(const InstanceDataGPU inst, vec3 p)
 {
-    // NDC
-    vec2 currNDC = currClip.xy / currClip.w;
-    vec2 prevNDC = prevClip.xy / prevClip.w;
-
-    // Pixel coordinates
-    vec2 currPix = (currNDC * 0.5 + 0.5) * viewport;
-    vec2 prevPix = (prevNDC * 0.5 + 0.5) * viewport;
-
-    // NRD expects MV.xy such that:
-    //   uvPrev = uvCurr + MV.xy * motionVectorScale.xy
-    // So we store (prev - curr) in pixels.
-    return prevPix - currPix;
+    return vec3(dot(inst.modelToWorld0.xyz, p) + inst.modelToWorld0.w,
+                dot(inst.modelToWorld1.xyz, p) + inst.modelToWorld1.w,
+                dot(inst.modelToWorld2.xyz, p) + inst.modelToWorld2.w);
 }
 
-const float SKY_VIEWZ = 1e30;
+// Barycentric position in object space using Moller triangle data (v0, v1-v0, v2-v0)
+vec3 getObjectPosition(uint triIndex, float baryU, float baryV)
+{
+    MollerTriangle tri = triangles[triIndex];
+
+    return tri.vertex_0.xyz
+         + baryU * tri.edge_vec1.xyz
+         + baryV * tri.edge_vec2.xyz;
+}
+
+void writeNrdInputs(uvec2 pixel)
+{
+    if (pixel.x >= Params.imageSize.x || pixel.y >= Params.imageSize.y)
+        return;
+
+    uint idx = pixel.x + pixel.y * Params.imageSize.x;
+
+    HitIds ids;
+    Hitdata hit;
+    RayData ray;
+    getWorldPosition(idx, ids, hit, ray);
+
+    // Miss / sky
+    if (ids.instanceIndex == INVALID_INSTANCE_INDEX) {
+        imageStore(nrdViewZ,           ivec2(pixel), vec4(65504.0, 0.0, 0.0, 0.0));
+        imageStore(nrdMotionVec,       ivec2(pixel), vec4(0.0, 0.0, 0.0, 0.0));
+        imageStore(nrdNormalRoughness, ivec2(pixel), vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    // If instanceIndices[] remaps, use it here instead
+    uint instIdx = ids.instanceIndex;
+    InstanceDataGPU instCurr = instances[instIdx];
+    InstanceDataGPU instPrev = prevInstances[instIdx];
+
+
+    // Object-space hit position from barycentrics
+    vec3 objPos = getObjectPosition(ids.primitiveIndex, hit.baryU, hit.baryV);
+
+    // World-space hit positions in current and previous frames
+    vec3 worldPosCurr = transformPointRowMajor(instCurr, objPos);
+    vec3 worldPosPrev = transformPointRowMajor(instPrev, objPos);
+
+    //===========================
+    // 1) View-space Z (current)
+    //===========================
+
+    // world -> view (current and previous)
+    vec4 viewPosCurr = prev.currV * vec4(worldPosCurr, 1.0);
+    vec4 viewPosPrev = prev.prevV * vec4(worldPosPrev, 1.0);
+
+    // Linear view Z, positive forward (flip sign if your convention differs)
+    float viewZCurr = -viewPosCurr.z;
+    float viewZPrev = -viewPosPrev.z;
+
+    imageStore(nrdViewZ, ivec2(pixel), vec4(viewZCurr, 0.0, 0.0, 0.0));
+
+    //===================================
+    // 2) Normal + Roughness
+    //===================================
+
+    vec3 nWorld = getWorldNormal(instIdx, ids.primitiveIndex, hit.baryU, hit.baryV);
+    float roughness = getRoughness(instIdx, ids.primitiveIndex);
+
+    imageStore(nrdNormalRoughness, ivec2(pixel), vec4(nWorld, roughness));
+
+    //===================================
+    // 3) 2.5D motion vector:
+    //    xy = prevUV - currUV
+    //    z  = prevViewZ - currViewZ
+    //===================================
+
+    // world -> clip
+    vec4 clipCurr = prev.currVP * vec4(worldPosCurr, 1.0);
+    vec4 clipPrev = prev.prevVP * vec4(worldPosPrev, 1.0);
+
+    // NDC [-1, 1]
+    vec2 ndcCurr = clipCurr.xy / clipCurr.w;
+    vec2 ndcPrev = clipPrev.xy / clipPrev.w;
+
+    // UV [0, 1]
+    vec2 uvCurr = ndcCurr * 0.5 + 0.5;
+    vec2 uvPrev = ndcPrev * 0.5 + 0.5;
+
+    // Rect size (in pixels)
+    vec2 rectSize = vec2(Params.imageSize);
+
+    // IN_MV.xy in *pixels* (matches NRD sample)
+    vec2 mvXY = (uvPrev - uvCurr) * rectSize;
+
+    // IN_MV.z in view-space units (same convention as IN_VIEWZ)
+    float mvZ = viewZPrev - viewZCurr;
+
+    imageStore(nrdMotionVec, ivec2(pixel), vec4(mvXY, mvZ, 0.0));
+}
 
 void main()
 {
-    uvec2 gid = gl_GlobalInvocationID.xy;
-    if (gid.x >= Params.imageSize.x || gid.y >= Params.imageSize.y)
-        return;
-
-    uint idx = gid.x + gid.y * Params.imageSize.x;
-
-    RayData rd   = primaryRays[idx];
-    HitIds hid   = primaryHitIds[idx];
-    Hitdata hd   = primaryHitdata[idx];
-
-    bool missed = (hid.primitiveIndex == 0xFFFFFFFFu);
-
-    // ---- WORLD POS (for hits) ----
-    vec3 worldPos = vec3(rd.origin) + vec3(rd.direction) * hd.worldT;
-    vec4 worldPos4 = vec4(worldPos, 1.0);
-
-    // ---- VIEW Z (current frame) ----
-    float viewZ;
-    if (!missed)
-    {
-        vec4 viewPos = currV * worldPos4;
-        viewZ = -viewPos.z;     // positive in front of camera
-    }
-    else
-    {
-        viewZ = SKY_VIEWZ;
-    }
-
-    viewZ = sanitizeViewZ(viewZ);
-    imageStore(nrdViewZ, ivec2(gid), vec4(viewZ, 0.0, 0.0, 0.0));
-
-    // ---- NORMAL / ROUGHNESS (unchanged) ----
-    vec4 nrOut = vec4(0.0);
-    if (!missed)
-    {
-        vec3 n = computeNormal(hid.instanceIndex, hid.primitiveIndex, hd.baryU, hd.baryV);
-        float rough = getRoughness(hid.instanceIndex, hid.primitiveIndex);
-        nrOut = vec4(normalize(n), rough);
-    }
-    nrOut = sanitizeNormalRoughness(nrOut);
-    imageStore(nrdNormalRoughness, ivec2(gid), nrOut);
-
-    // ---- 2.5D MOTION (MV.xy, MV.z) ----
-    vec2 mvPixels = vec2(0.0);
-    float zDelta = 0.0;
-
-    if (!missed)
-    {
-        // Non-jittered clip-space matrices from PrevCamBuf
-        vec4 currClip = currVP * worldPos4;
-        vec4 prevClip = prevVP * worldPos4;
-
-        // Screen-space motion in pixels: prev - curr
-        vec2 currNDC = currClip.xy / currClip.w;
-        vec2 prevNDC = prevClip.xy / prevClip.w;
-        vec2 currPix = (currNDC * 0.5 + 0.5) * vec2(Params.imageSize);
-        vec2 prevPix = (prevNDC * 0.5 + 0.5) * vec2(Params.imageSize);
-
-        mvPixels = prevPix - currPix;
-
-        // Sample previous frame viewZ (same convention as current)
-        ivec2 prevPixI = ivec2(clamp(prevPix, vec2(0.0), vec2(Params.imageSize) - vec2(1.0)));
-        float prevZ = imageLoad(prevViewZImage, prevPixI).x;
-
-        // Validate / skip sky etc.
-        if (prevZ < SKY_VIEWZ * 0.5)   // simple heuristic: treat near SKY_VIEWZ as sky
-        {
-            zDelta = prevZ - viewZ;    // 2.5D: viewZ_prev - viewZ_curr
-        }
-        else
-        {
-            mvPixels = vec2(0.0);
-            zDelta   = 0.0;
-        }
-    }
-
-    vec4 mvOut = sanitizeMotion(vec4(mvPixels, zDelta, 0.0));
-    imageStore(nrdMotionVec, ivec2(gid), mvOut);
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    writeNrdInputs(pixel);
 }

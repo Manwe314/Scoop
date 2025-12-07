@@ -23,7 +23,14 @@ layout(set = 1, binding = 3, std430) readonly buffer ParamsBuf {
     vec2  cameraJitterPrev;
 } Params;
 
-const uint FLAG_DEBUG_NRD_INPUTS = 1u << 19;
+struct HitIds {
+    uint instanceIndex;
+    uint primitiveIndex;
+};
+layout(set = 2, binding = 14, std430) buffer PrimaryHitIdsBuf  { HitIds    primaryHitIds[]; };
+
+const uint FLAG_DEBUG_NRD_VALIDATION = 1u << 19;
+const uint FLAG_DEBUG_NRD_INPUTS = 1u << 18;
 
 const float NRD_FP16_MAX = 65504.0;
 
@@ -81,8 +88,10 @@ vec3 fetchInput(uint idx, ivec2 samplePx)
     }
     if (idx == 4u)
     {
-        vec2 mv = sanitizeVec3(imageLoad(inMotion, samplePx).xyz, NRD_FP16_MAX).xy;
-        return visualizeMotion(mv);
+        return imageLoad(inMotion, samplePx).xyz;
+        // vec2 mv = sanitizeVec3(imageLoad(inMotion, samplePx).xyz, NRD_FP16_MAX).xy;
+        // return visualizeMotion(mv);
+
     }
     return vec3(0.0);
 }
@@ -94,18 +103,42 @@ void main()
         return;
 
     ivec2 pixel = ivec2(gid);
+    bool debugValidation = (Params.flags & FLAG_DEBUG_NRD_VALIDATION) != 0u;
     bool debugInputs = (Params.flags & FLAG_DEBUG_NRD_INPUTS) != 0u;
 
     vec3 color;
-    if (!debugInputs)
+    if (!debugValidation && !debugInputs)
     {
         vec3 diff = texelFetch(nrdOutDiff, pixel, 0).xyz;
         vec3 spec = texelFetch(nrdOutSpec, pixel, 0).xyz;
-        color = diff + spec;
+        if (primaryHitIds[gid.x + gid.y * Params.imageSize.x].instanceIndex == 0xFFFFFFFFu)
+            color = vec3(0.0);
+        else
+            color = diff + spec;
+    }
+    else if (debugValidation)
+    {
+        color = texelFetch(nrdValidation, pixel, 0).xyz;
     }
     else
     {
-        color = texelFetch(nrdValidation, pixel, 0).xyz;
+        const uvec2 grid = uvec2(3, 2);
+        uvec2 tileSize = (Params.imageSize + grid - 1u) / grid;
+        uvec2 tile     = gid / tileSize;
+
+        uint tileIndex = tile.x + tile.y * grid.x;
+        if (tile.x >= grid.x || tile.y >= grid.y || tileIndex >= 5u)
+        {
+            color = vec3(0.0);
+        }
+        else
+        {
+            uvec2 local = gid - tile * tileSize;
+            vec2 uv     = (vec2(local) + 0.5) / vec2(tileSize);
+            vec2 samplePos = uv * (vec2(Params.imageSize) - 1.0);
+            ivec2 samplePx = ivec2(clamp(samplePos, vec2(0.0), vec2(Params.imageSize) - 1.0));
+            color = fetchInput(tileIndex, samplePx);
+        }
     }
 
     imageStore(outImage, pixel, vec4(color, 1.0));

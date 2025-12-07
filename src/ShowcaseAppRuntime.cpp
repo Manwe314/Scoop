@@ -16,7 +16,8 @@ constexpr uint32_t B_INTERP_BITS     = 10;
 constexpr uint32_t B_INTERP_MAX      = (1u << B_INTERP_BITS) - 1u;
 constexpr uint32_t B_INTERP_MASK     = B_INTERP_MAX << B_INTERP_SHIFT;
 constexpr uint32_t MASK_INSTANCE_IDX = 0xFu; 
-constexpr uint32_t FLAG_DEBUG_NRD_INPUTS = 1u << 19;
+constexpr uint32_t FLAG_DEBUG_NRD_VALIDATION = 1u << 19;
+constexpr uint32_t FLAG_DEBUG_NRD_INPUTS     = 1u << 18;
 
 static inline uint32_t qpBase(uint32_t fi) { return fi * 4u; }
 static inline uint32_t qpGfxBegin(uint32_t fi){ return qpBase(fi) + 0; }
@@ -345,6 +346,10 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     const VkDeviceSize nodesBytes = VkDeviceSize(tlasNodes.size()) * sizeof(TLASNodeGPU);
     const VkDeviceSize instBytes  = VkDeviceSize(tlasInstances.size()) * sizeof(InstanceDataGPU);
     const VkDeviceSize idxBytes   = VkDeviceSize(instanceIndices.size()) * sizeof(uint32_t);
+    const auto& prevInstSrc = hasPrevInstanceData ? prevInstancesGPU : tlasInstances;
+    const auto& prevIdxSrc  = hasPrevInstanceData ? prevInstanceIndices : instanceIndices;
+    const VkDeviceSize prevInstBytes = VkDeviceSize(prevInstSrc.size()) * sizeof(InstanceDataGPU);
+    const VkDeviceSize prevIdxBytes  = VkDeviceSize(prevIdxSrc.size()) * sizeof(uint32_t);
 
     ensureBufferCapacity(tlasNodesBuf[frameIndex], tlasNodesMem[frameIndex], nodesBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -352,7 +357,13 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     ensureBufferCapacity(tlasInstBuf[frameIndex],  tlasInstMem[frameIndex],  instBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    ensureBufferCapacity(prevTlasInstBuf[frameIndex], prevTlasInstMem[frameIndex],  prevInstBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     ensureBufferCapacity(tlasIdxBuf[frameIndex],   tlasIdxMem[frameIndex],   idxBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    ensureBufferCapacity(prevTlasIdxBuf[frameIndex],   prevTlasIdxMem[frameIndex],   prevIdxBytes,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
@@ -365,6 +376,10 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     off = alignUp(off + instBytes,  A);
     const VkDeviceSize idxOff   = off;
     off = alignUp(off + idxBytes,   A);
+    const VkDeviceSize prevInstOff = off;
+    off = alignUp(off + prevInstBytes, A);
+    const VkDeviceSize prevIdxOff  = off;
+    off = alignUp(off + prevIdxBytes,  A);
     const VkDeviceSize total    = off;
 
     ensureUploadStagingCapacity(frameIndex, total);
@@ -375,6 +390,10 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
         std::memcpy(static_cast<char*>(frame.mapped) + instOff,  tlasInstances.data(), size_t(instBytes));
     if (idxBytes)
         std::memcpy(static_cast<char*>(frame.mapped) + idxOff,   instanceIndices.data(), size_t(idxBytes));
+    if (prevInstBytes)
+        std::memcpy(static_cast<char*>(frame.mapped) + prevInstOff, prevInstSrc.data(), size_t(prevInstBytes));
+    if (prevIdxBytes)
+        std::memcpy(static_cast<char*>(frame.mapped) + prevIdxOff,  prevIdxSrc.data(), size_t(prevIdxBytes));
     
 
     auto copyIf = [&](VkBuffer dst, VkDeviceSize size, VkDeviceSize srcOff)
@@ -388,6 +407,8 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     copyIf(tlasNodesBuf[frameIndex], nodesBytes, nodesOff);
     copyIf(tlasInstBuf[frameIndex],  instBytes,  instOff);
     copyIf(tlasIdxBuf[frameIndex],   idxBytes,   idxOff);
+    copyIf(prevTlasInstBuf[frameIndex], prevInstBytes, prevInstOff);
+    copyIf(prevTlasIdxBuf[frameIndex],  prevIdxBytes,  prevIdxOff);
 
     if constexpr (!SimpleRayTrace)
     {
@@ -431,6 +452,8 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
         addRel(tlasNodesBuf[frameIndex], nodesBytes);
         addRel(tlasInstBuf[frameIndex],  instBytes);
         addRel(tlasIdxBuf[frameIndex],   idxBytes);
+        addRel(prevTlasInstBuf[frameIndex], prevInstBytes);
+        addRel(prevTlasIdxBuf[frameIndex],  prevIdxBytes);
 
         if (!rels.empty())
         {
@@ -459,6 +482,8 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
         addVis(tlasNodesBuf[frameIndex], nodesBytes);
         addVis(tlasInstBuf[frameIndex],  instBytes);
         addVis(tlasIdxBuf[frameIndex],   idxBytes);
+        addVis(prevTlasInstBuf[frameIndex], prevInstBytes);
+        addVis(prevTlasIdxBuf[frameIndex],  prevIdxBytes);
 
         if (!vis.empty())
         {
@@ -471,9 +496,11 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     VkDescriptorBufferInfo b0{ tlasNodesBuf[frameIndex], 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo b1{ tlasInstBuf[frameIndex],  0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo b2{ tlasIdxBuf[frameIndex],   0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b3{ prevTlasInstBuf[frameIndex], 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo b4{ prevTlasIdxBuf[frameIndex],  0, VK_WHOLE_SIZE };
 
-    VkWriteDescriptorSet w[3]{};
-    for (int j = 0; j < 3; ++j)
+    VkWriteDescriptorSet w[5]{};
+    for (int j = 0; j < 5; ++j)
     {
         w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[j].descriptorCount = 1;
@@ -493,7 +520,19 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     w[2].dstBinding      = 2;
     w[2].pBufferInfo     = &b2;
 
-    vkUpdateDescriptorSets(device, 3, w, 0, nullptr);
+    // set 1, binding 19: prev TLAS instances
+    w[3].dstBinding      = 19;
+    w[3].pBufferInfo     = &b3;
+
+    // set 1, binding 20: prev TLAS indices
+    w[4].dstBinding      = 20;
+    w[4].pBufferInfo     = &b4;
+
+    vkUpdateDescriptorSets(device, 5, w, 0, nullptr);
+
+    prevInstancesGPU    = tlasInstances;
+    prevInstanceIndices = instanceIndices;
+    hasPrevInstanceData = true;
 }
 
 
@@ -719,7 +758,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     if (hasDedicatedTransfer && computeFamily != transferFamily)
     {
         std::vector<VkBufferMemoryBarrier> acqs;
-        acqs.reserve(3);
+        acqs.reserve(5);
         auto addAcq = [&](VkBuffer b)
         {
             if (!b) return;
@@ -736,6 +775,8 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         addAcq(tlasNodesBuf[i]);
         addAcq(tlasInstBuf[i]);
         addAcq(tlasIdxBuf[i]);
+        addAcq(prevTlasInstBuf[i]);
+        addAcq(prevTlasIdxBuf[i]);
 
         if (!acqs.empty())
         {
@@ -747,7 +788,7 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
     else
     {
         std::vector<VkBufferMemoryBarrier> vis;
-        vis.reserve(3);
+        vis.reserve(5);
         auto addVis = [&](VkBuffer b)
         {
             if (!b) return;
@@ -764,6 +805,8 @@ void ShowcaseApp::recordComputeCommands(uint32_t i)
         addVis(tlasNodesBuf[i]);
         addVis(tlasInstBuf[i]);
         addVis(tlasIdxBuf[i]);
+        addVis(prevTlasInstBuf[i]);
+        addVis(prevTlasIdxBuf[i]);
 
         if (!vis.empty())
         {
@@ -1170,29 +1213,33 @@ void ShowcaseApp::update(float dt)
         tr.rotation.z = wrapDeg(tr.rotation.z);
     }
 
-    static bool prevB     = false;
-    static bool prevRight = false;
-    static bool prevLeft  = false;
-    static bool prevEsc   = false;
-    static bool prevDebug = false;
+    static bool prevB      = false;
+    static bool prevRight  = false;
+    static bool prevLeft   = false;
+    static bool prevEsc    = false;
+    static bool prevDebugN = false;
+    static bool prevDebugM = false;
 
-    int bState     = glfwGetKey(window.handle(), GLFW_KEY_B);
-    int rightState = glfwGetKey(window.handle(), GLFW_KEY_PERIOD);
-    int leftState  = glfwGetKey(window.handle(), GLFW_KEY_COMMA);
-    int escState   = glfwGetKey(window.handle(), GLFW_KEY_ESCAPE);
-    int debugState = glfwGetKey(window.handle(), GLFW_KEY_N);
+    int bState      = glfwGetKey(window.handle(), GLFW_KEY_B);
+    int rightState  = glfwGetKey(window.handle(), GLFW_KEY_PERIOD);
+    int leftState   = glfwGetKey(window.handle(), GLFW_KEY_COMMA);
+    int escState    = glfwGetKey(window.handle(), GLFW_KEY_ESCAPE);
+    int debugNState = glfwGetKey(window.handle(), GLFW_KEY_N);
+    int debugMState = glfwGetKey(window.handle(), GLFW_KEY_M);
 
-    bool bPressed     = (bState     == GLFW_PRESS && !prevB);
-    bool rightPressed = (rightState == GLFW_PRESS && !prevRight);
-    bool leftPressed  = (leftState  == GLFW_PRESS && !prevLeft);
-    bool escPressed   = (escState   == GLFW_PRESS && !prevEsc);
-    bool debugPressed = (debugState == GLFW_PRESS && !prevDebug);
+    bool bPressed      = (bState      == GLFW_PRESS && !prevB);
+    bool rightPressed  = (rightState  == GLFW_PRESS && !prevRight);
+    bool leftPressed   = (leftState   == GLFW_PRESS && !prevLeft);
+    bool escPressed    = (escState    == GLFW_PRESS && !prevEsc);
+    bool debugNPressed = (debugNState == GLFW_PRESS && !prevDebugN);
+    bool debugMPressed = (debugMState == GLFW_PRESS && !prevDebugM);
 
-    prevB     = (bState     == GLFW_PRESS);
-    prevRight = (rightState == GLFW_PRESS);
-    prevLeft  = (leftState  == GLFW_PRESS);
-    prevEsc   = (escState   == GLFW_PRESS);
-    prevDebug = (debugState == GLFW_PRESS);
+    prevB      = (bState      == GLFW_PRESS);
+    prevRight  = (rightState  == GLFW_PRESS);
+    prevLeft   = (leftState   == GLFW_PRESS);
+    prevEsc    = (escState    == GLFW_PRESS);
+    prevDebugN = (debugNState == GLFW_PRESS);
+    prevDebugM = (debugMState == GLFW_PRESS);
 
     if (!bTransitionActive && bPressed)
     {
@@ -1230,8 +1277,19 @@ void ShowcaseApp::update(float dt)
     if (escPressed)
         selectedInstance = -1;
 
-    if (debugPressed)
+    if (debugNPressed)
+    {
+        debugNrdValidation = !debugNrdValidation;
+        if (debugNrdValidation)
+            debugNrdInputs = false;
+    }
+
+    if (debugMPressed)
+    {
         debugNrdInputs = !debugNrdInputs;
+        if (debugNrdInputs)
+            debugNrdValidation = false;
+    }
 
     if (rightPressed)
     {
@@ -1371,9 +1429,9 @@ void ShowcaseApp::updateNRDCommonSettings(float dt)
     // This must be a monotonically increasing frame counter
     common.frameIndex       = nrdFrameIndex++;
     common.accumulationMode = nrd::AccumulationMode::CONTINUE;
+    common.denoisingRange = 60000.0f;
 
     // Disocclusion + range – tweak these later
-    common.denoisingRange          = 500000.0f;
     common.disocclusionThreshold   = 0.01f;
     common.disocclusionThresholdAlternate = 0.05f;
 
@@ -1614,6 +1672,9 @@ void ShowcaseApp::run()
 
         if (viewFaces)
             flags |= FLAG_B;
+
+        if (debugNrdValidation)
+            flags |= FLAG_DEBUG_NRD_VALIDATION;
 
         if (debugNrdInputs)
             flags |= FLAG_DEBUG_NRD_INPUTS;

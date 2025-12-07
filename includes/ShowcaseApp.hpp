@@ -232,7 +232,7 @@ private:
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
     VkExtent2D rayTraceExtent;
-    float resolutionScale = 0.5f;
+    float resolutionScale = 0.6f;
     bool hasMoved = true;
 
     std::vector<VkImageView> swapChainImageViews;
@@ -440,9 +440,13 @@ private:
 
     VkBuffer       tlasInstBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory tlasInstMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkBuffer       prevTlasInstBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory prevTlasInstMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkBuffer       tlasIdxBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
     VkDeviceMemory tlasIdxMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkBuffer       prevTlasIdxBuf[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
+    VkDeviceMemory prevTlasIdxMem[SwapChain::MAX_FRAMES_IN_FLIGHT]{};
 
     VkCommandPool graphicsCommandPool = VK_NULL_HANDLE;
     VkCommandPool computeCommandPool = VK_NULL_HANDLE;
@@ -483,6 +487,9 @@ private:
     Scene scene;
     TLAS topLevelAS;
     std::vector<InstanceData> instances;
+    std::vector<InstanceDataGPU> prevInstancesGPU;
+    std::vector<uint32_t> prevInstanceIndices;
+    bool hasPrevInstanceData = false;
     std::vector<SBVHNode> SBVHNodes;
     std::vector<MollerTriangle> intersectionTrinagles;
     std::vector<ShadingTriangle> shadingTriangles;
@@ -505,6 +512,7 @@ private:
     void onChar(uint32_t cp);
     void onKey (int key, int action, int mods);
     bool viewFaces = false;
+    bool debugNrdValidation = false;
     bool debugNrdInputs = false;
     int selectedInstance = -1;
     bool bTransitionActive = false;

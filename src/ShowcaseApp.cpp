@@ -897,8 +897,12 @@ ShowcaseApp::~ShowcaseApp()
         if (tlasNodesMem[i]) vkFreeMemory(device, tlasNodesMem[i], nullptr);
         if (tlasInstBuf[i])  vkDestroyBuffer(device, tlasInstBuf[i], nullptr);
         if (tlasInstMem[i])  vkFreeMemory(device, tlasInstMem[i], nullptr);
+        if (prevTlasInstBuf[i])  vkDestroyBuffer(device, prevTlasInstBuf[i], nullptr);
+        if (prevTlasInstMem[i])  vkFreeMemory(device, prevTlasInstMem[i], nullptr);
         if (tlasIdxBuf[i])   vkDestroyBuffer(device, tlasIdxBuf[i], nullptr);
         if (tlasIdxMem[i])   vkFreeMemory(device, tlasIdxMem[i], nullptr);
+        if (prevTlasIdxBuf[i])   vkDestroyBuffer(device, prevTlasIdxBuf[i], nullptr);
+        if (prevTlasIdxMem[i])   vkFreeMemory(device, prevTlasIdxMem[i], nullptr);
         auto& f = frameUpload[i];
 
         if (f.mapped) { vkUnmapMemory(device, f.stagingMem); f.mapped = nullptr; }
@@ -2219,7 +2223,7 @@ void ShowcaseApp::createNrdTargets()
         ci.arrayLayers   = 1;
         ci.samples       = VK_SAMPLE_COUNT_1_BIT;
         ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        ci.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ci.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         // Queue sharing like before (graphics + compute)
@@ -2364,11 +2368,10 @@ void ShowcaseApp::initNRD()
     
     nri::DeviceCreationVKDesc deviceVKDesc{};
     const nrd::LibraryDesc* libDesc = nrd::GetLibraryDesc();
-    deviceVKDesc.vkBindingOffsets.samplerOffset               = libDesc->spirvBindingOffsets.samplerOffset;
-    deviceVKDesc.vkBindingOffsets.textureOffset               = libDesc->spirvBindingOffsets.textureOffset;
-    deviceVKDesc.vkBindingOffsets.constantBufferOffset        = libDesc->spirvBindingOffsets.constantBufferOffset;
-    deviceVKDesc.vkBindingOffsets.storageTextureAndBufferOffset =
-        libDesc->spirvBindingOffsets.storageTextureAndBufferOffset;
+    deviceVKDesc.vkBindingOffsets.samplerOffset                 = libDesc->spirvBindingOffsets.samplerOffset;
+    deviceVKDesc.vkBindingOffsets.textureOffset                 = libDesc->spirvBindingOffsets.textureOffset;
+    deviceVKDesc.vkBindingOffsets.constantBufferOffset          = libDesc->spirvBindingOffsets.constantBufferOffset;
+    deviceVKDesc.vkBindingOffsets.storageTextureAndBufferOffset = libDesc->spirvBindingOffsets.storageTextureAndBufferOffset;
 
     // --- Extensions: tell NRI what we actually enabled on the Vulkan device ---
     deviceVKDesc.vkExtensions.deviceExtensions      = deviceExtensions.data();
@@ -2629,7 +2632,7 @@ void ShowcaseApp::createComputeDescriptors()
     }
     else
     {
-        set1.resize(19);
+        set1.resize(21);
         initSet1(set1[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS nodes
         initSet1(set1[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS instances
         initSet1(set1[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // TLAS indices
@@ -2649,6 +2652,8 @@ void ShowcaseApp::createComputeDescriptors()
         initSet1(set1[16], 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev view/proj data
         initSet1(set1[17], 17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT); // prev viewZ image
         initSet1(set1[18], 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT); // NRD OUT_VALIDATION
+        initSet1(set1[19], 19, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev instances
+        initSet1(set1[20], 20, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // prev instance indices
     }
 
     VkDescriptorSetLayoutCreateInfo frameLayoutCreateInfo{ };
@@ -2705,7 +2710,7 @@ void ShowcaseApp::createComputeDescriptors()
     poolSizes[0].descriptorCount = 10 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[1].descriptorCount = 35 * SwapChain::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[1].descriptorCount = 37 * SwapChain::MAX_FRAMES_IN_FLIGHT;
 
     poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[2].descriptorCount = maxTextures + 5 * SwapChain::MAX_FRAMES_IN_FLIGHT;
