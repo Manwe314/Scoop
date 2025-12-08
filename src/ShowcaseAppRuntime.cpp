@@ -499,36 +499,41 @@ void ShowcaseApp::uploadTLASForFrame(uint32_t frameIndex,
     VkDescriptorBufferInfo b3{ prevTlasInstBuf[frameIndex], 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo b4{ prevTlasIdxBuf[frameIndex],  0, VK_WHOLE_SIZE };
 
-    VkWriteDescriptorSet w[5]{};
-    for (int j = 0; j < 5; ++j)
+    std::array<VkWriteDescriptorSet, 5> w{};
+    auto initWrite = [&](VkWriteDescriptorSet& write, uint32_t binding, VkDescriptorBufferInfo* info)
     {
-        w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[j].descriptorCount = 1;
-        w[j].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[j].dstSet          = computeFrameSets[frameIndex];
-    }
+        write = {};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.dstSet          = computeFrameSets[frameIndex];
+        write.dstBinding      = binding;
+        write.pBufferInfo     = info;
+    };
 
     // set 1, binding 0: TLAS nodes
-    w[0].dstBinding      = 0;
-    w[0].pBufferInfo     = &b0;
+    initWrite(w[0], 0, &b0);
 
     // set 1, binding 1: TLAS instances
-    w[1].dstBinding      = 1;
-    w[1].pBufferInfo     = &b1;
+    initWrite(w[1], 1, &b1);
 
     // set 1, binding 2: TLAS indices
-    w[2].dstBinding      = 2;
-    w[2].pBufferInfo     = &b2;
+    initWrite(w[2], 2, &b2);
 
-    // set 1, binding 19: prev TLAS instances
-    w[3].dstBinding      = 19;
-    w[3].pBufferInfo     = &b3;
+    uint32_t writeCount = 3;
 
-    // set 1, binding 20: prev TLAS indices
-    w[4].dstBinding      = 20;
-    w[4].pBufferInfo     = &b4;
+    if constexpr (!SimpleRayTrace)
+    {
+        // set 1, binding 19: prev TLAS instances
+        initWrite(w[3], 19, &b3);
 
-    vkUpdateDescriptorSets(device, 5, w, 0, nullptr);
+        // set 1, binding 20: prev TLAS indices
+        initWrite(w[4], 20, &b4);
+
+        writeCount = 5;
+    }
+
+    vkUpdateDescriptorSets(device, writeCount, w.data(), 0, nullptr);
 
     prevInstancesGPU    = tlasInstances;
     prevInstanceIndices = instanceIndices;

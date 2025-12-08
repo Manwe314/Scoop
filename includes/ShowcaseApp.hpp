@@ -35,7 +35,7 @@
 
 #define VALIDATE true
 #define FPS false
-static constexpr bool SimpleRayTrace = false;
+static constexpr bool SimpleRayTrace = true;
 
 struct alignas(16) PrevCamData {
     Mat4 prevV;
