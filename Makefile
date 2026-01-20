@@ -36,7 +36,7 @@ ensure-vulkan:
 	  cmd="source $(ENSURE_ENV) "$(VULKAN_SETUP)" && $(MAKE) $$quoted_goals"
 
 	  echo "Warrning: by pressing Enter you'll only set SDK for make's shell and will have to re source on other runs"
-	  echo "If you want to set SDK for this sesion press Ctrl+C and then just press Ctrl+Shift+V to run the comman manually"
+	  echo "If you want to set SDK for this sesion press Ctrl+C and then just press Ctrl+Shift+V to run the command manually"
 	  echo "Ready to run in your terminal:"
 	  echo "    $$cmd"
 	  copy_clip "$$cmd"
